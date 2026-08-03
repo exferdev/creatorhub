@@ -34,6 +34,8 @@ class DouyinAccount(SQLModel, table=True):
     geo_lat: float = 0.0          # geolocation 伪造纬度(代理体检时按出口 IP 归属地写入;0=按种子派生兜底)
     geo_lon: float = 0.0          # geolocation 伪造经度
     proxy_status: str = "unknown"  # unknown | ok | bad
+    cookie_status: str = "unknown" # unknown | valid | expired | checking
+    last_health_check: Optional[datetime] = None  # 上次 cookie 探活时间
     last_active_at: Optional[datetime] = None  # 上次活跃(用于错峰调度)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -151,6 +153,7 @@ class PublishTask(SQLModel, table=True):
     """多平台发布任务(可定时、可来自跨平台作品转发)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
     platform: str = Field(default="xhs", index=True)   # xhs | douyin | kuaishou | shipinhao
+    publish_type: str = "simulation"                   # simulation(浏览器模拟) | protocol(协议直发)
     account_id: Optional[int] = None                   # 用哪个已登录账号发布
     media_type: str = "images"                         # images | video
     title: str = ""                                    # 标题(各平台上限不同)

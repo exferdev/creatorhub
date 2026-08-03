@@ -1201,6 +1201,12 @@ async function refreshAccounts() {
     const proxyLine = a.has_proxy
       ? `<div class="mut" style="font-size:11px;margin-top:2px">代理 <code>${esc(a.proxy)}</code> <span class="pill ${pxCls}">${pxText[a.proxy_status] || a.proxy_status}</span></div>`
       : `<div class="ic-text" style="font-size:11px;margin-top:2px;color:var(--warn)">${ic("i-info")}未配置代理(走本机真实 IP,多账号有关联风险)</div>`;
+    const ckStatus = a.cookie_status || "unknown";
+    const ckCls = ckStatus === "valid" ? "active" : ckStatus === "expired" ? "invalid" : "bare";
+    const ckText = { valid: "Cookie正常", expired: "Cookie失效", checking: "检测中", unknown: "" }[ckStatus] || ckStatus;
+    const ckLine = a.platform === "douyin" && ckStatus !== "unknown"
+      ? `<div style="font-size:11px;margin-top:2px">Cookie <span class="pill ${ckCls}">${ckText}</span>${a.last_health_check ? ` 上次检测:${new Date(a.last_health_check).toLocaleString()}` : ""}</div>`
+      : "";
     return `<tr>
       <td>
         <div class="user-cell">
@@ -1210,6 +1216,7 @@ async function refreshAccounts() {
             ${idline ? `<div class="mut" style="font-size:11px;margin-top:2px">${idline}</div>` : ""}
             <div class="mut" style="font-size:11px;margin-top:2px">${esc(detail)}</div>
             ${proxyLine}
+            ${ckLine}
           </div>
         </div>
       </td>
@@ -1223,6 +1230,7 @@ async function refreshAccounts() {
         <button class="ghost sm" onclick="openAccountBrowser(${a.id})" title="用该账号登录态弹出真实浏览器窗口,手动收发私信 / 维护 / 抓接口(关窗即保存)">打开浏览器</button>
         <button class="ghost sm" onclick="setProxy(${a.id})" title="设置/分配该账号专属代理(防多账号关联)">代理</button>
         ${a.has_proxy ? `<button class="ghost sm" onclick="testProxy(${a.id})" title="经该代理实连一次,验证可用">测代理</button>` : ""}
+        ${a.platform === "douyin" ? `<button class="ghost sm" onclick="checkCookieHealth(${a.id})" title="检测该账号创作者 Cookie 是否有效">探活</button>` : ""}
         <button class="ghost sm" onclick="delAccount(${a.id})" aria-label="删除账号">删除</button>
       </td>
     </tr>`;
@@ -1861,6 +1869,15 @@ async function assignAllProxies() {
     refreshAccounts(); refreshProxies();
   } catch (e) { toast("分配失败:" + e.message, "err"); }
   finally { if (btn) { btn.disabled = false; btn.textContent = "给账号批量分配"; } }
+}
+async function checkCookieHealth(id) {
+  const btn = event.target.closest("button"); btn.disabled = true; const old = btn.textContent; btn.textContent = "探活中…";
+  try {
+    const r = await api("/api/accounts/" + id + "/check-health", { method: "POST" });
+    toast(r.valid ? `Cookie 有效 ✓ (${r.status})` : `Cookie 已失效: ${r.error || ""}`, r.valid ? "ok" : "err", 5000);
+    refreshAccounts();
+  } catch (e) { toast("探活失败:" + e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = old; }
 }
 async function testProxy(id) {
   const btn = event.target.closest("button"); btn.disabled = true; const old = btn.textContent; btn.textContent = "测试中…";
@@ -3080,6 +3097,15 @@ function onPubType() {
   else { inp.accept = "image/*"; inp.multiple = true; lbl.textContent = "选择图片(可多选,最多 18 张)"; }
   pubFilesClear();
 }
+function onPubMethodChange() {
+  const sel = $("pub-publish-type"); if (!sel) return;
+  const hint = $("pub-hint"); if (!hint) return;
+  const dy = PLATFORM === "douyin";
+  if (!dy) return;
+  hint.textContent = sel.value === "protocol"
+    ? "协议直发:通过后台 8 步协议流程发布(走浏览器真实 TLS 指纹,无需弹窗操作,签名引擎首次约 15s 冷启动)。批量/定时发布的推荐方式。"
+    : "发布通过自动化抖音创作平台(creator.douyin.com)完成,会弹出浏览器窗口。首次或触发风控时抖音会要求「短信验证码/扫码」验证,请在弹出窗口里手动完成(最多等 5 分钟,验证通过后自动继续发布);视频上传后需等转码,发布稍慢。⚠️ 因需本人验证,定时/无人值守发布可能被此步骤挡住,建议发布时在场。";
+}
 function pubFilesClear() { pubFilesDT = new DataTransfer(); _pubSync(); }
 function _pubSync() { const inp = $("pub-files"); if (inp) inp.files = pubFilesDT.files; renderPubFiles(); }
 function pubAddFiles(files) {
@@ -3129,9 +3155,12 @@ async function addPublish() {
       const up = await ur.json();
       const paths = (up.files || []).map(f => f.path);
       const when = $("pub-when").value || null;
+      const pubType = (PLATFORM === "douyin" && $("pub-publish-type")) ? $("pub-publish-type").value : "simulation";
       await api("/api/publish", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account_id: +acc, media_type: $("pub-type").value, title: $("pub-title").value.trim(), desc: $("pub-desc").value, topics: $("pub-topics").value.trim(), media_paths: paths, scheduled_at: when,
+        body: JSON.stringify({ account_id: +acc, media_type: $("pub-type").value, publish_type: pubType,
+          title: $("pub-title").value.trim(), desc: $("pub-desc").value, topics: $("pub-topics").value.trim(),
+          media_paths: paths, scheduled_at: when,
           location: $("pub-location") ? $("pub-location").value.trim() : "",
           visibility: $("pub-visibility") ? $("pub-visibility").value : "public",
           allow_save: $("pub-allowsave") ? $("pub-allowsave").value !== "0" : true }),

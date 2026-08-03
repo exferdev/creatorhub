@@ -129,6 +129,7 @@ class MonitorEngine:
         self._inflight: set = set()           # 正在抓取的目标,避免同目标并发
         self._publish_sem = asyncio.Semaphore(1)   # 发布串行(有头浏览器,一次一个)
         self._publishing: set[int] = set()
+        self._cookie_health_last: float = 0.0  # 上次 cookie 巡检时间戳
         self._commenting: set[int] = set()         # 正在执行的评论任务 id
         self._actioning: set[int] = set()           # 正在执行的写操作任务 id
         self._last_acct_check = time.time()   # 上次账号体检时间
@@ -186,6 +187,7 @@ class MonitorEngine:
                 await self._process_comment_rules()
                 await self._process_comment_tasks()
                 await self._process_action_tasks()
+                await self._cookie_health_check()
             except Exception as e:
                 log.exception("scan loop error: %s", e)
             await asyncio.sleep(15)
@@ -1357,6 +1359,8 @@ class MonitorEngine:
             visibility, allow_save = t.visibility, t.allow_save
             location = getattr(t, "location", "") or ""
             platform = t.platform
+            publish_type = getattr(t, "publish_type", "simulation") or "simulation"
+            acc_id = t.account_id or 0
             files = _loads_list(t.media_json)
             t.status = "publishing"; t.error = ""
             s.add(t); s.commit()
@@ -1389,7 +1393,30 @@ class MonitorEngine:
             return await self._finish_publish(task_id, ok, url, err, platform="shipinhao")
 
         if platform == "douyin":
-            # 抖音发布:同快手走浏览器自动化,登录态在该账号持久 profile 里
+            if publish_type == "protocol":
+                if not state:
+                    return await self._finish_publish(
+                        task_id, False, "", "该账号未完成抖音「创作者登录」,请先在账号页点「创作者登录」")
+                # 发布前 cookie 探活（协议模式需要有效的创作者会话）
+                from .cookie_health import check_cookie_health as _chk
+                health = await asyncio.to_thread(_chk, state, publish_required=True)
+                if not health.get("valid"):
+                    self._mark_cookie_health(acc_id, "expired")
+                    return await self._finish_publish(
+                        task_id, False, "",
+                        f"创作者登录态已失效: {health.get('error','')[:100]} — 请重新「创作者登录」")
+                try:
+                    from ..platforms.douyin.protocol_publish import publish_douyin_protocol
+                    ok, item_id, err = await publish_douyin_protocol(
+                        self.browser, identity, acc_id, state,
+                        media_type, title, desc, files,
+                        topics=topics, visibility=visibility,
+                        allow_save=allow_save)
+                    url = f"https://www.douyin.com/video/{item_id}" if (ok and item_id) else ""
+                except Exception as e:
+                    ok, url, err = False, "", f"协议发布异常: {type(e).__name__}: {e!r}"
+                return await self._finish_publish(task_id, ok, url, err, platform="douyin")
+            # simulation 模式:同快手走浏览器自动化
             if not state:
                 return await self._finish_publish(
                     task_id, False, "", "该账号未完成抖音「创作者登录」,请先在账号页点「创作者登录」")
@@ -1435,6 +1462,54 @@ class MonitorEngine:
             except Exception:
                 pass
         return {"ok": ok, "url": url, "error": err}
+
+    @staticmethod
+    def _mark_cookie_health(account_id: int, status: str):
+        """更新账号 cookie 状态。"""
+        try:
+            with get_session() as s:
+                acc = s.get(DouyinAccount, account_id)
+                if acc:
+                    acc.cookie_status = status
+                    from datetime import datetime
+                    acc.last_health_check = datetime.utcnow()
+                    s.add(acc); s.commit()
+        except Exception:
+            pass
+
+    async def _cookie_health_check(self):
+        """每 30 分钟巡检一次 douyin 账号的 creator cookie 有效性。"""
+        import time
+        now = time.time()
+        if now - self._cookie_health_last < 1800:
+            return
+        self._cookie_health_last = now
+
+        from .cookie_health import check_cookie_health as _chk
+        try:
+            with get_session() as s:
+                accs = s.exec(
+                    select(DouyinAccount)
+                    .where(DouyinAccount.platform == "douyin")
+                    .where(DouyinAccount.status == "active")
+                ).all()
+                candidates = [(a.id, a.creator_storage_state) for a in accs
+                              if a.creator_storage_state]
+            if not candidates:
+                return
+            print(f"[cookie-health] 巡检 {len(candidates)} 个抖音账号的创作者 cookie")
+            for acc_id, state in candidates:
+                try:
+                    health = await asyncio.to_thread(_chk, state, publish_required=False)
+                    if health.get("valid"):
+                        self._mark_cookie_health(acc_id, "valid")
+                    else:
+                        print(f"[cookie-health] 账号 #{acc_id} cookie 失效: {health.get('error','')[:80]}")
+                        self._mark_cookie_health(acc_id, "expired")
+                except Exception as e:
+                    print(f"[cookie-health] 账号 #{acc_id} 探活异常: {e!r}")
+        except Exception as e:
+            print(f"[cookie-health] 巡检异常: {e!r}")
 
     # ── 活跃时段(夜间静默)──
     def _in_active_window(self) -> bool:

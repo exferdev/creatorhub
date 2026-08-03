@@ -245,20 +245,17 @@ def start(
             daemon=True,
         ).start()
 
-    command: list[str | Path] = [
-        python,
-        "-m",
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        selected_host,
-        "--port",
-        str(selected_port),
-    ]
-    if reload:
-        command.append("--reload")
-
     log(f"启动中，按 Ctrl+C 停止；访问地址：{url}")
+
+    command: list[str | Path] = [
+        python, "-m", "uvicorn", "app.main:app",
+        "--host", selected_host, "--port", str(selected_port),
+    ]
+    if reload and sys.platform != "win32":
+        command.append("--reload")
+    elif reload:
+        log("Windows 不支持 --reload（与 Playwright 子进程不兼容），已自动关闭。修改代码后请手动 Ctrl+C 重启。")
+
     run(command)
 
 

@@ -120,6 +120,9 @@ async def lifespan(app: FastAPI):
     engine.start()
     from .engine.im_receiver import ImReceiverManager
     im_receiver = ImReceiverManager(browser)
+    # 预加载 V8 签名引擎（抖音协议发布用，约 15s）
+    from .platforms.douyin.signer import ensure_ready
+    ensure_ready()
     yield
     if im_receiver:
         await im_receiver.stop_all()
@@ -330,8 +333,23 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
         else:
             ok, state_json, nickname = await interactive_login(browser, identity)
 
-        # 3) 仅在成功时落库
+        # 3) 仅在成功且 cookie 探活通过时才落库
         if ok and state_json:
+            from .engine.cookie_health import check_cookie_health as _login_chk
+            health = await asyncio.to_thread(_login_chk, state_json, publish_required=creator)
+            if not health.get("valid"):
+                msg = health.get("error", "cookie 验证失败")[:120]
+                print(f"[login] cookie 探活失败: {msg}")
+                if fresh_account and tmp_profile:
+                    try:
+                        await browser.close_context(identity.key)
+                    except Exception:
+                        pass
+                    shutil.rmtree(tmp_profile, ignore_errors=True)
+                login_tasks[task_id] = {"status": "error",
+                                        "error": f"登录态无效: {msg} — 请关闭窗口后重试，或重新扫码"}
+                return
+
             is_xhs = platform == "xhs"
             with get_session() as s:
                 if account_id:
@@ -347,10 +365,9 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                     s.add(acc); s.commit(); s.refresh(acc); acc_id = acc.id
                 if creator:
                     acc.creator_storage_state = state_json
-                    if not is_xhs or not acc.storage_state:   # xhs 创作登录不覆盖读取态
+                    if not is_xhs or not acc.storage_state:
                         acc.storage_state = state_json
                 elif platform == "shipinhao":
-                    # 视频号一套登录态即读取又发布,两处都写
                     acc.storage_state = state_json
                     acc.creator_storage_state = state_json
                 else:
@@ -358,6 +375,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 if nickname:
                     acc.nickname = nickname
                 acc.status = "active"
+                acc.cookie_status = "valid"
+                acc.last_health_check = datetime.utcnow()
                 s.add(acc); s.commit()
 
             # 登录态已经持久化且账号已经落库：立即通知前端把账号显示出来。
@@ -375,6 +394,17 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 login_tasks[task_id] = {"status": "confirmed", "account_id": acc_id,
                                         "nickname": acc.nickname if acc else (nickname or nm),
                                         "profile_status": profile_status}
+        elif state_json and account_id:
+            # 未扫码但浏览器已打开/关闭过:更新 cookie 快照到 DB
+            with get_session() as s:
+                acc = s.get(DouyinAccount, account_id)
+                if acc:
+                    if creator:
+                        acc.creator_storage_state = state_json
+                    else:
+                        acc.storage_state = state_json
+                    s.add(acc); s.commit()
+            login_tasks[task_id] = {"status": "expired"}
         else:
             if fresh_account and tmp_profile:   # 没建账号,清理临时 profile
                 try:
@@ -528,6 +558,8 @@ async def list_accounts(platform: str | None = None):
                 "has_creator": bool(a.creator_storage_state) or has_creator_cookies(a.storage_state),
                 "kind": "creator" if (a.creator_storage_state or has_creator_cookies(a.storage_state)) else "fetch",
                 "has_storage": bool(a.storage_state),
+                "cookie_status": getattr(a, "cookie_status", "unknown") or "unknown",
+                "last_health_check": a.last_health_check.isoformat() if a.last_health_check else None,
                 "login_type": "cookie" if a.cookie else "scan",
                 "monitor_count": used,
                 # 风控隔离画像
@@ -620,6 +652,29 @@ async def relogin_start(account_id: int):
                                    platform=platform))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开浏览器窗口,请扫码重新登录该账号"}
+
+
+@app.post("/api/accounts/{account_id}/check-health")
+async def check_account_health_endpoint(account_id: int):
+    """探活指定账号的创作者 cookie 有效性。"""
+    from .engine.cookie_health import check_cookie_health as _chk
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if not acc:
+            raise HTTPException(404, "账号不存在")
+        state = acc.creator_storage_state or acc.storage_state or ""
+    if not state:
+        return {"ok": False, "valid": False, "error": "no cookie state"}
+    health = await asyncio.to_thread(_chk, state, publish_required=True)
+    status = "valid" if health.get("valid") else "expired"
+    with get_session() as s:
+        acc2 = s.get(DouyinAccount, account_id)
+        if acc2:
+            acc2.cookie_status = status
+            acc2.last_health_check = datetime.utcnow()
+            s.add(acc2); s.commit()
+    return {"ok": True, "valid": health.get("valid"), "status": status,
+            "error": health.get("error", "") if not health.get("valid") else ""}
 
 
 # ─────────── 本账号管理:作品 ───────────
@@ -1188,8 +1243,30 @@ async def open_account_browser(account_id: int, url: str = ""):
     except Exception as e:
         raise HTTPException(500, f"打开浏览器失败: {e!r}")
     open_browsers[account_id] = ctx
-    try:                       # 用户手动关窗后,从登记表移除
-        ctx.on("close", lambda *_: open_browsers.pop(account_id, None))
+
+    async def _on_close():
+        """用户关窗时抓取当前 cookie 快照并更新 DB。"""
+        try:
+            state = await ctx.storage_state()
+            state_json = json.dumps(state)
+        except Exception:
+            state_json = ""
+        if state_json:
+            try:
+                with get_session() as s:
+                    acc2 = s.get(DouyinAccount, account_id)
+                    if acc2:
+                        if acc2.creator_storage_state:
+                            acc2.creator_storage_state = state_json
+                        else:
+                            acc2.storage_state = state_json
+                        s.add(acc2); s.commit()
+            except Exception as e:
+                print(f"[open-browser] 关窗保存 Cookie 失败: {e!r}")
+        open_browsers.pop(account_id, None)
+
+    try:
+        ctx.on("close", lambda *_: asyncio.ensure_future(_on_close()))
     except Exception:
         pass
     return {"ok": True}
@@ -3096,6 +3173,7 @@ async def publish_upload(files: list[UploadFile] = File(...)):
 class PublishIn(BaseModel):
     account_id: int
     media_type: str = "images"            # images | video
+    publish_type: str = "simulation"       # simulation(浏览器模拟) | protocol(协议直发,仅douyin)
     title: str = ""
     desc: str = ""
     topics: str = ""
@@ -3120,6 +3198,7 @@ class PublishUpdate(BaseModel):
 def _publish_dict(t: PublishTask) -> dict:
     return {
         "id": t.id, "platform": t.platform, "account_id": t.account_id,
+        "publish_type": getattr(t, "publish_type", "simulation") or "simulation",
         "media_type": t.media_type, "title": t.title, "desc": t.desc,
         "topics": t.topics, "location": t.location,
         "status": t.status, "result_url": t.result_url,
@@ -3170,8 +3249,10 @@ async def add_publish(body: PublishIn):
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
         vis = body.visibility if body.visibility in ("public", "friends", "private") else "public"
+        pub_type = body.publish_type if body.publish_type in ("simulation", "protocol") else "simulation"
         t = PublishTask(
-            platform=acc.platform, account_id=body.account_id, media_type=body.media_type,
+            platform=acc.platform, publish_type=pub_type, account_id=body.account_id,
+            media_type=body.media_type,
             title=body.title.strip()[:20], desc=body.desc, topics=body.topics,
             location=(body.location or "").strip()[:60],
             visibility=vis, allow_save=bool(body.allow_save),

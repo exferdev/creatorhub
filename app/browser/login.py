@@ -30,7 +30,10 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
     在账号专属持久 profile(独立 UA/视口/时区/代理/指纹)里有头扫码,
     登录态直接落盘到该 profile;同时返回 storage_state 供库内展示/兜底。
     start_url 用 creator.douyin.com 即为创作中心登录(其登录态因 .douyin.com 共享 Cookie,
-    同样可用于 www 公开抓取)。"""
+    同样可用于 www 公开抓取)。
+    
+    state_json 无论如何都会返回浏览器当前 cookie 快照(关窗前抓取),
+    调用方用此更新 DB 的 storage_state，保证下次打开浏览器 cookie 是最新的。"""
     ctx = await mgr.open_headed(identity)
     page = await ctx.new_page()
     await _focus(page)
@@ -41,7 +44,6 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
     try:
         await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
         await _focus(page)
-        # 尝试自动弹出登录框(失败也没关系,用户可自行点“登录”)
         for sel in ('text=登录', '[data-e2e="login-button"]', 'button:has-text("登录")'):
             try:
                 await page.click(sel, timeout=2500)
@@ -49,7 +51,14 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
             except Exception:
                 continue
 
-        # 轮询登录态(用户关窗 -> 立即视为未登录,不抛错)
+        await page.wait_for_timeout(1500)
+
+        try:
+            init_vals = {c["name"]: c.get("value", "") for c in (await ctx.cookies())
+                         if c["name"] in _LOGIN_COOKIES}
+        except Exception:
+            init_vals = {}
+
         waited = 0.0
         while waited < timeout_seconds:
             if page.is_closed():
@@ -58,21 +67,27 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
                 cookies = await ctx.cookies()
             except Exception:
                 break
-            names = {c["name"] for c in cookies}
-            if names & _LOGIN_COOKIES:
+            cur_vals = {c["name"]: c.get("value", "") for c in cookies
+                        if c["name"] in _LOGIN_COOKIES}
+            if cur_vals and cur_vals != init_vals:
                 logged = True
                 break
-            # 扫码确认后尽快通知主页面；Cookie 查询很轻量，500ms 足够且比原来的
-            # 2 秒轮询明显更跟手。
             await asyncio.sleep(0.5)
             waited += 0.5
 
         if logged:
-            await page.wait_for_timeout(800)   # 给登录跳转/localStorage 一次落盘机会
+            await page.wait_for_timeout(800)
             state = await ctx.storage_state()
             state_json = json.dumps(state)
             nickname = await _read_nickname(page)
     finally:
+        # 关窗前总是抓取当前 cookie 快照:即使未扫码,页面导航也可能刷新了部分 cookie
+        if not state_json:
+            try:
+                state = await ctx.storage_state()
+                state_json = json.dumps(state)
+            except Exception:
+                pass
         try:
             await ctx.close()
         except Exception:
@@ -249,13 +264,19 @@ async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
     try:
         await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
         await _focus(page)
-        # 尝试自动弹出登录框(失败也没关系,用户可自行点“登录”)
+        # 尝试自动弹出登录框(失败也没关系,用户可自行点"登录")
         for sel in ('text=登录', 'button:has-text("登录")', '[class*="login"]'):
             try:
                 await page.click(sel, timeout=2500)
                 break
             except Exception:
                 continue
+        await page.wait_for_timeout(1500)
+        try:
+            init_pass = {c["name"]: c.get("value", "") for c in (await ctx.cookies())
+                         if c["name"] == "passToken"}
+        except Exception:
+            init_pass = {}
         waited = 0
         while waited < timeout_seconds:
             if page.is_closed():
@@ -264,9 +285,9 @@ async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
                 cookies = await ctx.cookies()
             except Exception:
                 break
-            names = {c["name"] for c in cookies}
-            # passToken 是登录成功的权威信号(游客态没有)
-            if "passToken" in names:
+            cur_pass = {c["name"]: c.get("value", "") for c in cookies
+                        if c["name"] == "passToken"}
+            if cur_pass and cur_pass != init_pass:
                 logged = True
                 break
             await asyncio.sleep(2)
@@ -276,6 +297,11 @@ async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
             state_json = json.dumps(await ctx.storage_state())
             nickname = await _read_ks_nickname(page)
     finally:
+        if not state_json:
+            try:
+                state_json = json.dumps(await ctx.storage_state())
+            except Exception:
+                pass
         try:
             await ctx.close()
         except Exception:
@@ -304,6 +330,12 @@ async def interactive_ks_creator_login(mgr: BrowserManager, identity: Identity,
                 break
             except Exception:
                 continue
+        await page.wait_for_timeout(1500)
+        try:
+            init_ks = {c["name"]: c.get("value", "") for c in (await ctx.cookies())
+                       if c["name"] in _KS_CREATOR_COOKIES or c["name"] == "userId"}
+        except Exception:
+            init_ks = {}
         waited = 0
         while waited < timeout_seconds:
             if page.is_closed():
@@ -312,9 +344,9 @@ async def interactive_ks_creator_login(mgr: BrowserManager, identity: Identity,
                 cookies = await ctx.cookies()
             except Exception:
                 break
-            names = {c["name"] for c in cookies}
-            on_cp = "cp.kuaishou.com" in page.url and "/passport" not in page.url
-            if (names & _KS_CREATOR_COOKIES) or (on_cp and "userId" in names):
+            cur_ks = {c["name"]: c.get("value", "") for c in cookies
+                      if c["name"] in _KS_CREATOR_COOKIES or c["name"] == "userId"}
+            if cur_ks and cur_ks != init_ks:
                 await page.wait_for_timeout(1500)
                 try:
                     state_json = json.dumps(await ctx.storage_state())
@@ -327,6 +359,11 @@ async def interactive_ks_creator_login(mgr: BrowserManager, identity: Identity,
             await asyncio.sleep(2)
             waited += 2
     finally:
+        if not state_json:
+            try:
+                state_json = json.dumps(await ctx.storage_state())
+            except Exception:
+                pass
         try:
             await ctx.close()
         except Exception:
@@ -412,6 +449,12 @@ async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
         await page.goto("https://channels.weixin.qq.com/login.html",
                         wait_until="domcontentloaded", timeout=30000)
         await _focus(page)
+        await page.wait_for_timeout(1500)
+        try:
+            init_cv = {c["name"]: c.get("value", "") for c in (await ctx.cookies())
+                       if c["name"] in _CHANNELS_STRONG_LOGIN_COOKIES}
+        except Exception:
+            init_cv = {}
         waited = 0
         stable_cookie_hits = 0
         while waited < timeout_seconds:
@@ -421,12 +464,13 @@ async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
                 cookies = await ctx.cookies()
             except Exception:
                 break
+            cur_cv = {c["name"]: c.get("value", "") for c in cookies
+                      if c["name"] in _CHANNELS_STRONG_LOGIN_COOKIES}
             names = {c["name"] for c in cookies}
-            # 登录成功:进入 /platform 后，auth/* 业务响应成功，或强登录 Cookie
-            # 连续两轮仍存在。wxuin 单独出现只说明微信身份已写入，不代表助手已登录。
+            cookie_changed = cur_cv and cur_cv != init_cv
             on_platform = "channels.weixin.qq.com" in page.url \
                 and "login.html" not in page.url
-            ready = _channels_login_ready(names, auth_verified.is_set(), on_platform)
+            ready = _channels_login_ready(names, auth_verified.is_set(), on_platform) and cookie_changed
             if ready and auth_verified.is_set():
                 logged = True
                 break
