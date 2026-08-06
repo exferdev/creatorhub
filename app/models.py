@@ -38,6 +38,8 @@ class DouyinAccount(SQLModel, table=True):
     last_health_check: Optional[datetime] = None  # 上次 cookie 探活时间
     last_active_at: Optional[datetime] = None  # 上次活跃(用于错峰调度)
     last_creator_active: Optional[datetime] = None  # 上次创作者活跃(用于创作者保活)
+    write_paused_until: Optional[datetime] = None  # 平台风控后暂停自动写操作
+    write_pause_reason: str = ""                    # 最近一次暂停原因
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -189,9 +191,63 @@ class CommentRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class DanmakuWatch(SQLModel, table=True):
+    """短视频弹幕监控对象。弹幕与评论字段不同，单独建模。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    platform: str = Field(default="douyin", index=True)
+    kind: str = "video"             # video(单条视频) | user(账号近期作品)
+    aweme_id: str = Field(default="", index=True)
+    sec_uid: str = Field(default="", index=True)
+    title: str = ""
+    avatar: str = ""
+    alias: str = ""
+    group_name: str = Field(default="", index=True)
+    tags: str = "[]"
+    mode: str = "public"            # public(播放页) | creator(创作中心)
+    account_id: Optional[int] = None
+    interval_seconds: int = 0       # 0=跟随全局 scan_interval_seconds
+    recent_works: int = 0           # 0=跟随全局 danmaku_recent_works
+    recent_days: int = 0            # 0=跟随全局 danmaku_recent_days
+    max_scrolls: int = 0            # 0=跟随全局 danmaku_max_scrolls
+    time_start_ms: int = 0          # 视频内时间起点,0=从头
+    time_end_ms: int = 0            # 视频内时间终点,0=到结尾
+    probe_step_seconds: float = 0.0  # 0=跟随全局时间轴步长
+    include_keywords: str = "[]"    # 命中任一关键词才保留
+    exclude_keywords: str = "[]"    # 命中任一关键词则丢弃
+    min_text_length: int = 0
+    max_text_length: int = 0
+    min_like_count: int = 0
+    max_records_per_scan: int = 0   # 0=跟随全局
+    max_records_total: int = 0      # 0=跟随全局
+    enabled: bool = True
+    last_scan_at: Optional[datetime] = None
+    last_error: str = ""
+    danmaku_count: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DanmakuRecord(SQLModel, table=True):
+    """抓到的一条短视频弹幕。video_time_ms 是视频内时间点。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    platform: str = Field(default="douyin", index=True)
+    watch_id: Optional[int] = Field(default=None, index=True)
+    aweme_id: str = Field(default="", index=True)
+    danmaku_id: str = Field(default="", index=True)
+    text: str = ""
+    user_id: str = ""
+    user_nickname: str = ""
+    video_time_ms: int = 0
+    create_time: int = 0
+    like_count: int = 0
+    is_blocked: bool = False
+    source: str = "public"          # public | creator
+    raw_json: str = "{}"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class CommentRule(SQLModel, table=True):
     """自动评论规则(循环配置)。引擎按 interval 生成一批 CommentTask。
-    auto_reply  = 回复「自己作品」收到的评论(低风险,正经创作者工具)。
+    auto_reply  = 回复「自己作品」收到的评论(内容目标较温和,但仍属于高敏感写操作)。
     auto_comment= 去「别人帖子」下评论(高风险,需节流+去重护着)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
     platform: str = Field(default="douyin", index=True)   # douyin | xhs
@@ -232,6 +288,7 @@ class CommentTask(SQLModel, table=True):
     xsec_token: str = ""                                  # 小红书:发评论所需令牌
     target_comment_id: str = ""                           # 非空=回复该条评论;空=作品下顶层评论
     target_nick: str = ""                                 # 被回复者昵称(供 {nick} 用)
+    target_text: str = ""                                 # 目标评论原文(定位回复目标)
     content: str = ""                                     # 已渲染好的文案
     scheduled_at: Optional[datetime] = None               # 计划发送时间(错峰)
     # draft=草稿待审(人工通过后才转 pending);pending=待发;其余为执行态

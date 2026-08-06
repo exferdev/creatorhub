@@ -61,10 +61,12 @@ DEFAULT_PARAMS = {
 
 
 class DouyinClient:
-    def __init__(self, cookie: str, user_agent: str, timeout: float = 20.0):
+    def __init__(self, cookie: str, user_agent: str, timeout: float = 20.0,
+                 proxy: str = ""):
         self.cookie = cookie or ""
         self.ua = user_agent
         self.timeout = timeout
+        self.proxy = (proxy or "").strip()
         self.impersonate = impersonate_for_ua(user_agent)  # TLS 指纹复刻,绕 JA3 风控
 
     def _headers(self, referer: str = BASE + "/") -> Dict[str, str]:
@@ -96,7 +98,8 @@ class DouyinClient:
         url = self._build_url(path, params)
         async with AsyncSession() as cli:
             r = await cli.get(url, headers=self._headers(referer),
-                              impersonate=self.impersonate, timeout=self.timeout)
+                              impersonate=self.impersonate, timeout=self.timeout,
+                              proxy=self.proxy or None)
             if r.status_code != 200 or not r.content:
                 # HTTP 200 + 空 body = 被风控拒了(接口本身可能是活的:follower/list 直连
                 # 空 body,页面里发同一个请求却正常)。静默 return None 会让上层把「被拒」
@@ -222,6 +225,23 @@ class DouyinClient:
                 break
             cursor = page.get("cursor") or 0
         return out
+
+    # ── 短视频弹幕(播放页接口,与 comment/list 分开)──
+    async def fetch_danmaku_page(self, aweme_id: str, start_time: int = 0,
+                                 end_time: int = 0, duration: int = 0) -> dict:
+        """请求一个视频时间窗口的弹幕页，浏览器拦截器是主路径。"""
+        data = await self._get_json(
+            "/aweme/v1/web/danmaku/get_v2/",
+            {
+                "item_id": aweme_id,
+                "aweme_id": aweme_id,
+                "start_time": max(0, int(start_time or 0)),
+                "end_time": max(0, int(end_time or 0)),
+                "duration": max(0, int(duration or 0)),
+            },
+            referer=f"{BASE}/video/{aweme_id}",
+        )
+        return data or {}
 
     # ── 关注 / 粉丝(直连 following/follower list;offset + max_time 分页)──
     #    ⚠️ 参数按抖音 web 常见形态实现;拿不到时上层回退浏览器拦截,故失败无副作用。

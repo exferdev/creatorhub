@@ -19,11 +19,20 @@ class EngineConfig:
     comment_recent_works: int = 5      # 监控评论时,只看每个目标最近 N 条作品
     comment_recent_days: int = 7       # 且仅限最近多少天内发布的作品
     comment_max_scrolls: int = 6       # 评论区翻页深度(滚动容器次数,越大扫得越深)
+    danmaku_recent_works: int = 5      # 弹幕监控账号模式默认扫描的近期作品数
+    danmaku_recent_days: int = 7       # 弹幕监控账号模式默认作品时间范围
+    danmaku_max_scrolls: int = 6       # 弹幕抓取默认翻页/加载轮次
+    danmaku_probe_step_seconds: float = 1.0  # 播放页时间轴探测步长(秒)
+    danmaku_max_probe_points: int = 120       # 单条视频最多探测的时间点数
+    danmaku_max_records_per_scan: int = 1000  # 单轮最多入库弹幕数,0=不限
+    danmaku_max_records_total: int = 0        # 每个监控最多保留记录数,0=不限
     account_check_interval_seconds: int = 1800  # 账号体检/闲置保活轮询间隔(0=关闭)
     idle_keepalive_hours: float = 6.0  # 闲置保活阈值:账号距上次活跃超此时长才摸一次(0=每轮都摸,退回旧行为)
     creator_keepalive_hours: float = 4.0  # 创作者保活阈值:账号距上次创作者活跃超此时长,开浏览器访问 creator.douyin.com 维持会话(0=关闭)
     # 自有账号评论模式:创作中心评论管理页(实验性,抖音改版时改这里)
     creator_comment_url: str = "https://creator.douyin.com/creator-micro/interaction/comment-management"
+    # 自有账号弹幕模式:创作中心弹幕管理页(实验性,抖音改版时改这里)
+    creator_danmaku_url: str = "https://creator.douyin.com/creator-micro/interaction/danmaku-management"
     request_timeout_seconds: int = 20
     download_timeout_seconds: int = 120
     media_dir: str = "./data/media"
@@ -42,6 +51,11 @@ class EngineConfig:
     comment_min_gap_seconds: int = 60        # 同账号两条评论的全局最小间隔(秒)
     comment_jitter: float = 0.4              # 评论发送时间额外抖动比例(±40%),更像真人
     comment_hourly_cap_per_account: int = 10  # 每账号每小时自动评论上限(比日上限更贴人类节律),0=不限
+    comment_risk_cooldown_seconds: int = 21600  # 平台拒绝/验证后暂停该账号写操作(默认6小时)
+    # 小红书评论发布通道: api=审核后自动发布, manual=只保留草稿不调用发布接口。
+    xhs_comment_write_mode: str = "api"  # api | manual
+    # true=先存草稿,人工点击“通过”后由队列自动发布; false=生成后直接排队发布。
+    xhs_comment_review_before_publish: bool = True
     # 抖音发评论用有头浏览器(弹真实窗口):抖音对无头写操作常降级/拦截,有头更稳,
     # 且能让你手动过验证码;量大嫌弹窗可设 false 试无头。
     comment_browser_headed: bool = True

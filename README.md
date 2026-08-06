@@ -2,6 +2,10 @@
 
 > 本地运行的多平台内容管理面板，支持 **抖音 / 小红书 / 快手 / 视频号**。
 
+[在线预览](https://3441293738.github.io/creatorhub/) · [快速开始](#快速开始) · [平台能力](#平台能力)
+
+> 在线预览由 GitHub Pages 提供，使用脱敏示例数据，仅展示界面与交互；登录、抓取、下载和发布仍需在本地运行。
+
 CreatorHub 使用 Python + FastAPI 提供统一 Web 界面，用于管理账号、监控作品与评论、下载内容、发布作品和接收通知。账号登录态、数据库及媒体文件均保存在本地。
 
 ## 平台能力
@@ -11,6 +15,7 @@ CreatorHub 使用 Python + FastAPI 提供统一 Web 界面，用于管理账号�
 | 登录 | 扫码 / 创作者 / Cookie | 扫码 | 扫码 / 创作者 | 扫码 |
 | 作品监控 | ✅ | ✅ 创作者 / 关键词 | ✅ | 仅本账号 |
 | 评论监控 | ✅ | ✅ | ✅ | 仅本账号 |
+| 短视频弹幕监控 | ✅ 播放页 / 创作中心 | — | — | — |
 | 内容下载 | ✅ 可选画质 | ✅ 图集 / 视频 | ✅ | — |
 | 发布 | ✅ | ✅ | ✅ | ✅ |
 | 自动评论 / 回复 | ✅ | ✅ | ✅ | — |
@@ -98,21 +103,32 @@ npm install
 
 ## 界面预览
 
-### 总览
+> 截图使用脱敏示例数据；界面配色会跟随当前平台切换。
 
 ![总览面板](assets/screenshots/overview-douyin.png)
 
-### 账号与代理
+### 更多界面
 
-![账号登录与代理池](assets/screenshots/accounts-proxy.png)
+> 点击缩略图可查看完整尺寸。
 
-### 作品监控
-
-![作品监控与下载](assets/screenshots/monitor-posts.png)
-
-### 评论监控
-
-![评论监控](assets/screenshots/monitor-comments.png)
+<table>
+  <tr>
+    <td width="50%"><strong>小红书浅色主题</strong><br><a href="assets/screenshots/overview-xiaohongshu.png"><img src="assets/screenshots/overview-xiaohongshu.png" alt="小红书总览面板"></a></td>
+    <td width="50%"><strong>账号与代理</strong><br><a href="assets/screenshots/accounts-proxy.png"><img src="assets/screenshots/accounts-proxy.png" alt="账号登录与代理池"></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>作品监控</strong><br><a href="assets/screenshots/monitor-posts.png"><img src="assets/screenshots/monitor-posts.png" alt="作品监控与下载"></a></td>
+    <td width="50%"><strong>评论监控</strong><br><a href="assets/screenshots/monitor-comments.png"><img src="assets/screenshots/monitor-comments.png" alt="评论监控"></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>内容发布</strong><br><a href="assets/screenshots/publish-workflow.png"><img src="assets/screenshots/publish-workflow.png" alt="内容发布与任务队列"></a></td>
+    <td width="50%"><strong>链接下载</strong><br><a href="assets/screenshots/share-download.png"><img src="assets/screenshots/share-download.png" alt="分享链接解析与下载历史"></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>自动评论</strong><br><a href="assets/screenshots/autocomment-rules.png"><img src="assets/screenshots/autocomment-rules.png" alt="自动评论规则与任务记录"></a></td>
+    <td width="50%"><strong>本账号管理与私信</strong><br><a href="assets/screenshots/account-hub-dm.png"><img src="assets/screenshots/account-hub-dm.png" alt="本账号数据与私信管理"></a></td>
+  </tr>
+</table>
 
 ## 基本使用
 
@@ -129,6 +145,7 @@ npm install
 
 - **作品监控**：添加创作者主页、作品链接、短链或平台 ID，发现新作品后自动入库。
 - **评论监控**：可订阅单条作品，也可监控账号近期作品的评论。
+- **短视频弹幕监控**：独立于评论区，按视频内时间轴渐进探测并排序；支持时间范围、关键词、文本长度、点赞数和容量上限过滤，记录持久化到 SQLite；自己的视频走创作中心，公开视频走播放器拦截。
 - **链接下载**：粘贴完整分享文案或链接，自动提取地址并下载。
 - **历史内容**：新增目标默认只监控订阅后的作品，也可选择回填最近若干条。
 
