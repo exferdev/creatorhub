@@ -1210,7 +1210,7 @@ async function refreshAccounts() {
     return `<tr>
       <td>
         <div class="user-cell">
-          ${a.avatar ? `<img class="avatar" src="${a.avatar}" alt="" referrerpolicy="no-referrer">` : ""}
+          ${a.avatar ? `<img class="avatar" src="/api/avatar/${a.id}" alt="" referrerpolicy="no-referrer">` : ""}
           <div>
             <div><b>${esc(a.nickname)}</b> ${pill}</div>
             ${idline ? `<div class="mut" style="font-size:11px;margin-top:2px">${idline}</div>` : ""}
@@ -3794,7 +3794,7 @@ switchHubTab(HUB_TAB);   // 恢复上次停留的子标签(我的作品/关注/�
 PLATFORM = (() => { try { const p = localStorage.getItem("dym-pf"); return ["xhs", "douyin", "kuaishou", "shipinhao"].includes(p) ? p : "douyin"; } catch (e) { return "douyin"; } })();
 applyPlatformUI();
 
-onTypeChange(); bindPubFilePicker(); onPubType(); populateWatchAccount(); onAcMode(); loadSettings(); refreshAccounts(); refreshProxies(); refreshChannels(); loop();
+onTypeChange(); bindPubFilePicker(); onPubType(); onPubMethodChange(); populateWatchAccount(); onAcMode(); loadSettings(); refreshAccounts(); refreshProxies(); refreshChannels(); loop();
 enhanceAllSelects();   // 把所有原生 <select> 升级为美化下拉
 enhanceAllMetaControls(); // 分组/标签：当前平台词库下拉，可搜索并新增
 enhanceAllDateTime();  // 把 datetime-local 升级为自定义日期选择器

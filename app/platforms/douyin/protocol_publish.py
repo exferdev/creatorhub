@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 
 import requests as req
 
-from ...browser.identity import Identity
+from ...browser.identity import Identity, _platform_bits
 from ...browser.manager import BrowserManager
 from . import ms_token as _ms_token
 from . import signer as _signer
@@ -40,6 +40,14 @@ COMMON_PARAMS = dict(
     cookie_enabled="true", screen_width="1920", screen_height="1080",
     browser_language="zh-CN", browser_platform="Win32",
 )
+
+
+def _browser_platform(ua: str) -> str:
+    """由账号真实 UA 推断 browser_platform 业务参数，与 identity.py 的指纹注入逻辑保持一致，
+    避免协议请求里的 browser_platform / 签名内容和浏览器真实身份（尤其是 Mac 指纹账号）不一致。"""
+    if not ua:
+        return "Win32"
+    return _platform_bits(ua)[0]
 
 # cookie key 白名单（写入 document.cookie 时过滤）
 _COOKIE_KEYS_FOR_SIGNER = {"__ac_nonce", "__ac_signature", "passport_csrf_token",
@@ -184,15 +192,16 @@ def _parse_json(resp: dict) -> dict:
 # 8 步协议流程
 # ═══════════════════════════════════════════════════════════════════
 
-async def _get_sts2(page, cookies: dict, ms_token_str: str) -> dict:
+async def _get_sts2(page, cookies: dict, ms_token_str: str, ua: str = "") -> dict:
     """Step 1: 获取 vedit STS2 凭证。"""
-    p = dict(COMMON_PARAMS, scene="web", support_h265="1", msToken=ms_token_str)
+    p = dict(COMMON_PARAMS, scene="web", support_h265="1", msToken=ms_token_str,
+             browser_platform=_browser_platform(ua))
     path = "/aweme/mid/video/sts2"
     path_q = path + "?" + urlencode(p)
 
     xb = None
     if _signer._ready and _signer._signer:
-        xb = _signer._signer.frontier_sign(path_q, "GET")
+        xb = _signer._signer.frontier_sign(path_q, "GET", ua=ua, platform=_browser_platform(ua))
     hdrs = {"Referer": "https://creator.douyin.com/"}
     if xb:
         hdrs["x-bogus"] = xb
@@ -209,9 +218,9 @@ async def _get_sts2(page, cookies: dict, ms_token_str: str) -> dict:
             "session_token": data["session_token"]}
 
 
-async def _get_upload_auth(page, ms_token_str: str) -> dict:
+async def _get_upload_auth(page, ms_token_str: str, ua: str = "") -> dict:
     """Step 1b: 获取 VOD 上传凭证。"""
-    p = dict(COMMON_PARAMS, aid="2906", msToken=ms_token_str)
+    p = dict(COMMON_PARAMS, aid="2906", msToken=ms_token_str, browser_platform=_browser_platform(ua))
     resp = await _browser_get(page, "/web/api/media/upload/auth/v5/", params=p)
     data = _parse_json(resp)
     print(f"[dy-protocol] upload_auth raw: status_code={data.get('status_code')}, keys={sorted(data.keys())}, body={str(resp.get('body',''))[:500]}")
@@ -319,10 +328,90 @@ def _commit_upload(session_key: str, uid: str, ak: str, sk: str, token: str) -> 
         return {"ok": False, "error": f"CommitUpload failed: {str(e)[:200]} body={snippet}"}
 
 
-async def _gen_cover(page, timestamp_ms: int) -> dict:
+# ═══════════════════════════════════════════════════════════════════
+# 图文协议发布: ImageX 上传流程（替代 VOD ApplyUpload/Commit）
+# ═══════════════════════════════════════════════════════════════════
+IMAGE_SERVICE_ID = "jm8ajry58r"
+
+
+def _apply_image_upload(file_size: int, uid: str, ak: str, sk: str, token: str) -> dict:
+    """ApplyImageUpload — AWS V4 签名请求 ImageX 获取图片上传凭证。"""
+    try:
+        from aws_requests_auth.aws_auth import AWSRequestsAuth
+    except ModuleNotFoundError:
+        return {"ok": False, "error": "missing dependency aws-requests-auth"}
+    host = "imagex.bytedanceapi.com"
+    params_dict = {
+        "Action": "ApplyImageUpload", "Version": "2018-08-01",
+        "ServiceId": IMAGE_SERVICE_ID, "app_id": "2906", "user_id": uid,
+    }
+    auth = AWSRequestsAuth(aws_access_key=ak, aws_secret_access_key=sk,
+                           aws_host=host, aws_region="cn-north-1",
+                           aws_service="imagex", aws_token=token)
+    try:
+        resp = req.get(f"https://{host}/", params=params_dict, auth=auth, timeout=15)
+        data = resp.json()
+        if "Result" not in data:
+            rm = data.get("ResponseMetadata", {})
+            if isinstance(rm, dict) and "Error" in rm:
+                err = rm["Error"]
+                return {"ok": False, "error": f"ImageX Error: {err.get('Code','')} - {err.get('Message','')}"}
+            return {"ok": False, "error": "ApplyImageUpload unexpected response"}
+        result = data["Result"]
+        # 尝试多种响应结构: UploadAddress(直传) / InnerUploadAddress(内网上传)
+        address = (result.get("UploadAddress") or result.get("InnerUploadAddress") or {})
+        # UploadAddress 有 UploadNodes 数组, 也可能直接有 StoreInfos
+        nodes = address.get("UploadNodes") or [address]
+        store = nodes[0].get("StoreInfos", [{}])[0]
+        upload_host = nodes[0].get("UploadHost", "") or (
+            address.get("UploadHosts", [""])[0] if address.get("UploadHosts") else "")
+        return {"ok": True, "store_uri": store.get("StoreUri", ""),
+                "auth_jwt": store.get("Auth", ""), "upload_host": upload_host,
+                "session_key": address.get("SessionKey", "")}
+    except Exception as e:
+        return {"ok": False, "error": f"ApplyImageUpload failed: {str(e)[:200]}"}
+
+
+def _upload_image_to_cdn(image_path: str, upload_host: str, store_uri: str,
+                         auth_jwt: str, uid: str) -> dict:
+    """PUT 图片到 ImageX CDN。"""
+    if not os.path.exists(image_path):
+        return {"ok": False, "error": f"File not found: {image_path}"}
+    with open(image_path, "rb") as f:
+        data = f.read()
+    file_size = len(data)
+    crc32_val = _crc32_hex(data)
+    url = f"https://{upload_host}/{store_uri}"
+    headers = {
+        "Authorization": auth_jwt,
+        "x-storage-u": uid,
+        "Content-CRC32": crc32_val,
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(file_size),
+    }
+    try:
+        resp = req.put(url, data=data, headers=headers, timeout=120)
+        body_j = resp.json()
+        # ImageX 上传成功判断: code=200 或 error_code=0
+        if body_j.get("code") in (200, 2000) or body_j.get("error", {}).get("error_code") == 0:
+            return {"ok": True, "store_uri": store_uri, "file_size": file_size, "crc32": crc32_val}
+        return {"ok": False, "error": f"CDN upload HTTP {resp.status_code}: {resp.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": f"CDN upload error: {str(e)[:200]}"}
+
+
+def _gen_creation_id() -> str:
+    """生成 creation_id: 随机字符串 + 时间戳。"""
+    import random as _random
+    import string as _string
+    rand_part = "".join(_random.choices(_string.ascii_lowercase + _string.digits, k=7))
+    return f"{rand_part}{int(time.time() * 1000)}"
+
+async def _gen_cover(page, timestamp_ms: int, ua: str = "") -> dict:
     """Step 5: 生成封面 + creation_id。"""
     creation_id = f"l4k45rri{timestamp_ms}"
-    p = dict(COMMON_PARAMS, creation_id=creation_id, aid="1128", support_h265="1")
+    p = dict(COMMON_PARAMS, creation_id=creation_id, aid="1128", support_h265="1",
+             browser_platform=_browser_platform(ua))
     resp = await _browser_get(page, "/aweme/v1/cover/gen/ref", params=p)
     print(f"[dy-protocol] cover raw: status={resp.get('status')}, body={str(resp.get('body',''))[:300]}")
     data = _parse_json(resp)
@@ -371,8 +460,12 @@ async def _check_publish_limits(page) -> dict:
 
 async def _create_video(page, cookies: dict, vid: str, creation_id: str,
                         title: str, description: str, tags: str,
-                        cover: dict) -> dict:
-    """Step 8: create_v2 发布作品。"""
+                        cover: dict, ua: str = "",
+                        visibility: str = "public", allow_save: bool = True,
+                        image_uris: list = None) -> dict:
+    """Step 8: create_v2 发布作品（视频/图文统一入口）。
+    image_uris 非空 → media_type=2 图文；否则 media_type=4 视频。
+    """
     original_title = (title or "").strip()
     text, tag_list = _build_publish_text(original_title, description, tags)
     caption_parts = [part for part in ((description or "").strip(),
@@ -380,34 +473,57 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
     caption = " ".join(caption_parts)
     text_extra, challenges = _build_hashtag_metadata(text, caption, tag_list)
 
-    pub_body = {
+    vis_map = {"public": 0, "friends": 2, "private": 1}
+    visibility_type = vis_map.get(visibility, 0)
+    download = 1 if allow_save else 0
+
+    is_image = bool(image_uris)
+    media_type = 2 if is_image else 4
+
+    common = {
+        "text": text, "caption": caption,
+        "creation_id": creation_id, "media_type": media_type,
+        "visibility_type": visibility_type, "download": download, "timing": 0,
+        "music_source": 0, "activity": "[]", "text_extra": text_extra,
+        "challenges": challenges, "mentions": "[]",
+        "hashtag_source": "recommend/search",
+        "hot_sentence": "", "interaction_stickers": "[]", "source_info": "{}",
+    }
+    if not is_image:
+        common["item_title"] = original_title
+        common["video_id"] = vid
+    else:
+        common["timing"] = -1
+        common["images"] = image_uris
+
+    cover_obj = {
+        "poster": cover.get("poster", ""),
+    }
+    if not is_image:
+        cover_obj["coverUrl"] = cover.get("cover_url", "")
+        cover_obj["cover_tools_extend_info"] = "{}"
+        cover_obj["cover_tools_info"] = "{}"
+
+    pub_body: dict = {
         "item": {
-            "common": {
-                "text": text, "caption": caption, "item_title": original_title,
-                "creation_id": creation_id, "media_type": 4, "video_id": vid,
-                "visibility_type": 0, "download": 1, "timing": 0, "music_source": 0,
-                "activity": "[]", "text_extra": text_extra, "challenges": challenges,
-                "mentions": "[]", "hashtag_source": "recommend/search",
-                "hot_sentence": "", "interaction_stickers": "[]", "source_info": "{}",
-            },
-            "cover": {
-                "poster": cover.get("poster", ""),
-                "coverUrl": cover.get("cover_url", ""),
-                "cover_tools_extend_info": "{}", "cover_tools_info": "{}",
-            },
-            "mix": {}, "selected_member": {"is_selected_member_video": False},
-            "chapter": {"chapter": "{}"}, "anchor": {},
-            "sync": {"should_sync": False, "sync_to_toutiao": 0},
-            "open_platform": {},
-            "assistant": {"is_preview": 0, "is_post_assistant": 1},
+            "common": common,
+            "cover": cover_obj,
+            "anchor": {},
         }
     }
+    if not is_image:
+        pub_body["item"]["mix"] = {}
+        pub_body["item"]["selected_member"] = {"is_selected_member_video": False}
+        pub_body["item"]["chapter"] = {"chapter": "{}"}
+        pub_body["item"]["sync"] = {"should_sync": False, "sync_to_toutiao": 0}
+        pub_body["item"]["open_platform"] = {}
+        pub_body["item"]["assistant"] = {"is_preview": 0, "is_post_assistant": 1}
 
-    ms_result = _ms_token.get_ms_token(cookies, ms_appid="2906")
+    ms_result = _ms_token.get_ms_token(cookies, ms_appid="2906", ua=ua)
     ms_token_str = ms_result.get("ms_token", "") if ms_result.get("ok") else (cookies.get("msToken", "") or "")
 
     params = dict(COMMON_PARAMS, read_aid="2906", screen_width="1280", screen_height="800",
-                  browser_language="zh-CN", browser_platform="Win32",
+                  browser_language="zh-CN", browser_platform=_browser_platform(ua),
                   browser_name="Mozilla", browser_version="5.0",
                   browser_online="true", timezone_name="Asia/Shanghai",
                   aid="1128", support_h265="1", msToken=ms_token_str)
@@ -418,12 +534,25 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
     hdrs = {
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://creator.douyin.com",
-        "Referer": "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        "Referer": "https://creator.douyin.com/creator-micro/content/post/image?enter_from=publish_page" if is_image else
+                   "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
         "bd-ticket-guard-version": "2",
         "bd-ticket-guard-web-version": "2",
-        "bd-ticket-guard-web-sign-type": "0",
+        "bd-ticket-guard-web-sign-type": "1" if is_image else "0",
         "x-secsdk-csrf-token": _csrf_token(cookies),
     }
+    if is_image:
+        # 从 cookie 提取 ticket guard 公钥
+        guard_data = cookies.get("bd_ticket_guard_client_data_v2", "")
+        if guard_data:
+            try:
+                import base64 as _b64
+                decoded = json.loads(_b64.b64decode(guard_data + "=" * (4 - len(guard_data) % 4)))
+                pub_key = decoded.get("ree_public_key", "")
+                if pub_key:
+                    hdrs["bd-ticket-guard-ree-public-key"] = pub_key
+            except Exception:
+                pass
 
     async def _post_create(current_body: dict):
         body_json = json.dumps(current_body, ensure_ascii=False, separators=(",", ":"))
@@ -434,6 +563,7 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
                 "url": url_without_ab, "method": "POST",
                 "data": body_json, "a_bogus": True,
                 "cookies": _signer_cookie_str(cookies),
+                "ua": ua, "platform": _browser_platform(ua),
             })
             print(f"[dy-protocol] sign result: ok={sign_res.get('ok')}, X-Bogus={str(sign_res.get('X-Bogus',''))[:20] if sign_res.get('X-Bogus') else None}, a_bogus={str(sign_res.get('a_bogus',''))[:20] if sign_res.get('a_bogus') else None}")
             if sign_res.get("ok") and sign_res.get("a_bogus"):
@@ -445,17 +575,20 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
 
         query = urlencode(signed_params)
         url = f"https://creator.douyin.com{base_path}?{query}"
-        print(f"[dy-protocol] create_v2 url (first 200 chars): {url[:200]}")
+        print(f"[dy-protocol] create_v2 url (full): {url}")
         print(f"[dy-protocol] create_v2 page url: {page.url}")
         all_hdrs = dict(hdrs)
         all_hdrs["Content-Type"] = "application/json"
+        print(f"[dy-protocol] create_v2 request headers: {json.dumps(all_hdrs, ensure_ascii=False)}")
         js = f"""(async () => {{
             const r = await fetch({json.dumps(url)}, {{method:'POST',headers:{json.dumps(all_hdrs)},body:{json.dumps(body_json)},credentials:'include'}});
-            return {{status:r.status, statusText:r.statusText, body:await r.text()}};
+            const respHeaders = {{}};
+            r.headers.forEach((v, k) => {{ respHeaders[k] = v; }});
+            return {{status:r.status, statusText:r.statusText, body:await r.text(), respHeaders:respHeaders}};
         }})()"""
         resp = await page.evaluate(js)
         print(f"[dy-protocol] create_v2 response: status={resp.get('status')}, body_len={len(resp.get('body',''))}, body_preview={str(resp.get('body',''))[:300]}")
-        return resp
+        print(f"[dy-protocol] create_v2 response headers: {json.dumps(resp.get('respHeaders', {}), ensure_ascii=False)}")
         return resp
 
     resp = await _post_create(pub_body)
@@ -543,7 +676,7 @@ async def publish_douyin_protocol(
         uid = cookie_dict.get("uid_tt", "") or identity.account_id or ""
         page_uid = uid
 
-        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906")
+        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua)
         ms_token_str = ms_result.get("ms_token", "") if ms_result.get("ok") else (cookie_dict.get("msToken", "") or "")
         print(f"[dy-protocol] msToken via {ms_result.get('source','?')}{(ms_token_str and ' (ok)') or ''}")
 
@@ -552,12 +685,12 @@ async def publish_douyin_protocol(
         print(f"[dy-protocol] 视频: {video_path} ({file_size} bytes)")
 
         print("[dy-protocol] Step 1: STS2")
-        sts = await _get_sts2(page, cookie_dict, ms_token_str)
+        sts = await _get_sts2(page, cookie_dict, ms_token_str, ua=identity.ua)
         if not sts["ok"]:
             return False, "", f"STS2: {sts['error']}"
 
         print("[dy-protocol] Step 1b: Upload Auth")
-        vod_auth = await _get_upload_auth(page, ms_token_str)
+        vod_auth = await _get_upload_auth(page, ms_token_str, ua=identity.ua)
         if not vod_auth["ok"]:
             return False, "", f"UploadAuth: {vod_auth['error']}"
         ak, sk, vtoken = vod_auth["access_key_id"], vod_auth["secret_access_key"], vod_auth["session_token"]
@@ -582,7 +715,7 @@ async def publish_douyin_protocol(
         vid = commit_res["vid"]
 
         print("[dy-protocol] Step 5: Cover")
-        cover_res = await _gen_cover(page, int(time.time() * 1000))
+        cover_res = await _gen_cover(page, int(time.time() * 1000), ua=identity.ua)
         if not cover_res["ok"]:
             print(f"[dy-protocol] Cover gen failed: {cover_res.get('error','')[:100]} — using empty cover")
             cover_res = {"ok": True, "creation_id": f"l4k45rri{int(time.time()*1000)}",
@@ -598,7 +731,8 @@ async def publish_douyin_protocol(
 
         print("[dy-protocol] Step 8: Create (signing + posting)")
         create_res = await _create_video(page, cookie_dict, vid, cover_res["creation_id"],
-                                         title, desc, topics, cover_res)
+                                          title, desc, topics, cover_res, ua=identity.ua,
+                                          visibility=visibility, allow_save=allow_save)
         if not create_res.get("ok"):
             return False, "", f"Create: {create_res.get('error','')}"
 
@@ -609,6 +743,153 @@ async def publish_douyin_protocol(
     except Exception as e:
         import traceback
         print(f"[dy-protocol] 异常:\n{traceback.format_exc()}")
+        return False, "", f"协议发布异常: {type(e).__name__}: {e!r}"
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def publish_douyin_image_protocol(
+    mgr: BrowserManager, identity: Identity,
+    account_id: int, storage_state_json: str,
+    title: str, desc: str,
+    image_paths: List[str], topics: str = "",
+    visibility: str = "public", allow_save: bool = True,
+    timeout_seconds: int = 360,
+) -> Tuple[bool, str, str]:
+    """协议模式发布抖音图文。返回 (ok, item_id_or_error, error_detail)。"""
+    files = [str(Path(p)) for p in image_paths if p and Path(p).exists()]
+    if not files:
+        return False, "", "没有可用的本地图片文件"
+    if len(files) > 35:
+        return False, "", f"图片数量 {len(files)} 超过上限 35 张"
+
+    cookie_dict = {}
+    try:
+        state = json.loads(storage_state_json or "{}")
+        for c in state.get("cookies", []):
+            cookie_dict[c.get("name", "")] = c.get("value", "")
+    except Exception:
+        pass
+
+    if not cookie_dict.get("sessionid"):
+        return False, "", "登录态缺少 sessionid，请重新登录该抖音账号"
+
+    _signer.ensure_ready()
+
+    ctx = await mgr.context_for(identity)
+    page = await ctx.new_page()
+
+    try:
+        await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+        # 页面可能未正确跳转, 兜底直接导航到 home
+        page_url = page.url
+        if "creator-micro/home" not in page_url and "creator-micro" not in page_url:
+            await page.goto("https://creator.douyin.com/creator-micro/home", wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2000)
+        print(f"[dy-image-protocol] page url after goto: {page.url}")
+
+        cookies_list = await ctx.cookies()
+        for c in cookies_list:
+            v = c.get("value", "")
+            if v:
+                cookie_dict[c.get("name", "")] = v
+        print(f"[dy-image-protocol] cookies count={len(cookie_dict)}, has_sessionid={bool(cookie_dict.get('sessionid'))}")
+
+        try:
+            xmst = await page.evaluate("localStorage.getItem('xmst') || ''")
+            if xmst:
+                cookie_dict["msToken"] = xmst
+                _ms_token.set_cached_ms_token(xmst)
+        except Exception:
+            pass
+
+        uid = cookie_dict.get("uid_tt", "") or identity.account_id or ""
+        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua)
+        ms_token_str = ms_result.get("ms_token", "") if ms_result.get("ok") else (cookie_dict.get("msToken", "") or "")
+        print(f"[dy-image-protocol] msToken via {ms_result.get('source','?')}{(ms_token_str and ' (ok)') or ''}")
+
+        print(f"[dy-image-protocol] 图片数量: {len(files)}")
+
+        print("[dy-image-protocol] Step 1: Upload Auth (STS2 + upload_auth)")
+        sts = await _get_sts2(page, cookie_dict, ms_token_str, ua=identity.ua)
+        if not sts["ok"]:
+            return False, "", f"STS2: {sts['error']}"
+
+        print("[dy-image-protocol] Step 1b: Upload Auth V5")
+        vod_auth = await _get_upload_auth(page, ms_token_str, ua=identity.ua)
+        if not vod_auth["ok"]:
+            return False, "", f"UploadAuth: {vod_auth['error']}"
+
+        # 尝试两套凭证: STS2（含ImageX权限的浏览器会话） -> upload_auth（VOD上传凭证）回退
+        def _try_apply_image(file_size: int, uid_str: str):
+            """用不同凭证组合尝试 ApplyImageUpload。"""
+            for ak, sk, token, label in [
+                (sts["access_key_id"], sts["secret_access_key"], sts["session_token"], "STS2"),
+                (vod_auth["access_key_id"], vod_auth["secret_access_key"], vod_auth["session_token"], "upload_auth"),
+            ]:
+                result = _apply_image_upload(file_size, "", ak, sk, token)
+                if result["ok"]:
+                    return result, label
+                # AccessDenied 则尝试下一组
+                if "AccessDenied" not in result.get("error", ""):
+                    return result, label
+            return {"ok": False, "error": "All credential sources failed for ApplyImageUpload"}, "all"
+
+        image_uris = []
+        for i, img_path in enumerate(files):
+            file_size = os.path.getsize(img_path)
+            print(f"[dy-image-protocol] Step 2.{i+1}: ApplyImageUpload for {img_path} ({file_size} bytes)")
+            apply_res, cred_label = _try_apply_image(file_size, uid)
+            if not apply_res["ok"]:
+                return False, "", f"ApplyImageUpload #{i+1} ({cred_label}): {apply_res['error']}"
+            store_uri = apply_res["store_uri"]
+            print(f"[dy-image-protocol]   via {cred_label} store_uri={store_uri}")
+
+            print(f"[dy-image-protocol] Step 3.{i+1}: Upload to CDN")
+            upload_res = await asyncio.to_thread(_upload_image_to_cdn, img_path,
+                                                 apply_res["upload_host"], store_uri,
+                                                 apply_res["auth_jwt"], uid)
+            if not upload_res["ok"]:
+                return False, "", f"CDN upload #{i+1}: {upload_res['error']}"
+
+            # 获取图片宽高
+            width, height = 0, 0
+            try:
+                from PIL import Image
+                import io as _io
+                with open(img_path, "rb") as f:
+                    img = Image.open(_io.BytesIO(f.read()))
+                    width, height = img.size
+            except Exception:
+                pass
+            image_uris.append({"uri": store_uri, "width": width, "height": height})
+            print(f"[dy-image-protocol]   uploaded OK {width}x{height}")
+
+        print("[dy-image-protocol] Step 7: Limits")
+        await _check_publish_limits(page)
+
+        print("[dy-image-protocol] Step 8: Create (image)")
+        creation_id = _gen_creation_id()
+        cover_data = {"poster": image_uris[0]["uri"]}
+        create_res = await _create_video(page, cookie_dict, "", creation_id,
+                                          title, desc, topics, cover_data,
+                                          ua=identity.ua,
+                                          visibility=visibility, allow_save=allow_save,
+                                          image_uris=image_uris)
+        if not create_res.get("ok"):
+            return False, "", f"Create: {create_res.get('error','')}"
+
+        item_id = create_res["item_id"]
+        print(f"[dy-image-protocol] SUCCESS item_id={item_id}")
+        return True, item_id, ""
+
+    except Exception as e:
+        import traceback
+        print(f"[dy-image-protocol] 异常:\n{traceback.format_exc()}")
         return False, "", f"协议发布异常: {type(e).__name__}: {e!r}"
     finally:
         try:

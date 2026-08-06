@@ -417,11 +417,26 @@ class DouyinSigner:
             traceback.print_exc()
             return False
 
-    def frontier_sign(self, url: str = "", method: str = "GET", data: str = "") -> Optional[str]:
+    def set_environment(self, ua: str = "", platform: str = "") -> None:
+        """签名前把 V8 沙箱里的 navigator.userAgent / platform 对齐到实际账号身份，
+        避免签名内容和真实浏览器发出的请求头不一致而被风控识别。"""
+        if not ua and not platform:
+            return
+        try:
+            if ua:
+                self._ctx.eval(f"navigator.userAgent = {json.dumps(ua)};")
+            if platform:
+                self._ctx.eval(f"navigator.platform = {json.dumps(platform)};")
+        except Exception as e:
+            print(f"[!] set_environment 失败: {e}")
+
+    def frontier_sign(self, url: str = "", method: str = "GET", data: str = "",
+                      ua: str = "", platform: str = "") -> Optional[str]:
         """生成 X-Bogus (HTTP Header 用)。"""
         if not self._ready:
             return None
         try:
+            self.set_environment(ua, platform)
             args = json.dumps({"url": url, "method": method, "data": data if data else None})
             sign_js = f"""
             (function(){{try{{var ac=window.byted_acrawler||byted_acrawler;if(!ac||typeof ac.frontierSign!=='function')return JSON.stringify({{error:'frontierSign not available'}});var args={args};var r=ac.frontierSign(args);return JSON.stringify({{'X-Bogus':String(r?.['X-Bogus']||'')}});}}catch(e){{return JSON.stringify({{error:e.message||String(e)}});}}}})();
@@ -437,15 +452,28 @@ class DouyinSigner:
 
     def generate_a_bogus(self, url: str, method: str = "GET",
                          post_data: str = "", headers: dict = None,
-                         cookies: str = "") -> Optional[str]:
+                         cookies: str = "", ua: str = "", platform: str = "",
+                         debug: bool = True) -> Optional[str]:
         """通过 SDK fetch 拦截器生成 a_bogus (URL 参数用)。"""
         if not self._ready:
             return None
         try:
+            self.set_environment(ua, platform)
             self._ctx.eval("__flushTimeouts();")
             if cookies:
                 cookie_js = f"document.cookie = {json.dumps(cookies)};"
                 self._ctx.eval(cookie_js)
+            if debug:
+                try:
+                    env_check = json.loads(self._ctx.eval(
+                        "JSON.stringify({ua:navigator.userAgent,platform:navigator.platform,"
+                        "cookieLen:(document.cookie||'').length})"
+                    ))
+                    print(f"[signer][a_bogus-debug] env: ua={env_check.get('ua','')[:60]}, "
+                          f"platform={env_check.get('platform')}, cookie_len={env_check.get('cookieLen')} "
+                          f"(passed_cookie_len={len(cookies)})")
+                except Exception as e:
+                    print(f"[signer][a_bogus-debug] env check failed: {e}")
             headers_json = json.dumps(headers or {})
             body_val = json.dumps(post_data) if post_data else 'null'
             gen_js = f"""
@@ -453,6 +481,13 @@ class DouyinSigner:
             """
             result = self._ctx.eval(gen_js)
             result_obj = json.loads(result)
+            if debug:
+                print(f"[signer][a_bogus-debug] url={url}")
+                print(f"[signer][a_bogus-debug] method={method}, post_data_len={len(post_data or '')}, "
+                      f"extra_headers={list((headers or {}).keys())}")
+                print(f"[signer][a_bogus-debug] gen_js result: error={result_obj.get('error')}, "
+                      f"url_modified={result_obj.get('url_modified')}, has_X_Bogus={result_obj.get('has_X_Bogus')}")
+                print(f"[signer][a_bogus-debug] captured_url={result_obj.get('captured_url','')}")
             if result_obj.get("error") or not result_obj.get("captured_url"):
                 return None
             if not result_obj.get("url_modified"):
@@ -463,6 +498,9 @@ class DouyinSigner:
             x_bogus_list = query_params.get('X-Bogus', [])
             ab = a_bogus_list[0] if a_bogus_list else ''
             xb = x_bogus_list[0] if x_bogus_list else ''
+            if debug:
+                print(f"[signer][a_bogus-debug] extracted a_bogus={ab[:24] if ab else None}, "
+                      f"X-Bogus={xb[:24] if xb else None}")
             if ab:
                 return ab
             if xb:
@@ -512,26 +550,33 @@ def ensure_ready() -> bool:
 
 
 def sign(params: dict) -> dict:
-    """统一签名入口。传入 {url, method, data, a_bogus, cookies}。"""
+    """统一签名入口。传入 {url, method, data, a_bogus, cookies, ua, platform}。
+
+    ua/platform 应传账号真实浏览器身份的值(见 browser.identity.Identity.ua),
+    保证签名内容和浏览器实际发出的请求头一致，避免被风控识别为环境不一致。
+    """
     url = params.get("url", "")
     method = params.get("method", "GET")
     data = params.get("data", "")
     need_a_bogus = params.get("a_bogus", False)
     cookies = params.get("cookies", "")
+    ua = params.get("ua", "")
+    platform = params.get("platform", "")
 
     if not _signer or not _ready:
         return {"ok": False, "error": "signer not ready (initializing, retry in ~15s)", "ready": False}
 
     result = {"ok": True, "ready": True, "method": method}
 
-    xb = _signer.frontier_sign(url, method, data)
+    xb = _signer.frontier_sign(url, method, data, ua=ua, platform=platform)
     if xb:
         result["X-Bogus"] = xb
     else:
         result["X-Bogus"] = None
 
     if need_a_bogus and cookies:
-        ab = _signer.generate_a_bogus(url, method, post_data=data, cookies=cookies)
+        ab = _signer.generate_a_bogus(url, method, post_data=data, cookies=cookies,
+                                      ua=ua, platform=platform)
         if ab:
             result["a_bogus"] = ab
 

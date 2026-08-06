@@ -13,8 +13,16 @@ import re
 from typing import Optional
 from urllib.parse import urlencode
 
+from ..browser.identity import _platform_bits
+
 CREATOR_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _browser_platform(ua: str) -> str:
+    if not ua:
+        return "Win32"
+    return _platform_bits(ua)[0]
 
 
 def _parse_storage_state(storage_state_json: str) -> dict:
@@ -41,9 +49,11 @@ def _csrf_token(cookies: dict) -> str:
     return cookies.get("passport_csrf_token", "")
 
 
-def check_creator_web_session(storage_state_json: str) -> dict:
+def check_creator_web_session(storage_state_json: str, ua: str = "") -> dict:
     """Phase 1: 验证创作者平台基础会话是否有效。
 
+    ua 应传该账号真实浏览器身份的 User-Agent(见 browser.identity.Identity.ua),
+    保证这里的纯 HTTP 探活请求头和账号平时用的浏览器身份一致。
     返回 {"valid": True} 或 {"valid": False, "error": "..."}。
     """
     from curl_cffi import requests as curl_req
@@ -54,7 +64,7 @@ def check_creator_web_session(storage_state_json: str) -> dict:
 
     url = "https://creator.douyin.com/account/api/v1/user/account/info"
     headers = {
-        "User-Agent": CREATOR_UA,
+        "User-Agent": ua or CREATOR_UA,
         "Referer": "https://creator.douyin.com/creator-micro/home",
         "Accept": "application/json, text/plain, */*",
         "Cookie": _cookie_header(cookies),
@@ -83,14 +93,14 @@ def check_creator_web_session(storage_state_json: str) -> dict:
             "detail": json.dumps(data, ensure_ascii=False)[:300]}
 
 
-def check_creator_publish_session(storage_state_json: str) -> dict:
+def check_creator_publish_session(storage_state_json: str, ua: str = "") -> dict:
     """Phase 2: 验证创作者平台发布权限是否有效。
 
     先跑 Phase 1，再调 sts2 接口看是否拿到发布凭证。
     """
     from curl_cffi import requests as curl_req
 
-    web = check_creator_web_session(storage_state_json)
+    web = check_creator_web_session(storage_state_json, ua=ua)
     if not web["valid"]:
         return web
 
@@ -98,12 +108,12 @@ def check_creator_publish_session(storage_state_json: str) -> dict:
     params = {
         "scene": "web", "aid": "2906", "app_name": "aweme_creator_platform",
         "device_platform": "web", "cookie_enabled": "true",
-        "browser_language": "zh-CN", "browser_platform": "Win32",
+        "browser_language": "zh-CN", "browser_platform": _browser_platform(ua),
         "support_h265": "1",
     }
     url = f"https://creator.douyin.com/aweme/mid/video/sts2/?{urlencode(params)}"
     headers = {
-        "User-Agent": CREATOR_UA,
+        "User-Agent": ua or CREATOR_UA,
         "Referer": "https://creator.douyin.com/",
         "Accept": "application/json, text/plain, */*",
         "Cookie": _cookie_header(cookies),
@@ -135,12 +145,12 @@ def check_creator_publish_session(storage_state_json: str) -> dict:
             "detail": json.dumps(data, ensure_ascii=False)[:300]}
 
 
-def check_cookie_health(storage_state_json: str, publish_required: bool = True) -> dict:
+def check_cookie_health(storage_state_json: str, publish_required: bool = True, ua: str = "") -> dict:
     """统一入口:根据是否要发布选择检测深度。
 
     publish_required=True → Phase 1 + Phase 2
     publish_required=False → Phase 1 only
     """
     if publish_required:
-        return check_creator_publish_session(storage_state_json)
-    return check_creator_web_session(storage_state_json)
+        return check_creator_publish_session(storage_state_json, ua=ua)
+    return check_creator_web_session(storage_state_json, ua=ua)

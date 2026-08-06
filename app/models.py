@@ -37,6 +37,7 @@ class DouyinAccount(SQLModel, table=True):
     cookie_status: str = "unknown" # unknown | valid | expired | checking
     last_health_check: Optional[datetime] = None  # 上次 cookie 探活时间
     last_active_at: Optional[datetime] = None  # 上次活跃(用于错峰调度)
+    last_creator_active: Optional[datetime] = None  # 上次创作者活跃(用于创作者保活)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

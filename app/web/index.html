@@ -1384,8 +1384,8 @@
         <div class="row">
           <select id="pub-acc" aria-label="发布账号"></select>
           <select id="pub-type" aria-label="类型" onchange="onPubType()">
-            <option value="images">图文(图集)</option>
             <option value="video">视频</option>
+            <option value="images">图文(图集)</option>
           </select>
         </div>
         <div>
@@ -1416,24 +1416,26 @@
           <div class="publish-permission">
             <label class="field" for="pub-publish-type">发布方式</label>
             <select id="pub-publish-type" aria-label="发布方式" onchange="onPubMethodChange()">
-              <option value="simulation">浏览器模拟(稳定,需弹窗验证)</option>
               <option value="protocol">协议直发(无头,需签名引擎 ~15s 冷启动)</option>
+              <option value="simulation">浏览器模拟(稳定,需弹窗验证)</option>
             </select>
           </div>
-          <div class="publish-permission">
-            <label class="field" for="pub-visibility">谁可以看</label>
-            <select id="pub-visibility" aria-label="谁可以看">
-              <option value="public">公开</option>
-              <option value="friends">好友可见</option>
-              <option value="private">仅自己可见</option>
-            </select>
-          </div>
-          <div class="publish-permission">
-            <label class="field" for="pub-allowsave">保存权限</label>
-            <select id="pub-allowsave" aria-label="保存权限">
-              <option value="1">允许他人保存</option>
-              <option value="0">不允许</option>
-            </select>
+          <div class="row publish-permission" style="gap:24px;align-items:flex-start">
+            <div style="flex:1;max-width:200px">
+              <label class="field" for="pub-visibility">谁可以看</label>
+              <select id="pub-visibility" aria-label="谁可以看">
+                <option value="public">公开</option>
+                <option value="friends">好友可见</option>
+                <option value="private">仅自己可见</option>
+              </select>
+            </div>
+            <div style="flex:1;max-width:200px">
+              <label class="field" for="pub-allowsave">保存权限</label>
+              <select id="pub-allowsave" aria-label="保存权限">
+                <option value="1">允许他人保存</option>
+                <option value="0">不允许</option>
+              </select>
+            </div>
           </div>
         </fieldset>
         <div class="row" style="justify-content:flex-start">

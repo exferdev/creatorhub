@@ -132,7 +132,7 @@ class MonitorEngine:
         self._cookie_health_last: float = 0.0  # 上次 cookie 巡检时间戳
         self._commenting: set[int] = set()         # 正在执行的评论任务 id
         self._actioning: set[int] = set()           # 正在执行的写操作任务 id
-        self._last_acct_check = time.time()   # 上次账号体检时间
+        self._last_acct_check = 0.0   # 上次账号体检时间(0=启动后立即跑第一轮,不用等满一个 interval)
         self._geo_checked: dict = {}          # account_id -> 已校验过地区的代理(避免重复探测)
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -187,6 +187,7 @@ class MonitorEngine:
                 await self._process_comment_rules()
                 await self._process_comment_tasks()
                 await self._process_action_tasks()
+                await self._creator_keepalive_check()
                 await self._cookie_health_check()
             except Exception as e:
                 log.exception("scan loop error: %s", e)
@@ -310,6 +311,8 @@ class MonitorEngine:
                         p = parse_self_user(u)
                     a.status = "active"
                     a.last_active_at = datetime.utcnow()   # 保活成功:重置闲置计时
+                    a.cookie_status = "valid"
+                    a.last_health_check = datetime.utcnow()
                     if p.get("nickname"):
                         a.nickname = p["nickname"]
                     a.sec_uid = p.get("sec_uid") or a.sec_uid
@@ -320,6 +323,8 @@ class MonitorEngine:
                     got_profile = True
                 elif err == "logged_out":
                     a.status = "invalid"
+                    a.cookie_status = "expired"
+                    a.last_health_check = datetime.utcnow()
                     log.warning("账号 %s(%s)登录态失效", aid, a.nickname)
                     got_profile = False
                 else:
@@ -329,6 +334,11 @@ class MonitorEngine:
             if got_profile and self.cfg.engine.work_health_stat_snapshots:
                 try:
                     self._write_stat_snapshot(aid, platform, [])
+                except Exception:
+                    pass
+            if got_profile:
+                try:
+                    self._cache_avatar(aid, a.avatar)
                 except Exception:
                     pass
 
@@ -357,7 +367,8 @@ class MonitorEngine:
                 continue
             if not items:
                 continue
-            self._stamp_active(aid)
+            # 注意:抓自己作品列表是公开数据,不需要登录态,抓到不能证明账号仍登录——
+            # 不能在这里 _stamp_active(),否则会掩盖真正的登录校验(_check_accounts)。
             try:
                 await self._eval_work_health(aid, platform, items)
             except Exception as e:
@@ -1399,19 +1410,27 @@ class MonitorEngine:
                         task_id, False, "", "该账号未完成抖音「创作者登录」,请先在账号页点「创作者登录」")
                 # 发布前 cookie 探活（协议模式需要有效的创作者会话）
                 from .cookie_health import check_cookie_health as _chk
-                health = await asyncio.to_thread(_chk, state, publish_required=True)
+                health = await asyncio.to_thread(_chk, state, publish_required=True, ua=identity.ua)
                 if not health.get("valid"):
                     self._mark_cookie_health(acc_id, "expired")
                     return await self._finish_publish(
                         task_id, False, "",
                         f"创作者登录态已失效: {health.get('error','')[:100]} — 请重新「创作者登录」")
                 try:
-                    from ..platforms.douyin.protocol_publish import publish_douyin_protocol
-                    ok, item_id, err = await publish_douyin_protocol(
-                        self.browser, identity, acc_id, state,
-                        media_type, title, desc, files,
-                        topics=topics, visibility=visibility,
-                        allow_save=allow_save)
+                    if media_type == "images":
+                        from ..platforms.douyin.protocol_publish import publish_douyin_image_protocol
+                        ok, item_id, err = await publish_douyin_image_protocol(
+                            self.browser, identity, acc_id, state,
+                            title, desc, files,
+                            topics=topics, visibility=visibility,
+                            allow_save=allow_save)
+                    else:
+                        from ..platforms.douyin.protocol_publish import publish_douyin_protocol
+                        ok, item_id, err = await publish_douyin_protocol(
+                            self.browser, identity, acc_id, state,
+                            media_type, title, desc, files,
+                            topics=topics, visibility=visibility,
+                            allow_save=allow_save)
                     url = f"https://www.douyin.com/video/{item_id}" if (ok and item_id) else ""
                 except Exception as e:
                     ok, url, err = False, "", f"协议发布异常: {type(e).__name__}: {e!r}"
@@ -1449,6 +1468,11 @@ class MonitorEngine:
                 t.result_url = url or t.result_url
                 t.error = "" if ok else err
                 s.add(t); s.commit()
+                if ok and platform == "douyin":
+                    acc = s.get(DouyinAccount, t.account_id)
+                    if acc:
+                        acc.last_creator_active = datetime.utcnow()
+                        s.add(acc); s.commit()
         if ok:
             try:
                 with get_session() as s:
@@ -1465,20 +1489,130 @@ class MonitorEngine:
 
     @staticmethod
     def _mark_cookie_health(account_id: int, status: str):
-        """更新账号 cookie 状态。"""
+        """更新账号 cookie 状态,并同步 status 字段。"""
         try:
             with get_session() as s:
                 acc = s.get(DouyinAccount, account_id)
                 if acc:
                     acc.cookie_status = status
+                    if status == "expired":
+                        acc.status = "invalid"
+                    elif status == "valid":
+                        acc.status = "active"
                     from datetime import datetime
                     acc.last_health_check = datetime.utcnow()
                     s.add(acc); s.commit()
         except Exception:
             pass
 
+    @staticmethod
+    def _cache_avatar(account_id: int, avatar_url: str):
+        """后台下载头像到本地缓存 data/avatars/。fire-and-forget,不影响主流程。"""
+        if not avatar_url:
+            return
+        cache_dir = Path(__file__).resolve().parent.parent.parent / "data" / "avatars"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        local_path = cache_dir / f"{account_id}.jpg"
+        try:
+            with get_session() as s:
+                acc = s.get(DouyinAccount, account_id)
+                state = acc.storage_state if acc else ""
+        except Exception:
+            state = ""
+        try:
+            from ..platforms.douyin import cookie_from_state as _cookie_from_state
+            import curl_cffi.requests as curl_req
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.douyin.com/",
+            }
+            cookies = _cookie_from_state(state) if state else ""
+            if cookies:
+                headers["Cookie"] = cookies
+            resp = curl_req.get(avatar_url, headers=headers, impersonate="chrome131", timeout=10)
+            if resp.status_code == 200 and len(resp.content) > 100:
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+                return
+        except Exception:
+            pass
+        try:
+            import curl_cffi.requests as curl_req
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.douyin.com/",
+            }
+            resp = curl_req.get(avatar_url, headers=headers, impersonate="chrome131", timeout=10)
+            if resp.status_code == 200 and len(resp.content) > 100:
+                with open(local_path, "wb") as f:
+                    f.write(resp.content)
+        except Exception:
+            pass
+
+    async def _creator_keepalive_check(self):
+        """每 N 分钟对活跃的创作者账号开浏览器访问 creator.douyin.com,维持创作者会话。"""
+        hours = self.cfg.engine.creator_keepalive_hours
+        if hours <= 0:
+            return
+        import time as _time
+        now = _time.time()
+        if now - getattr(self, "_creator_keepalive_last", 0.0) < min(300, hours * 60):
+            return
+        self._creator_keepalive_last = now
+
+        with get_session() as s:
+            accs = s.exec(
+                select(DouyinAccount)
+                .where(DouyinAccount.platform == "douyin")
+                .where(DouyinAccount.status == "active")
+                .where(DouyinAccount.creator_storage_state != "")
+            ).all()
+            candidates = []
+            for a in accs:
+                last = a.last_creator_active
+                if last and (datetime.utcnow() - last).total_seconds() < hours * 3600 * (1.0 + random.uniform(-0.1, 0.1)):
+                    continue
+                candidates.append((a.id, self.browser.identity_for(a)))
+        if not candidates:
+            return
+        print(f"[creator-keepalive] 保活 {len(candidates)} 个抖音创作者账号")
+
+        for aid, identity in candidates:
+            try:
+                async with self._account_guard(aid):
+                    ctx = await self.browser.context_for(identity)
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto("https://creator.douyin.com/creator-micro/home",
+                                        wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(2000)
+                        # 调一个创作者 API 验证会话有效性
+                        resp = await page.evaluate("""
+                            (async () => {
+                                const r = await fetch('/aweme/v1/creator/pc/user/info/', {credentials:'include'});
+                                return {status: r.status, ok: r.ok};
+                            })()
+                        """)
+                        active_ok = resp.get("ok", False)
+                        if active_ok:
+                            with get_session() as s2:
+                                a2 = s2.get(DouyinAccount, aid)
+                                if a2:
+                                    a2.last_creator_active = datetime.utcnow()
+                                    s2.add(a2); s2.commit()
+                            print(f"[creator-keepalive] 账号 #{aid} 创作者会话保活成功")
+                        else:
+                            print(f"[creator-keepalive] 账号 #{aid} 创作者 API 返回异常 status={resp.get('status')}")
+                    finally:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[creator-keepalive] 账号 #{aid} 保活异常: {e!r}")
+
     async def _cookie_health_check(self):
-        """每 30 分钟巡检一次 douyin 账号的 creator cookie 有效性。"""
+        """每 30 分钟巡检一次 douyin 账号 cookie 有效性。优先用 creator_storage_state,否则 fallback 到 storage_state。"""
         import time
         now = time.time()
         if now - self._cookie_health_last < 1800:
@@ -1493,14 +1627,17 @@ class MonitorEngine:
                     .where(DouyinAccount.platform == "douyin")
                     .where(DouyinAccount.status == "active")
                 ).all()
-                candidates = [(a.id, a.creator_storage_state) for a in accs
-                              if a.creator_storage_state]
+                candidates = []
+                for a in accs:
+                    state = a.creator_storage_state or a.storage_state
+                    if state:
+                        candidates.append((a.id, state, self.browser.identity_for(a).ua))
             if not candidates:
                 return
-            print(f"[cookie-health] 巡检 {len(candidates)} 个抖音账号的创作者 cookie")
-            for acc_id, state in candidates:
+            print(f"[cookie-health] 巡检 {len(candidates)} 个抖音账号的 cookie")
+            for acc_id, state, ua in candidates:
                 try:
-                    health = await asyncio.to_thread(_chk, state, publish_required=False)
+                    health = await asyncio.to_thread(_chk, state, publish_required=False, ua=ua)
                     if health.get("valid"):
                         self._mark_cookie_health(acc_id, "valid")
                     else:

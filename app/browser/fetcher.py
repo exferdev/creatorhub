@@ -599,6 +599,7 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
     storage_uid = ""
     profile_user_seen = False
     error = ""
+    logged_out = False
     page = await mgr.new_page(identity, block_media)
 
     def is_profile(resp):
@@ -606,7 +607,7 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
         return SELF_PROFILE_API in resp.url
 
     async def on_response(resp):
-        nonlocal profile_user_seen
+        nonlocal profile_user_seen, logged_out
         url = resp.url
         if ("douyin.com" in url and ("/aweme/v1/web/" in url or "/web/api/" in url)
                 and len(api_seen) < 40):
@@ -627,8 +628,13 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
             if u:
                 result.update(u)
                 profile_user_seen = True
-            elif isinstance(data, dict) and len(shapes) < 4:
-                shapes.append(f"{path} keys={sorted(data)[:12]}")
+            else:
+                if isinstance(data, dict) and len(shapes) < 4:
+                    shapes.append(f"{path} keys={sorted(data)[:12]}")
+                # profile/self 是权威接口:明确拿到非 0 status_code(如 8=用户未登录)
+                # 就是服务端给的确定性结论,不能再退回 localStorage/作品列表弱信号去"救"。
+                if isinstance(data, dict) and data.get("status_code") not in (0, None):
+                    logged_out = True
         elif POST_API in url and resp.status == 200:
             try:
                 data = await resp.json()
@@ -640,7 +646,6 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
                 post_users.append(u)
 
     page.on("response", on_response)
-    logged_out = False
     final_url = ""
     has_login_btn = None
     has_login_cookie = None
@@ -718,6 +723,11 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
             await page.close()
         except Exception:
             pass
+
+    if result and logged_out:
+        # profile/self 权威接口或 passport 跳转已经给出「未登录」的确定性结论,
+        # 不能让 localStorage/本人作品列表这类弱信号覆盖回「登录成功」。
+        result.clear()
 
     if not result:
         if logged_out:

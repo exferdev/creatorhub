@@ -89,7 +89,8 @@ def _save_strdata(strdata: str):
 
 
 def refresh_ms_token_via_strdata(strdata: str = "", ms_appid: str = "6383",
-                                  existing_ms_token: str = "", max_retries: int = 3) -> dict:
+                                  existing_ms_token: str = "", max_retries: int = 3,
+                                  ua: str = "") -> dict:
     """S0: 用 strData 重放 /web/r/token API 获取 msToken (纯 Python, 首选)。"""
     import requests as req
 
@@ -103,7 +104,7 @@ def refresh_ms_token_via_strdata(strdata: str = "", ms_appid: str = "6383",
         "Content-Type": "text/plain;charset=UTF-8",
         "Origin": "https://www.douyin.com",
         "Referer": "https://www.douyin.com/",
-        "User-Agent": _UA,
+        "User-Agent": ua or _UA,
     }
     body = dict(MSSDK_BODY_TEMPLATE)
     body["strData"] = strdata
@@ -138,7 +139,7 @@ def refresh_ms_token_via_strdata(strdata: str = "", ms_appid: str = "6383",
 
 
 def refresh_ms_token_via_mssdk(cookies_dict: dict, existing_ms_token: str = "",
-                                str_data: str = "") -> dict:
+                                str_data: str = "", ua: str = "") -> dict:
     """S2: 纯 Python mssdk API 两步交换 (需有效 cookies)。"""
     import requests as req
 
@@ -147,7 +148,7 @@ def refresh_ms_token_via_mssdk(cookies_dict: dict, existing_ms_token: str = "",
         "Content-Type": "text/plain;charset=UTF-8",
         "Origin": "https://creator.douyin.com",
         "Referer": "https://creator.douyin.com/",
-        "User-Agent": _UA,
+        "User-Agent": ua or _UA,
     }
 
     body = dict(MSSDK_BODY_TEMPLATE)
@@ -187,14 +188,16 @@ def refresh_ms_token_via_mssdk(cookies_dict: dict, existing_ms_token: str = "",
 
 
 def get_ms_token(cookies: dict = None, force_refresh: bool = False,
-                 ms_appid: str = "2906") -> dict:
+                 ms_appid: str = "2906", ua: str = "") -> dict:
     """获取 msToken，自动选择最优策略。
 
     优先级: strData重放(纯Python) > 缓存(7天) > mssdk API
+    ua 应传账号真实浏览器身份的 User-Agent,保证这里直连的 HTTP 请求
+    和该账号浏览器实际发出的请求头一致。
     """
     ms_tok = (cookies or {}).get("msToken", "")
 
-    result = refresh_ms_token_via_strdata(existing_ms_token=ms_tok, ms_appid=ms_appid)
+    result = refresh_ms_token_via_strdata(existing_ms_token=ms_tok, ms_appid=ms_appid, ua=ua)
     if result.get("ok"):
         return result
 
@@ -204,7 +207,7 @@ def get_ms_token(cookies: dict = None, force_refresh: bool = False,
             return {"ok": True, "ms_token": cached, "source": "cache"}
 
     if cookies:
-        result = refresh_ms_token_via_mssdk(cookies, ms_tok)
+        result = refresh_ms_token_via_mssdk(cookies, ms_tok, ua=ua)
         if result.get("ok"):
             return result
 

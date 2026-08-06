@@ -21,6 +21,7 @@ class EngineConfig:
     comment_max_scrolls: int = 6       # 评论区翻页深度(滚动容器次数,越大扫得越深)
     account_check_interval_seconds: int = 1800  # 账号体检/闲置保活轮询间隔(0=关闭)
     idle_keepalive_hours: float = 6.0  # 闲置保活阈值:账号距上次活跃超此时长才摸一次(0=每轮都摸,退回旧行为)
+    creator_keepalive_hours: float = 4.0  # 创作者保活阈值:账号距上次创作者活跃超此时长,开浏览器访问 creator.douyin.com 维持会话(0=关闭)
     # 自有账号评论模式:创作中心评论管理页(实验性,抖音改版时改这里)
     creator_comment_url: str = "https://creator.douyin.com/creator-micro/interaction/comment-management"
     request_timeout_seconds: int = 20

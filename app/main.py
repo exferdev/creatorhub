@@ -336,7 +336,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
         # 3) 仅在成功且 cookie 探活通过时才落库
         if ok and state_json:
             from .engine.cookie_health import check_cookie_health as _login_chk
-            health = await asyncio.to_thread(_login_chk, state_json, publish_required=creator)
+            health = await asyncio.to_thread(_login_chk, state_json, publish_required=creator, ua=identity.ua)
             if not health.get("valid"):
                 msg = health.get("error", "cookie 验证失败")[:120]
                 print(f"[login] cookie 探活失败: {msg}")
@@ -663,9 +663,10 @@ async def check_account_health_endpoint(account_id: int):
         if not acc:
             raise HTTPException(404, "账号不存在")
         state = acc.creator_storage_state or acc.storage_state or ""
+        ua = browser.identity_for(acc).ua if browser else ""
     if not state:
         return {"ok": False, "valid": False, "error": "no cookie state"}
-    health = await asyncio.to_thread(_chk, state, publish_required=True)
+    health = await asyncio.to_thread(_chk, state, publish_required=True, ua=ua)
     status = "valid" if health.get("valid") else "expired"
     with get_session() as s:
         acc2 = s.get(DouyinAccount, account_id)
@@ -675,6 +676,115 @@ async def check_account_health_endpoint(account_id: int):
             s.add(acc2); s.commit()
     return {"ok": True, "valid": health.get("valid"), "status": status,
             "error": health.get("error", "") if not health.get("valid") else ""}
+
+
+# ─────────── 头像缓存代理 ───────────
+AVATAR_DIR = Path(__file__).resolve().parent.parent / "data" / "avatars"
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+
+_AVATAR_LOCK = threading.Lock()
+
+
+def _fetch_and_cache_avatar(account_id: int, remote_url: str, storage_state: str) -> tuple:
+    """下载远程头像到本地缓存,返回 (local_path, content_type, body_bytes)。"""
+    local_path = AVATAR_DIR / f"{account_id}.jpg"
+    body = None
+    try:
+        import curl_cffi.requests as curl_req
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "Referer": "https://www.douyin.com/"}
+        cookies = douyin_cookie_from_state(storage_state) if storage_state else ""
+        if cookies:
+            headers["Cookie"] = cookies
+        resp = curl_req.get(remote_url, headers=headers, impersonate="chrome131", timeout=10)
+        if resp.status_code == 200 and len(resp.content) > 100:
+            body = resp.content
+            ct = resp.headers.get("Content-Type", "image/jpeg")
+            with open(local_path, "wb") as f:
+                f.write(body)
+            return str(local_path), ct, body
+    except Exception:
+        pass
+    # Try without cookie
+    try:
+        import curl_cffi.requests as curl_req
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "Referer": "https://www.douyin.com/"}
+        resp = curl_req.get(remote_url, headers=headers, impersonate="chrome131", timeout=10)
+        if resp.status_code == 200 and len(resp.content) > 100:
+            body = resp.content
+            ct = resp.headers.get("Content-Type", "image/jpeg")
+            with open(local_path, "wb") as f:
+                f.write(body)
+            return str(local_path), ct, body
+    except Exception:
+        pass
+    return "", "", None
+
+
+@app.get("/api/avatar/{account_id}")
+async def get_avatar(account_id: int):
+    """代理头像请求:优先本地缓存,miss 时从远程拉取并缓存。"""
+    local_path = AVATAR_DIR / f"{account_id}.jpg"
+    if local_path.exists():
+        return FileResponse(local_path, media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=3600"})
+
+    with _AVATAR_LOCK:
+        if local_path.exists():
+            return FileResponse(local_path, media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=3600"})
+        with get_session() as s:
+            acc = s.get(DouyinAccount, account_id)
+            if not acc or not acc.avatar:
+                return _empty_png()
+            remote_url = acc.avatar
+            state = acc.storage_state or ""
+        _, ct, body = _fetch_and_cache_avatar(account_id, remote_url, state)
+        if body:
+            return FileResponse(local_path, media_type=ct or "image/jpeg",
+                                headers={"Cache-Control": "public, max-age=3600"})
+    return _empty_png()
+
+
+def _empty_png():
+    return FileResponse(AVATAR_DIR / "_empty.png", media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.post("/api/accounts/{account_id}/refresh-avatar")
+async def refresh_avatar(account_id: int):
+    """触发重新下载头像(到本地缓存)。"""
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if not acc or not acc.avatar:
+            raise HTTPException(404, "账号无头像")
+        remote_url = acc.avatar
+        state = acc.storage_state or ""
+    local_path = AVATAR_DIR / f"{account_id}.jpg"
+    _, _, body = _fetch_and_cache_avatar(account_id, remote_url, state)
+    if body:
+        return {"ok": True, "cached": str(local_path)}
+    # 尝试刷新 profile 重取头像 URL
+    if browser:
+        try:
+            identity = browser.identity_for(acc)
+            prof, err = await fetch_self_profile(browser, identity)
+            if prof:
+                p = parse_self_user(prof)
+                new_url = p.get("avatar") or ""
+                if new_url:
+                    with get_session() as s2:
+                        acc2 = s2.get(DouyinAccount, account_id)
+                        if acc2:
+                            acc2.avatar = new_url
+                            s2.add(acc2); s2.commit()
+                    _, _, body = _fetch_and_cache_avatar(account_id, new_url, state)
+                    if body:
+                        return {"ok": True, "cached": str(local_path), "refreshed": True}
+        except Exception:
+            pass
+    raise HTTPException(502, "无法获取头像")
 
 
 # ─────────── 本账号管理:作品 ───────────
