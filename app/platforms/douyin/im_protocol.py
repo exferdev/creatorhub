@@ -445,6 +445,7 @@ class DouyinIMClient:
         inner = _build_history_body(conv_id, conv_type, conv_short_id, cursor, count)
         body = self._make_request(SVC_HISTORY, inner)
         raw = self._post("/v1/message/get_by_conversation", body)
+        print(f"[im-protocol] get_by_conversation raw_len={len(raw)} preview={raw[:200]!r}")
         return self._parse_history(raw)
 
     def _parse_history(self, raw: bytes) -> Tuple[List[dict], bool, int]:
