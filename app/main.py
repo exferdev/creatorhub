@@ -1573,6 +1573,8 @@ async def dm_protocol_conversations(account_id: int):
     """协议模式:获取会话列表,同步存入 DB 供浏览器模式复用。"""
     client = await _get_im_client(account_id)
     convs = await asyncio.to_thread(client.get_message_by_init)
+    init_msg_count = sum(len(c.get("messages", []) or []) for c in convs)
+    print(f"[im-protocol-conv] {len(convs)} conversations, {init_msg_count} init messages extracted")
     # 存入 DB,使浏览器模式和协议模式共享同一套数据
     with get_session() as s:
         for c in convs:
