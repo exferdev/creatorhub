@@ -1649,28 +1649,10 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 
 @app.post("/api/accounts/{account_id}/dm/protocol/send")
 async def dm_protocol_send(account_id: int, body: SendDmIn):
-    """协议模式:发送私信。优先走浏览器 fetch 让 SDK 注入 guard headers。"""
+    """协议模式:发送私信。HTTP+guard headers ECDH签名投递。"""
     client = await _get_im_client(account_id)
-    with get_session() as s:
-        acc = s.get(DouyinAccount, account_id)
-    # 尝试通过浏览器 page.evaluate(fetch) — SDK 自动注入 guard headers
-    if browser and acc:
-        try:
-            identity = browser.identity_for(acc)
-            ctx = await browser.context_for(identity)
-            page = await ctx.new_page()
-            await page.goto("https://www.douyin.com/", wait_until="domcontentloaded",
-                             timeout=15000)
-            await page.wait_for_timeout(2000)
-            result = await client.send_via_browser(page, body.conv_id, body.content)
-            await page.close()
-        except Exception as e:
-            print(f"[dm-protocol] browser send failed, fallback HTTP: {e!r}")
-            result = await asyncio.to_thread(
-                client.send_message, body.conv_id, body.content)
-    else:
-        result = await asyncio.to_thread(
-            client.send_message, body.conv_id, body.content)
+    result = await asyncio.to_thread(
+        client.send_message, body.conv_id, body.content)
     if result.get("ok"):
         from datetime import datetime as _dt, timezone as _tz
         now_ts = int(_dt.now(_tz.utc).timestamp())

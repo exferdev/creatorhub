@@ -347,8 +347,11 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
     result = {}
     if not ec_private_pem or not server_cert_pem:
         return result
+    # 还原 \\n 为真实换行
+    ec_private_pem = ec_private_pem.replace("\\n", "\n")
+    server_cert_pem = server_cert_pem.replace("\\n", "\n")
     guard_cookie = cookies.get("bd_ticket_guard_client_data_v2", "")
-    ts_sign, ticket = "", ""
+    ts_sign = ""
     if guard_cookie:
         try:
             import base64 as _b64_ck
@@ -356,10 +359,9 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
             decoded = _b64_ck.b64decode(guard_cookie + "===")
             gd = _json.loads(decoded)
             ts_sign = gd.get("ts_sign", "")
-            ticket = gd.get("ticket", "")
         except Exception:
             pass
-    if not ts_sign or not ticket:
+    if not ts_sign:
         return result
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -377,9 +379,10 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
         shared_key = priv_key.exchange(ec.ECDH(), server_pub)
 
         # HMAC-SHA256(req_content)
+        import time as _time
         ts = int(_time.time())
-        req_content = f"ticket,path,timestamp"
-        sign_input = f"{ticket},{path},{ts}"
+        req_content = "ticket,path,timestamp"
+        sign_input = f"{ts_sign},{path},{ts}"
         h = hmac.HMAC(shared_key, hashes.SHA256())
         h.update(sign_input.encode())
         req_sign = _b64_c.b64encode(h.finalize()).decode().rstrip("=")
