@@ -308,10 +308,13 @@ def _fetch_identity_token(cookies: Dict[str, str], device_id: str, ua: str,
     import curl_cffi.requests as curl
     import base64 as _b64
     aid = "6383"
+    # scene=web_im 是发送消息必需的场景标识(浏览器实测)
     path = "/passport/safe/get_identity_security_token"
     ts, sig = _passport_aid_sign(aid, path)
-    url = (f"https://www.douyin.com{path}?aid={aid}&is_from_ttaccountsdk=1"
-           f"&device_platform=web_app&ts={ts}")
+    url = (f"https://www.douyin.com{path}?passport_jssdk_version=4.2.3"
+           f"&passport_jssdk_type=lite&is_from_ttaccountsdk=1&aid={aid}"
+           f"&language=zh&scene=web_im&auto_retry_req=0&skip_verify=false"
+           f"&identity_token_force_get_tag=0&device_platform=web_app&ts={ts}")
     h = {
         "User-Agent": ua, "Referer": "https://www.douyin.com/",
         "x-passport-request-sign": f"ts={ts},sign={sig}",
@@ -325,7 +328,6 @@ def _fetch_identity_token(cookies: Dict[str, str], device_id: str, ua: str,
         data = resp.json()
         token = (data.get("data") or {}).get("identity_security_token") or ""
         if token and isinstance(token, str) and len(token) > 10:
-            # 浏览器格式: {"token":"xxx"}
             return json.dumps({"token": token})
     except Exception:
         pass
@@ -454,17 +456,41 @@ class DouyinIMClient:
     def _next_mid(self) -> int:
         self._method_id += 1; return self._method_id
 
-    def _post(self, path: str, body: bytes) -> bytes:
-        import curl_cffi.requests as curl
+    def _gen_abogus(self, path: str, query_params: dict = None) -> str:
+        """用 V8 签名器生成 a_bogus"""
         try:
-            resp = self._sess.post(
-                f"{self.API_BASE}{path}", data=body,
-                cookies=self.cookies, timeout=30,
-            )
+            from . import signer as _signer
+            if _signer._ready and _signer._signer:
+                qs = ""
+                if query_params:
+                    from urllib.parse import urlencode
+                    qs = urlencode({k: v for k, v in query_params.items() if v})
+                url = f"https://imapi.douyin.com{path}"
+                if qs:
+                    url += "?" + qs
+                return _signer._signer.generate_a_bogus(url, self.ua) or ""
+        except Exception:
+            pass
+        return ""
+
+    def _post(self, path: str, body: bytes, query_params: dict = None,
+              a_bogus: str = "") -> bytes:
+        import curl_cffi.requests as curl
+        from urllib.parse import urlencode
+        url = f"{self.API_BASE}{path}"
+        params = dict(query_params or {})
+        if a_bogus:
+            params["a_bogus"] = a_bogus
+        if params:
+            qs = urlencode({k: v for k, v in params.items() if v})
+            url += "?" + qs
+        try:
+            resp = self._sess.post(url, data=body, cookies=self.cookies, timeout=30)
             print(f"[im-protocol] POST {path} -> {resp.status_code}, {len(resp.content)} bytes")
             return resp.content
         except Exception as e:
             print(f"[im-protocol] POST {path} ERROR: {e!r}")
+            return b""
             return b""
 
     def _make_request(self, service_id: int, inner_body: bytes,
@@ -583,7 +609,7 @@ class DouyinIMClient:
 
     def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
-        # 获取投递必需的 identity_security_token
+        # 获取投递必需的 identity_security_token (scene=web_im)
         security_token = ""
         security_device_id = str(self.self_uid or self.device_id)
         try:
@@ -594,7 +620,20 @@ class DouyinIMClient:
         body = self._make_request(SVC_SEND, inner,
                                   security_token=security_token,
                                   security_device_id=security_device_id)
-        raw = self._post("/v1/message/send", body)
+        # 构建带签名参数的 URL (浏览器实测需要 a_bogus+msToken+verifyFp)
+        ms_token = self.cookies.get("msToken", "")
+        verify_fp = self.cookies.get("UIFID_TEMP", "")[:19] or ""
+        url_path = "/v1/message/send"
+        query_params = {"msToken": ms_token or ""}
+        if verify_fp and len(verify_fp) > 10:
+            query_params["verifyFp"] = query_params["fp"] = f"verify_{verify_fp}"
+        # 用 V8 签名器生成 a_bogus
+        a_bogus = ""
+        try:
+            a_bogus = self._gen_abogus(url_path, query_params)
+        except Exception:
+            pass
+        raw = self._post(url_path, body, query_params=query_params, a_bogus=a_bogus)
         print(f"[im-protocol] send_message raw={len(raw)}b")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
         env = _pb_get_fields(raw)
