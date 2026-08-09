@@ -139,9 +139,10 @@ def _build_request(service_id: int, method_id: int, inner_body: bytes,
                    sdk_version: str = "0.1.8",
                    build_number: str = "0d50935:feat/pc-im-group",
                    ua: str = "", platform: str = "Win32",
-                   device_id: str = "0", inner_field: int = None) -> bytes:
+                   device_id: str = "0", inner_field: int = None,
+                   security_token: str = "", security_device_id: str = "") -> bytes:
     inner_f = inner_field if inner_field is not None else service_id
-    return b"".join([
+    body = b"".join([
         _pb_varint_f(1, service_id),
         _pb_varint_f(2, method_id),
         _pb_string(3, sdk_version),
@@ -154,10 +155,20 @@ def _build_request(service_id: int, method_id: int, inner_body: bytes,
         _pb_string(11, "douyin_pc"),
         _pb_string(14, "360000"),
         _build_fingerprint(ua, platform, device_id=device_id),
+    ])
+    # 附加 identity_security 字段 (浏览器 send 请求需要)
+    if security_token:
+        body += _pb_bytes(15, _pb_string(1, "identity_security_token") + _pb_string(2, security_token))
+    if security_device_id:
+        body += _pb_bytes(15,
+            _pb_string(1, "identity_security_device_id") + _pb_string(2, security_device_id))
+        body += _pb_bytes(15, _pb_string(1, "identity_security_aid") + _pb_string(2, ""))
+    body += b"".join([
         _pb_varint_f(18, 1),
         _pb_string(21, "douyin_web"),
         _pb_string(22, "web_sdk"),
     ])
+    return body
 
 
 def _build_history_body(conv_id: str, conv_type: int = 1, conv_short_id: int = 0,
@@ -255,6 +266,70 @@ def _peer_uid_from_conv_id(conv_id: str, self_uid: str) -> str:
 
 def compute_access_key(device_id: str) -> str:
     return hashlib.md5((_FPID + _APP_KEY + str(device_id) + _SALT).encode()).hexdigest()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Passport 签名 + identity_security_token 获取
+# ═══════════════════════════════════════════════════════════════════
+
+def _derive_key_from_noon_utc(app_key: str) -> bytes:
+    """HMAC-SHA256 PBKDF2-like 推导,种子为当天中午 UTC 时间戳。"""
+    import hmac as _hmac
+    from datetime import datetime, timezone as _tz
+    now = datetime.now(_tz.utc)
+    noon = datetime(now.year, now.month, now.day, 12, 0, 0, tzinfo=_tz.utc)
+    noon_ts = str(int(noon.timestamp()))
+    seed = noon_ts.encode()
+    salt = app_key.encode()
+    # HMAC 迭代
+    result, intermediate, counter = b"", b"", 1
+    while len(result) < 32:
+        data = intermediate + salt + bytes([counter])
+        intermediate = _hmac.new(seed, data, hashlib.sha256).digest()
+        result += intermediate; counter += 1
+    return result[:32]
+
+
+def _passport_aid_sign(aid: str, path: str) -> str:
+    """生成 passport API 签名头。"""
+    import hmac as _hmac
+    import base64 as _b64
+    ts = str(int(time.time()))
+    derived_key = _derive_key_from_noon_utc(_APP_KEY)
+    sign_str = f"aid={aid}&path={path}&ts={ts}"
+    sign_bytes = _hmac.new(derived_key, sign_str.encode(), hashlib.sha256).digest()
+    sig = _b64.b64encode(sign_bytes).decode().rstrip("=")
+    return ts, sig
+
+
+def _fetch_identity_token(cookies: Dict[str, str], device_id: str, ua: str,
+                          proxy: str = "") -> str:
+    """调用 /passport/safe/get_identity_security_token 获取投递安全 token。"""
+    import curl_cffi.requests as curl
+    import base64 as _b64
+    aid = "6383"
+    path = "/passport/safe/get_identity_security_token"
+    ts, sig = _passport_aid_sign(aid, path)
+    url = (f"https://www.douyin.com{path}?aid={aid}&is_from_ttaccountsdk=1"
+           f"&device_platform=web_app&ts={ts}")
+    h = {
+        "User-Agent": ua, "Referer": "https://www.douyin.com/",
+        "x-passport-request-sign": f"ts={ts},sign={sig}",
+        "Origin": "https://www.douyin.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+    sess = curl.Session()
+    sess.headers.update(h)
+    try:
+        resp = sess.get(url, cookies=cookies, timeout=10)
+        data = resp.json()
+        token = (data.get("data") or {}).get("identity_security_token") or ""
+        if token and isinstance(token, str) and len(token) > 10:
+            # 浏览器格式: {"token":"xxx"}
+            return json.dumps({"token": token})
+    except Exception:
+        pass
+    return ""
 
 
 _MSG_LABEL = {1: "[文本]", 2: "[图片]", 3: "[视频]", 4: "[语音]", 5: "[表情]",
@@ -393,11 +468,14 @@ class DouyinIMClient:
             return b""
 
     def _make_request(self, service_id: int, inner_body: bytes,
-                      inner_field: int = None) -> bytes:
+                       inner_field: int = None,
+                       security_token: str = "", security_device_id: str = "") -> bytes:
         return _build_request(service_id, self._next_mid(), inner_body,
                               ua=self.ua, platform=self.platform,
                               device_id=self.device_id,
-                              inner_field=inner_field)
+                              inner_field=inner_field,
+                              security_token=security_token,
+                              security_device_id=security_device_id)
 
     # ── get_message_by_init: 初始化会话列表 ──
 
@@ -505,7 +583,17 @@ class DouyinIMClient:
 
     def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
-        body = self._make_request(SVC_SEND, inner)
+        # 获取投递必需的 identity_security_token
+        security_token = ""
+        security_device_id = str(self.self_uid or self.device_id)
+        try:
+            security_token = _fetch_identity_token(
+                self.cookies, security_device_id, self.ua)
+        except Exception as e:
+            print(f"[im-protocol] identity_token fetch fail: {e!r}")
+        body = self._make_request(SVC_SEND, inner,
+                                  security_token=security_token,
+                                  security_device_id=security_device_id)
         raw = self._post("/v1/message/send", body)
         print(f"[im-protocol] send_message raw={len(raw)}b")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
