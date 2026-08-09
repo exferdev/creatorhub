@@ -487,7 +487,7 @@ class DouyinIMClient:
     def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
         body = self._make_request(SVC_SEND, inner)
-        raw = self._post("/v1/message/send_message", body)
+        raw = self._post("/v1/message/send", body)
         print(f"[im-protocol] send_message raw={len(raw)}b hex={raw.hex() if len(raw) < 100 else raw[:50].hex()}")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
         env = _pb_get_fields(raw)
