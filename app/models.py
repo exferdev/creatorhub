@@ -41,6 +41,8 @@ class DouyinAccount(SQLModel, table=True):
     write_paused_until: Optional[datetime] = None  # 平台风控后暂停自动写操作
     write_pause_reason: str = ""                    # 最近一次暂停原因
     identity_mode: str = "legacy"                  # legacy=保留存量画像 | native=浏览器原生画像
+    ec_private_key: str = ""                        # EC私钥(PEM) 用于bd-ticket-guard ECDH签名
+    server_cert: str = ""                            # 服务器证书(PEM) 用于同 bd-ticket-guard ECDH
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

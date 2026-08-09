@@ -340,17 +340,20 @@ def _fetch_identity_token(cookies: Dict[str, str], device_id: str, ua: str,
 # bd-ticket-guard-client-data ECDH 签名 (参考 douyin-web-api-sdk)
 # ═══════════════════════════════════════════════════════════════════
 
-def _compute_guard_headers(cookies: Dict[str, str], path: str, ua: str = "") -> Dict[str, str]:
+def _compute_guard_headers(cookies: Dict[str, str], path: str,
+                          ec_private_pem: str = "",
+                          server_cert_pem: str = "") -> Dict[str, str]:
     """计算 bd-ticket-guard-client-data 和 bd-ticket-guard-ree-public-key 请求头。"""
     result = {}
-    # 1. 提取 ts_sign 和 ticket
+    if not ec_private_pem or not server_cert_pem:
+        return result
     guard_cookie = cookies.get("bd_ticket_guard_client_data_v2", "")
     ts_sign, ticket = "", ""
     if guard_cookie:
         try:
-            import base64 as _b64
+            import base64 as _b64_ck
             import json as _json
-            decoded = _b64.b64decode(guard_cookie + "===")
+            decoded = _b64_ck.b64decode(guard_cookie + "===")
             gd = _json.loads(decoded)
             ts_sign = gd.get("ts_sign", "")
             ticket = gd.get("ticket", "")
@@ -358,13 +361,6 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str, ua: str = "") -> 
             pass
     if not ts_sign or not ticket:
         return result
-
-    # 2. 获取 server certificate 公钥 (从 localStorage 对应的 cookie)
-    #    实际运行时需从账号存储中读取 EC 私钥和 server cert
-    ec_private_pem = ""   # 账号特定,见 guard_keys.json
-    server_cert_pem = ""  # 同上
-
-    # 3. ECDH → shared secret → HMAC-SHA256 → req_sign
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -466,7 +462,8 @@ class DouyinIMClient:
 
     def __init__(self, cookies: Dict[str, str], device_id: str,
                  ua: str = "", platform: str = "Win32",
-                 proxy: str = "", fpid: str = _FPID):
+                 proxy: str = "", fpid: str = _FPID,
+                 ec_private_key: str = "", server_cert: str = ""):
         self.cookies = dict(cookies)
         self.device_id = str(device_id)
         self.ua = ua or ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -474,6 +471,8 @@ class DouyinIMClient:
         self.platform = platform
         self.fpid = fpid
         self.self_uid = ""   # 在 get_message_by_init 后自动填充
+        self.ec_private_key = ec_private_key
+        self.server_cert = server_cert
         self._method_id = 10356
         # HTTP session
         import curl_cffi.requests as curl
@@ -506,7 +505,10 @@ class DouyinIMClient:
         device_id = account.douyin_id or cookies.get("uid_tt", "") or "0"
         ua = getattr(account, "ua", "") or ""
         plat = "MacIntel" if "Mac" in ua else "Win32"
-        return cls(cookies, device_id, ua=ua, platform=plat, proxy=proxy)
+        ec_key = getattr(account, "ec_private_key", "") or ""
+        cert = getattr(account, "server_cert", "") or ""
+        return cls(cookies, device_id, ua=ua, platform=plat, proxy=proxy,
+                   ec_private_key=ec_key, server_cert=cert)
 
     # ── access_key / WS URL ──
 
@@ -554,7 +556,7 @@ class DouyinIMClient:
         return ""
 
     def _post(self, path: str, body: bytes, query_params: dict = None,
-              a_bogus: str = "") -> bytes:
+              a_bogus: str = "", extra_headers: dict = None) -> bytes:
         import curl_cffi.requests as curl
         from urllib.parse import urlencode
         url = f"{self.API_BASE}{path}"
@@ -564,8 +566,12 @@ class DouyinIMClient:
         if params:
             qs = urlencode({k: v for k, v in params.items() if v})
             url += "?" + qs
+        hdrs = {}
+        if extra_headers:
+            hdrs.update(extra_headers)
         try:
-            resp = self._sess.post(url, data=body, cookies=self.cookies, timeout=30)
+            resp = self._sess.post(url, data=body, cookies=self.cookies,
+                                    headers=hdrs, timeout=30)
             print(f"[im-protocol] POST {path} -> {resp.status_code}, {len(resp.content)} bytes")
             return resp.content
         except Exception as e:
@@ -717,7 +723,23 @@ class DouyinIMClient:
             print(f"[im-protocol] a_bogus={'OK' if a_bogus else 'FAIL'}")
         except Exception as e:
             print(f"[im-protocol] a_bogus error: {e!r}")
-        raw = self._post(url_path, body, query_params=query_params, a_bogus=a_bogus)
+        # 计算 bd-ticket-guard-client-data (ECDH 签名头)
+        extra_headers = {}
+        if self.ec_private_key and self.server_cert:
+            try:
+                guard_h = _compute_guard_headers(
+                    self.cookies, url_path,
+                    ec_private_pem=self.ec_private_key,
+                    server_cert_pem=self.server_cert)
+                extra_headers.update(guard_h)
+                extra_headers["bd-ticket-guard-version"] = "2"
+                extra_headers["bd-ticket-guard-web-version"] = "2"
+                extra_headers["bd-ticket-guard-web-sign-type"] = "1"
+                print(f"[im-protocol] guard headers: {sorted(extra_headers.keys())}")
+            except Exception as e:
+                print(f"[im-protocol] guard sign error: {e!r}")
+        raw = self._post(url_path, body, query_params=query_params, a_bogus=a_bogus,
+                         extra_headers=extra_headers)
         print(f"[im-protocol] send_message raw={len(raw)}b")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
         env = _pb_get_fields(raw)
