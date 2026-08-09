@@ -168,11 +168,11 @@ def _build_history_body(conv_id: str, conv_type: int = 1, conv_short_id: int = 0
 
 
 def _build_send_body(conv_id: str, text: str, conv_type: int = 1) -> bytes:
-    """发送消息 inner body (field5=JSON包装的{content,type})"""
+    """发送消息 inner body (field4=纯文本,对齐 test_chat_cdp.py 且实测返回OK)"""
     return b"".join([
         _pb_string(1, conv_id),
         _pb_varint_f(2, conv_type),
-        _pb_string(5, json.dumps({"content": text, "type": 1})),
+        _pb_string(4, text),
         _pb_varint_f(6, 0),
     ])
 
