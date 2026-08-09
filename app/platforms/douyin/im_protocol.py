@@ -852,7 +852,6 @@ class DouyinIMClient:
                       page=None, a_bogus: str = "") -> dict:
         """发送消息: 优先用模板(含完整field15安全字段),回退动态构建。"""
         short_id = 0
-        from .models import DmConversation
         import sqlite3 as _sq
         try:
             db_path = Path(__file__).resolve().parent.parent.parent / "data" / "creatorhub.db"
