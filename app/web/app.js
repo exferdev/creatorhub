@@ -2063,8 +2063,7 @@ function stopDmProtoStream() {
 async function refreshDmMessagesProto() {
   const thread = $("dm-thread"); if (!thread || !HUB_ACC || !DM_CONV) return;
   try {
-    const d = await api(`/api/dm/protocol/messages?account_id=${HUB_ACC}&conv_id=${encodeURIComponent(DM_CONV)}`);
-    const msgs = d.messages || [];
+    const msgs = await api(`/api/dm/messages?account_id=${HUB_ACC}&conv_id=${encodeURIComponent(DM_CONV)}`);
     thread.innerHTML = msgs.length
       ? msgs.map(m => `<div class="dm-bubble ${m.direction === "out" ? "out" : "in"}">${dmBody(m)}<span class="t">${fmtTime(m.create_time)}</span></div>`).join("")
       : `<div class="empty"><div class="empty-t">暂无消息</div></div>`;
