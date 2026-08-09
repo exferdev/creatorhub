@@ -1651,8 +1651,17 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 async def dm_protocol_send(account_id: int, body: SendDmIn):
     """协议模式:发送私信。HTTP+guard headers ECDH签名投递。"""
     client = await _get_im_client(account_id)
+    # 在主事件循环中预生成 x-bogus(V8 signer 不支持跨线程)
+    xb = ""
+    try:
+        xb = client._gen_abogus("/v1/message/send",
+            {"msToken": client.cookies.get("msToken", "")})
+        print(f"[dm-protocol] precomputed x-bogus={'OK' if xb else 'FAIL'}")
+    except Exception as e:
+        print(f"[dm-protocol] x-bogus gen error: {e!r}")
     result = await asyncio.to_thread(
-        client.send_message, body.conv_id, body.content)
+        client.send_message, body.conv_id, body.content,
+        1, None, xb)
     if result.get("ok"):
         from datetime import datetime as _dt, timezone as _tz
         now_ts = int(_dt.now(_tz.utc).timestamp())

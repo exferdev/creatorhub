@@ -545,10 +545,12 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """用 V8 signer.generate_a_bogus() 生成 a_bogus (需要 V8 运行时初始化)。"""
+        """用 V8 signer.frontier_sign() 生成 X-Bogus header (替代 URL a_bogus)。"""
         try:
             from . import signer as _signer
-            if not (_signer._ready and _signer._signer):
+            ready = getattr(_signer, '_ready', False)
+            has_signer = bool(getattr(_signer, '_signer', None))
+            if not (ready and has_signer):
                 return ""
             from urllib.parse import urlencode
             qs = ""
@@ -557,11 +559,9 @@ class DouyinIMClient:
             url = f"https://imapi.douyin.com{path}"
             if qs:
                 url += "?" + qs
-            cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-            return _signer._signer.generate_a_bogus(
+            return _signer._signer.frontier_sign(
                 url=url, method="POST",
-                cookies=cookie_str, ua=self.ua,
-                debug=False) or ""
+                ua=self.ua, platform=self.platform) or ""
         except Exception:
             pass
         return ""
@@ -572,14 +572,12 @@ class DouyinIMClient:
         from urllib.parse import urlencode
         url = f"{self.API_BASE}{path}"
         params = dict(query_params or {})
-        if a_bogus:
-            params["a_bogus"] = a_bogus
         if params:
             qs = urlencode({k: v for k, v in params.items() if v})
             url += "?" + qs
-        hdrs = {}
-        if extra_headers:
-            hdrs.update(extra_headers)
+        hdrs = dict(extra_headers or {})
+        if a_bogus:
+            hdrs["x-bogus"] = a_bogus
         try:
             resp = self._sess.post(url, data=body, cookies=self.cookies,
                                     headers=hdrs, timeout=30)
@@ -705,7 +703,7 @@ class DouyinIMClient:
     # ── send_message: 发送 ──
 
     def send_message(self, conv_id: str, text: str, conv_type: int = 1,
-                      page=None) -> dict:
+                      page=None, a_bogus: str = "") -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
         # 获取投递必需的 identity_security_token (scene=web_im)
         security_token = ""
@@ -728,14 +726,24 @@ class DouyinIMClient:
         query_params = {"msToken": ms_token or ""}
         if verify_fp and len(verify_fp) > 10:
             query_params["verifyFp"] = query_params["fp"] = f"verify_{verify_fp}"
-        a_bogus = ""
-        try:
+        if not a_bogus:
             a_bogus = self._gen_abogus(url_path, query_params)
-            print(f"[im-protocol] a_bogus={'OK' if a_bogus else 'FAIL'}")
-        except Exception as e:
-            print(f"[im-protocol] a_bogus error: {e!r}")
+            print(f"[im-protocol] x-bogus={'OK' if a_bogus else 'FAIL'}")
+        else:
+            print(f"[im-protocol] x-bogus=precomputed")
         # 计算 bd-ticket-guard-client-data (ECDH 签名头)
         extra_headers = {}
+        # x-bogus header (signer.frontier_sign 生成)
+        xb = ""
+        if not a_bogus:
+            xb = self._gen_abogus(url_path, query_params)
+            print(f"[im-protocol] x-bogus={'OK' if xb else 'FAIL'}")
+        else:
+            xb = a_bogus
+            print(f"[im-protocol] x-bogus=precomputed")
+        if xb:
+            extra_headers["x-bogus"] = xb
+            query_params["X-Bogus"] = xb  # 也放到 URL 作为 a_bogus 等价
         if self.ec_private_key and self.server_cert:
             try:
                 guard_h = _compute_guard_headers(
