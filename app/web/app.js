@@ -2101,7 +2101,7 @@ async function openDmConvProto(convId) {
   document.querySelectorAll("#dm-convs .dm-conv").forEach(e => e.classList.toggle("active", e.dataset.conv === convId));
   const thread = $("dm-thread");
   thread.innerHTML = `<div class="empty"><div class="empty-t">加载中…(协议)</div></div>`;
-  refreshDmMessagesProto();
+  await refreshDmMessagesProto();
   markDmRead(convId);
 }
 

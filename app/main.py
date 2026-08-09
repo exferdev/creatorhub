@@ -1599,6 +1599,7 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
     client = _get_im_client(account_id)
     msgs, has_more, next_cursor = await asyncio.to_thread(
         client.get_by_conversation, conv_id, 1, conv_short_id, cursor, 50)
+    print(f"[im-protocol-messages] conv={conv_id[:30]} msgs={len(msgs)} has_more={has_more}>")
     # 存入 DB 复用(去重)
     from datetime import datetime as _dt
     with get_session() as s:
