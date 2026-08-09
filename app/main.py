@@ -1593,11 +1593,30 @@ async def dm_protocol_conversations(account_id: int):
 
 
 @app.get("/api/dm/protocol/messages")
-async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0):
-    """协议模式:获取会话消息。"""
+async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
+                                conv_short_id: int = 0):
+    """协议模式:获取会话消息,同步存入 DB。"""
     client = _get_im_client(account_id)
     msgs, has_more, next_cursor = await asyncio.to_thread(
-        client.get_by_conversation, conv_id, 1, 0, cursor, 50)
+        client.get_by_conversation, conv_id, 1, conv_short_id, cursor, 50)
+    # 存入 DB 复用(去重)
+    from datetime import datetime as _dt
+    with get_session() as s:
+        for m in msgs:
+            mid = f"{conv_id}_{m.get('create_time', 0)}"  # 排除重复
+            dupe = s.exec(select(DmMessage).where(
+                DmMessage.account_id == account_id,
+                DmMessage.conv_id == conv_id,
+                DmMessage.msg_id == mid)).first()
+            if not dupe:
+                s.add(DmMessage(
+                    platform="douyin", account_id=account_id, conv_id=conv_id,
+                    msg_id=mid, direction=m.get("direction", "in"),
+                    text=m.get("text", ""), msg_type=m.get("msg_type", 0),
+                    create_time=m.get("create_time", 0),
+                    raw_json=m.get("raw_json", ""),
+                ))
+        s.commit()
     return {"messages": msgs, "has_more": has_more, "next_cursor": next_cursor}
 
 
