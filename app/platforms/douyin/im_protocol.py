@@ -16,6 +16,8 @@ import asyncio
 import gzip
 import hashlib
 import json
+import random as _random
+import string as _string
 import struct
 import time
 from pathlib import Path
@@ -168,13 +170,30 @@ def _build_history_body(conv_id: str, conv_type: int = 1, conv_short_id: int = 0
 
 
 def _build_send_body(conv_id: str, text: str, conv_type: int = 1) -> bytes:
-    """field4=纯文本格式 (服务端接受,返回961字节OK; field5 JSON格式被2字节拒绝)"""
-    return b"".join([
+    """浏览器send格式 — 实测 200 OK(投递需完整安全token)"""
+    msg_json = json.dumps({
+        "aweType": 700, "type": 0, "richTextInfos": [], "text": text,
+    }, ensure_ascii=False)
+    ts_us = int(time.time() * 1_000_000)
+    inner = b"".join([
         _pb_string(1, conv_id),
         _pb_varint_f(2, conv_type),
-        _pb_string(4, text),
-        _pb_varint_f(6, 0),
+        _pb_varint_f(3, ts_us),
+        _pb_string(4, msg_json),
     ])
+    # 扩展字段 (s:mentioned_users, s:client_message_id, s:stime)
+    mid = "".join(_random.choices(_string.hexdigits.lower(), k=8))
+    mid += "-" + "".join(_random.choices(_string.hexdigits.lower(), k=4))
+    mid += "-" + "".join(_random.choices(_string.hexdigits.lower(), k=4))
+    mid += "-" + "".join(_random.choices(_string.hexdigits.lower(), k=4))
+    mid += "-" + "".join(_random.choices(_string.hexdigits.lower(), k=12))
+    for key, value in [
+        ("s:mentioned_users", ""),
+        ("s:client_message_id", mid),
+        ("s:stime", str(int(time.time() * 1000)) + ".357"),
+    ]:
+        inner += _pb_bytes(5, _pb_string(1, key) + _pb_string(2, value))
+    return inner
 
 
 # ═══════════════════════════════════════════════════════════════════
