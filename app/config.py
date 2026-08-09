@@ -43,6 +43,10 @@ class EngineConfig:
     # ── 多账号风控隔离 ──
     profiles_dir: str = "./data/profiles"   # 每账号持久化浏览器 profile 根目录
     max_live_contexts: int = 6              # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存)
+    # 小红书浏览器:默认优先连接 CreatorHub 管理的每账号系统 Chrome CDP。
+    xhs_browser_mode: str = "auto"          # auto | cdp | playwright
+    xhs_cdp_idle_seconds: int = 900          # 0=仅按 LRU、显式关闭或程序退出回收
+    xhs_publish_mode: str = "browser"       # browser | api(API 仅为显式兼容模式)
     active_accounts: int = 3                # 同一时刻最多并发活跃的账号数(错峰)
     scan_jitter: float = 0.15              # 扫描间隔随机抖动比例(±15%),消除整点齐发特征
     route_download_via_proxy: bool = True   # 媒体下载是否走账号代理(避免 CDN 拉流暴露真实 IP)
@@ -52,8 +56,8 @@ class EngineConfig:
     comment_jitter: float = 0.4              # 评论发送时间额外抖动比例(±40%),更像真人
     comment_hourly_cap_per_account: int = 10  # 每账号每小时自动评论上限(比日上限更贴人类节律),0=不限
     comment_risk_cooldown_seconds: int = 21600  # 平台拒绝/验证后暂停该账号写操作(默认6小时)
-    # 小红书评论发布通道: api=审核后自动发布, manual=只保留草稿不调用发布接口。
-    xhs_comment_write_mode: str = "api"  # api | manual
+    # 小红书评论发布通道:browser=页面操作;api=显式兼容;manual=只保留草稿。
+    xhs_comment_write_mode: str = "browser"  # browser | api | manual
     # true=先存草稿,人工点击“通过”后由队列自动发布; false=生成后直接排队发布。
     xhs_comment_review_before_publish: bool = True
     # 抖音发评论用有头浏览器(弹真实窗口):抖音对无头写操作常降级/拦截,有头更稳,
@@ -87,9 +91,40 @@ class ServerConfig:
 
 
 @dataclass
+class RiskControlConfig:
+    """Conservative cross-feature limits for platform-facing account activity."""
+    enabled: bool = True
+    mode: str = "conservative"
+    network_group_concurrency: int = 1
+    read_light_gap_seconds: int = 20
+    read_heavy_gap_seconds: int = 60
+    shared_write_gap_seconds: int = 300
+    comment_min_gap_seconds: int = 600
+    comment_hourly_cap: int = 3
+    comment_daily_cap: int = 10
+    social_min_gap_seconds: int = 900
+    social_hourly_cap: int = 2
+    social_daily_cap: int = 8
+    dm_min_gap_seconds: int = 900
+    dm_hourly_cap: int = 2
+    dm_daily_cap: int = 8
+    publish_min_gap_seconds: int = 7200
+    publish_hourly_cap: int = 1
+    publish_daily_cap: int = 3
+    combined_action_hourly_cap: int = 3
+    combined_action_daily_cap: int = 10
+    cooldown_steps_seconds: List[int] = field(
+        default_factory=lambda: [1800, 7200, 21600, 86400])
+    recovery_successes: int = 3
+    recovery_probe_gap_seconds: int = 600
+    event_retention_days: int = 30
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    risk_control: RiskControlConfig = field(default_factory=RiskControlConfig)
     db_path: str = "./data/creatorhub.db"
     proxies: List[str] = field(default_factory=list)  # 代理池;建号时一号一代理 sticky 分配
 
@@ -106,6 +141,15 @@ def load_config(path: str | None = None) -> Config:
         e = raw.get("engine", {})
         cfg.engine = EngineConfig(**{k: v for k, v in e.items()
                                      if k in EngineConfig.__dataclass_fields__})
+        risk = raw.get("risk_control", {}) or {}
+        risk_values = {
+            k: v for k, v in risk.items()
+            if k in RiskControlConfig.__dataclass_fields__
+        }
+        mode = str(risk_values.get("mode", "conservative") or "").strip().lower()
+        risk_values["mode"] = (
+            mode if mode in {"conservative", "custom"} else "conservative")
+        cfg.risk_control = RiskControlConfig(**risk_values)
         cfg.db_path = (raw.get("storage", {}) or {}).get("db_path", cfg.db_path)
         px = raw.get("proxies") or []
         cfg.proxies = [str(p).strip() for p in px if str(p).strip()]

@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from collections import Counter
+import threading
 from pathlib import Path
 
 from sqlmodel import select
@@ -17,22 +17,64 @@ from .db import get_session
 from .models import DouyinAccount, ProxyPool
 
 
+_proxy_reservation_lock = threading.RLock()
+_proxy_reservations: dict[str, str] = {}
+
+
 def _pool_urls(session, cfg) -> list:
-    """可用代理来源:优先数据库代理池(启用的),为空时回退 config.yaml 的 proxies。"""
-    urls = [p.url for p in session.exec(
-        select(ProxyPool).where(ProxyPool.enabled == True)).all() if p.url]  # noqa: E712
-    if not urls:
-        urls = [normalize_proxy(u) for u in (cfg.proxies or []) if u]
+    """Return normalized, unique proxies eligible for automatic assignment."""
+    rows = session.exec(select(ProxyPool)).all()
+    if rows:
+        sources = [
+            p.url for p in rows
+            if p.enabled and p.status not in {"bad", "auth_error", "blocked"}
+        ]
+    else:
+        sources = list(cfg.proxies or [])
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in sources:
+        url = normalize_proxy(raw)
+        if url and url not in seen:
+            urls.append(url)
+            seen.add(url)
     return urls
 
 
 def assign_proxy_from_pool(session, cfg) -> str:
-    """从代理池挑一条占用最少的代理(优先未占用)。池为空则返回空串。"""
-    pool = _pool_urls(session, cfg)
-    if not pool:
-        return ""
-    used = Counter(a.proxy for a in session.exec(select(DouyinAccount)).all() if a.proxy)
-    return min(pool, key=lambda p: used.get(p, 0))
+    """Return one unoccupied usable proxy, or an empty string."""
+    with _proxy_reservation_lock:
+        pool = _pool_urls(session, cfg)
+        if not pool:
+            return ""
+        occupied = {
+            normalize_proxy(a.proxy)
+            for a in session.exec(select(DouyinAccount)).all()
+            if a.proxy
+        }
+        occupied.update(_proxy_reservations.values())
+        return next((url for url in pool if url not in occupied), "")
+
+
+def reserve_proxy_from_pool(session, cfg, reservation_key: str) -> str:
+    """Atomically reserve a free proxy while a new login is in progress."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        return assign_proxy_from_pool(session, cfg)
+    with _proxy_reservation_lock:
+        if key in _proxy_reservations:
+            return _proxy_reservations[key]
+        proxy = assign_proxy_from_pool(session, cfg)
+        if proxy:
+            _proxy_reservations[key] = proxy
+        return proxy
+
+
+def release_proxy_reservation(reservation_key: str) -> None:
+    """Release a temporary login reservation after persistence or failure."""
+    with _proxy_reservation_lock:
+        _proxy_reservations.pop(str(reservation_key or "").strip(), None)
 
 
 def seed_proxy_pool(cfg) -> int:
@@ -61,7 +103,8 @@ def ensure_identity(acc: DouyinAccount, cfg, session=None, assign_proxy: bool = 
     changed = False
     if not acc.fp_seed:
         f = generate_identity_fields()
-        acc.ua = acc.ua or f["ua"]
+        if getattr(acc, "identity_mode", "legacy") != "native":
+            acc.ua = acc.ua or f["ua"]
         acc.viewport_w = acc.viewport_w or f["viewport_w"]
         acc.viewport_h = acc.viewport_h or f["viewport_h"]
         acc.timezone_id = acc.timezone_id or f["timezone_id"]

@@ -71,10 +71,13 @@ from .models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                      NotificationChannel, ProxyPool, PublishTask,
                      AccountWork, FollowEdge, DmConversation, DmMessage,
                      AccountActionTask, AccountStatSnapshot,
-                     ShareDownloadRecord)
+                     ShareDownloadRecord, AccountRiskState, RiskEvent)
 from .notifier import CHANNEL_TYPES, send_one
 from .profiles import (ensure_identity, migrate_identities, assign_proxy_from_pool,
+                       release_proxy_reservation, reserve_proxy_from_pool,
                        seed_proxy_pool)
+from .risk import (OperationKind, RiskCategory, RiskController,
+                   classify_platform_error)
 from .settings import get_setting, set_setting
 from .windowing import (EXPLORER_WINDOW_CLASSES, bring_window_to_front,
                         capture_window_snapshot)
@@ -90,6 +93,60 @@ login_tasks: Dict[str, dict] = {}
 open_browsers: Dict[int, Any] = {}
 _file_manager_lock = threading.Lock()
 _share_download_sem = asyncio.Semaphore(2)
+
+
+class _OpenBrowserLease:
+    """Keep the unified account/network guard until a headed context closes."""
+
+    def __init__(self, context, guard, close_callback=None):
+        self.context = context
+        self.guard = guard
+        self.close_callback = close_callback
+        self._released = False
+        self._closed = False
+        self._release_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+
+    async def release(self) -> None:
+        async with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+            await self.guard.__aexit__(None, None, None)
+
+    async def close(self) -> None:
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if self.close_callback is not None:
+                    await self.close_callback()
+                else:
+                    await self.context.close()
+            finally:
+                await self.release()
+
+
+async def _release_open_browser(account_id: int, lease: _OpenBrowserLease) -> None:
+    try:
+        await lease.close()
+    finally:
+        if open_browsers.get(account_id) is lease:
+            open_browsers.pop(account_id, None)
+
+
+def _persist_native_ua(account_id: int, ua: str) -> None:
+    """Persist the UA observed from an account's native Chromium context."""
+    value = str(ua or "").strip()
+    if not account_id or not value:
+        return
+    with get_session() as session:
+        account = session.get(DouyinAccount, account_id)
+        if account and account.identity_mode == "native" and account.ua != value:
+            account.ua = value
+            session.add(account)
+            session.commit()
 
 
 @asynccontextmanager
@@ -122,10 +179,20 @@ async def lifespan(app: FastAPI):
             print(f"[startup] 已为 {n} 个存量账号补齐画像(profile/UA/指纹/代理)")
     except Exception as e:
         print(f"[startup] 账号画像迁移失败(不影响启动): {e!r}")
-    browser = BrowserManager(cfg.engine.user_agent, cfg.engine.profiles_dir,
-                             cfg.engine.max_live_contexts)
+    browser = BrowserManager(
+        cfg.engine.user_agent, cfg.engine.profiles_dir,
+        cfg.engine.max_live_contexts, native_ua_callback=_persist_native_ua,
+        xhs_browser_mode=cfg.engine.xhs_browser_mode,
+        xhs_cdp_idle_seconds=cfg.engine.xhs_cdp_idle_seconds)
     await browser.start()
     engine = MonitorEngine(cfg, browser)
+    startup_now = datetime.utcnow()
+    pruned_risk_events = engine._prune_risk_events_if_due(startup_now)
+    if pruned_risk_events:
+        print(f"[startup] 已清理 {pruned_risk_events} 条过期风控事件")
+    recovered = engine.recover_interrupted_tasks()
+    if recovered:
+        print(f"[startup] 已恢复 {recovered} 条中断的写任务")
     engine.start()
     from .engine.im_receiver import ImReceiverManager
     im_receiver = ImReceiverManager(browser)
@@ -146,7 +213,7 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 # ─────────── 扫码登录(真实浏览器) ───────────
-async def _xhs_profile(state: str, proxy: str = ""):
+async def _xhs_profile(state: str, proxy: str = "", *, detailed: bool = False):
     """用签名直连 API 拿小红书账号资料(me 身份 + otherinfo 昵称/头像/粉丝)。
     返回 (user dict, error)。error == "logged_out" 表示登录态失效。"""
     cookie_str = cookie_str_from_state(state)
@@ -156,11 +223,13 @@ async def _xhs_profile(state: str, proxy: str = ""):
                           timeout=cfg.engine.request_timeout_seconds, proxy=proxy)
     try:
         me = await client.self_info()
-    except XhsApiError:
-        return {}, "logged_out"
+    except XhsApiError as exc:
+        if detailed:
+            return {}, exc
+        return {}, "logged_out" if exc.category == "auth" else exc.category
     except Exception as e:
         print(f"[xhs_profile] self_info 失败: {e!r}")
-        return {}, "error"
+        return ({}, e) if detailed else ({}, "error")
     if not me or me.get("guest") is True or not me.get("user_id"):
         return {}, "logged_out"
     merged = dict(me)
@@ -168,8 +237,11 @@ async def _xhs_profile(state: str, proxy: str = ""):
         other = await client.user_info(me["user_id"])
         if other:
             merged = {**other, **me}      # me 提供身份,otherinfo 提供 basic_info/粉丝
-    except Exception:
-        pass
+    except Exception as exc:
+        category, _signal = classify_platform_error(exc)
+        if detailed and category in {
+                RiskCategory.RISK, RiskCategory.AUTH, RiskCategory.NETWORK}:
+            return {}, exc
     return merged, ""
 
 
@@ -186,10 +258,45 @@ async def _fetch_channels_profile_with_retry(identity, attempts: int = 3) -> tup
     return result
 
 
-async def _enrich_account_profile(account_id: int, state: str) -> str:
-    """用登录态拉取账号资料并顺带判断登录态。返回 ok | invalid | error。"""
+async def _run_account_read(account_id: int, kind: OperationKind, key: str,
+                            operation, *, empty_result,
+                            unexpected_detail: str = ""):
+    """Run one account-bound API read through the engine's unified gates."""
+    if engine is None:
+        raise HTTPException(503, "引擎未就绪")
+    guarded_empty = empty_result
+    if unexpected_detail and isinstance(empty_result, dict):
+        guarded_empty = dict(empty_result)
+        guarded_empty["_guard_error"] = True
+    payload, error = await engine.guarded_read_pair(
+        account_id, kind, key, operation, empty_result=guarded_empty)
+    guard_error = False
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        guard_error = bool(payload.pop("_guard_error", False))
+    error_text = str(error or "")
+    if error_text.startswith("risk_deferred:"):
+        deferred = ({key: value for key, value in empty_result.items()
+                     if not str(key).startswith("_")}
+                    if isinstance(empty_result, dict) else {})
+        deferred.update({
+            "skipped": True,
+            "reason": error_text.split(":", 1)[-1],
+        })
+        return None, deferred
+    if unexpected_detail and guard_error and error:
+        raise HTTPException(500, unexpected_detail)
+    return (payload, None) if not error else (payload, error_text)
+
+
+async def _enrich_account_profile(account_id: int, state: str, *,
+                                  detailed: bool = False):
+    """用登录态拉取账号资料；默认返回旧的状态字符串，详细模式附带原始错误。"""
+    def _done(status: str, error=""):
+        return (status, error) if detailed else status
+
     if browser is None or not state:
-        return "error"
+        return _done("error", "error")
     with get_session() as s:
         a0 = s.get(DouyinAccount, account_id)
         platform = a0.platform if a0 else "douyin"
@@ -200,7 +307,12 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
     # XHS 创作者号:用创作平台「我的信息」拿资料 + 判活(www 接口对创作态拿不到)
     if platform == "xhs" and creator_state:
         from .platforms.xhs import creator_profile, creator_check
-        prof = await creator_profile(creator_state, proxy=proxy)
+        profile_error = ""
+        if detailed:
+            prof, profile_error = await creator_profile(
+                creator_state, proxy=proxy, preserve_error=True)
+        else:
+            prof = await creator_profile(creator_state, proxy=proxy)
         if prof and (prof.get("nickname") or prof.get("douyin_id")):
             with get_session() as s:
                 acc = s.get(DouyinAccount, account_id)
@@ -214,27 +326,46 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
                     acc.aweme_count = prof.get("aweme_count") or acc.aweme_count
                     acc.status = "active"
                     s.add(acc); s.commit()
-            return "ok"
-        chk = await creator_check(creator_state, proxy=proxy)
+            return _done("ok")
+        if profile_error:
+            category, _signal = classify_platform_error(profile_error)
+            if category in {
+                    RiskCategory.RISK, RiskCategory.AUTH,
+                    RiskCategory.NETWORK}:
+                status = "invalid" if category == RiskCategory.AUTH else "error"
+                return _done(status, profile_error)
+        check_error = ""
+        if detailed:
+            chk, check_error = await creator_check(
+                creator_state, proxy=proxy, preserve_error=True)
+        else:
+            chk = await creator_check(creator_state, proxy=proxy)
         if chk is True:
             with get_session() as s:
                 acc = s.get(DouyinAccount, account_id)
                 if acc:
                     acc.status = "active"
                     s.add(acc); s.commit()
-            return "ok"
+            return _done("ok")
+        if check_error:
+            category, _signal = classify_platform_error(check_error)
+            if category in {
+                    RiskCategory.RISK, RiskCategory.AUTH,
+                    RiskCategory.NETWORK}:
+                status = "invalid" if category == RiskCategory.AUTH else "error"
+                return _done(status, check_error)
         if chk is None:
-            return "error"
+            return _done("error", check_error or profile_error or "error")
         with get_session() as s:
             acc = s.get(DouyinAccount, account_id)
             if acc:
                 acc.status = "invalid"
                 s.add(acc); s.commit()
-        return "invalid"
+        return _done("invalid", check_error or "logged_out")
 
     try:
         if platform == "xhs":
-            u, err = await _xhs_profile(state, proxy)
+            u, err = await _xhs_profile(state, proxy, detailed=detailed)
         elif platform == "kuaishou":
             u, err = await fetch_ks_self_profile(browser, identity)
         elif platform == "shipinhao":
@@ -243,12 +374,14 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
             u, err = await _fetch_channels_profile_with_retry(identity)
         else:
             u, err = await fetch_self_profile(browser, identity)
-    except Exception:
-        return "error"
+    except Exception as exc:
+        category, _signal = classify_platform_error(exc)
+        status = "invalid" if detailed and category == RiskCategory.AUTH else "error"
+        return _done(status, exc)
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
         if not acc:
-            return "error"
+            return _done("error", "error")
         if u:
             if platform == "xhs":
                 p = parse_xhs_self_user(u)
@@ -267,12 +400,13 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
             acc.aweme_count = p.get("aweme_count") or acc.aweme_count
             acc.status = "active"
             s.add(acc); s.commit()
-            return "ok"
-        if err == "logged_out":
+            return _done("ok")
+        if (err == "logged_out" or
+                getattr(err, "category", None) == RiskCategory.AUTH.value):
             acc.status = "invalid"
             s.add(acc); s.commit()
-            return "invalid"
-    return "error"
+            return _done("invalid", err or "logged_out")
+    return _done("error", err or "error")
 
 
 async def _run_login(task_id: str, creator: bool = False, account_id: int | None = None,
@@ -286,7 +420,9 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
     login_tasks[task_id] = {"status": "waiting"}
     fresh_account = account_id is None
     tmp_profile = ""
+    proxy_reservation_key = ""
     new_fields = None
+    login_environment = {}
     nm = ("小红书账号" if platform == "xhs"
           else "快手账号" if platform == "kuaishou"
           else "视频号账号" if platform == "shipinhao"
@@ -313,34 +449,69 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 proxy = ""
             elif choice.lower() == "auto":
                 with get_session() as s:
-                    proxy = assign_proxy_from_pool(s, cfg)
+                    proxy_reservation_key = task_id
+                    proxy = reserve_proxy_from_pool(s, cfg, proxy_reservation_key)
             else:
                 from .browser.manager import normalize_proxy
                 proxy = normalize_proxy(choice)
             identity = Identity(
-                account_id=None, profile_dir=tmp_profile, proxy=proxy,
-                ua=new_fields["ua"], viewport_w=new_fields["viewport_w"],
+                account_id=None, profile_dir=tmp_profile, identity_mode="native",
+                platform=platform,
+                proxy=proxy, ua="", viewport_w=new_fields["viewport_w"],
                 viewport_h=new_fields["viewport_h"], timezone_id=new_fields["timezone_id"],
                 locale=new_fields["locale"], fp_seed=new_fields["fp_seed"])
 
-        # 2) 在 profile 里有头扫码
-        if platform == "xhs":
-            if creator:
-                ok, state_json, nickname = await interactive_xhs_creator_login(browser, identity)
+        # 登录轮询返回可诊断但不含代理凭据的实际运行环境。浏览器或版本回退
+        # 一眼可见，避免把平台验证误判成单纯的 Cookie/二维码问题。
+        login_environment = browser.environment_snapshot(identity, headless=False)
+        login_tasks[task_id] = {
+            "status": "waiting",
+            "environment": login_environment,
+        }
+
+        # 2) 在统一账号/网络入口内扫码，避免与后台任务并行占用 profile。
+        @asynccontextmanager
+        async def _login_guard():
+            if engine is None:
+                yield None
+                return
+            async with engine.operation_guard(
+                    account_id, OperationKind.LOGIN,
+                    fallback_key=f"login:{task_id}",
+                    operation_target=identity) as guarded:
+                yield guarded
+
+        async with _login_guard():
+            if platform == "xhs":
+                if creator:
+                    ok, state_json, nickname = await interactive_xhs_creator_login(
+                        browser, identity)
+                else:
+                    ok, state_json, nickname = await interactive_xhs_login(
+                        browser, identity)
+            elif platform == "kuaishou":
+                if creator:
+                    ok, state_json, nickname = await interactive_ks_creator_login(
+                        browser, identity)
+                else:
+                    ok, state_json, nickname = await interactive_ks_login(
+                        browser, identity)
+            elif platform == "shipinhao":
+                ok, state_json, nickname = await interactive_channels_login(
+                    browser, identity)
+            elif creator:
+                ok, state_json, nickname = await interactive_creator_login(
+                    browser, identity)
             else:
-                ok, state_json, nickname = await interactive_xhs_login(browser, identity)
-        elif platform == "kuaishou":
-            if creator:
-                ok, state_json, nickname = await interactive_ks_creator_login(browser, identity)
-            else:
-                ok, state_json, nickname = await interactive_ks_login(browser, identity)
-        elif platform == "shipinhao":
-            # 视频号只有一套登录态(助手即创作平台),读取/发布共用
-            ok, state_json, nickname = await interactive_channels_login(browser, identity)
-        elif creator:
-            ok, state_json, nickname = await interactive_creator_login(browser, identity)
-        else:
-            ok, state_json, nickname = await interactive_login(browser, identity)
+                ok, state_json, nickname = await interactive_login(browser, identity)
+
+        # 浏览器已经完成实际后端选择；此时快照能反映系统 Chrome 或真实回退。
+        login_environment = browser.environment_snapshot(identity, headless=False)
+        if fresh_account and platform == "xhs":
+            # The temporary identity has no durable account key. Close its CDP
+            # session before persisting the account so the same profile can be
+            # reopened under the newly assigned account id without conflict.
+            await browser.close_context(identity.key)
 
         # 3) 仅在成功且 cookie 探活通过时才落库
         if ok and state_json:
@@ -367,7 +538,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                     acc = DouyinAccount(
                         platform=platform, nickname=nickname or nm, status="active",
                         profile_dir=tmp_profile, proxy=identity.proxy,
-                        ua=new_fields["ua"], viewport_w=new_fields["viewport_w"],
+                        identity_mode="native", ua=identity.ua or "",
+                        viewport_w=new_fields["viewport_w"],
                         viewport_h=new_fields["viewport_h"],
                         timezone_id=new_fields["timezone_id"], locale=new_fields["locale"],
                         fp_seed=new_fields["fp_seed"])
@@ -383,6 +555,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                     acc.storage_state = state_json
                 if nickname:
                     acc.nickname = nickname
+                if acc.identity_mode == "native" and identity.ua:
+                    acc.ua = identity.ua
                 acc.status = "active"
                 acc.cookie_status = "valid"
                 acc.last_health_check = datetime.utcnow()
@@ -395,6 +569,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 "account_id": acc_id,
                 "nickname": nickname or nm,
                 "hint": "扫码已确认，正在校验登录态并同步账号资料",
+                "environment": login_environment,
             }
 
             profile_status = await _enrich_account_profile(acc_id, state_json)   # best-effort
@@ -402,9 +577,9 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 acc = s.get(DouyinAccount, acc_id)
                 login_tasks[task_id] = {"status": "confirmed", "account_id": acc_id,
                                         "nickname": acc.nickname if acc else (nickname or nm),
-                                        "profile_status": profile_status}
+                                        "profile_status": profile_status,
+                                        "environment": login_environment}
         elif state_json and account_id:
-            # 未扫码但浏览器已打开/关闭过:更新 cookie 快照到 DB
             with get_session() as s:
                 acc = s.get(DouyinAccount, account_id)
                 if acc:
@@ -421,7 +596,10 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 except Exception:
                     pass
                 shutil.rmtree(tmp_profile, ignore_errors=True)
-            login_tasks[task_id] = {"status": "expired"}
+            login_tasks[task_id] = {
+                "status": "expired",
+                "environment": login_environment,
+            }
     except Exception as e:
         traceback.print_exc()
         if fresh_account and tmp_profile:
@@ -430,7 +608,14 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
             except Exception:
                 pass
             shutil.rmtree(tmp_profile, ignore_errors=True)
-        login_tasks[task_id] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        login_tasks[task_id] = {
+            "status": "error",
+            "error": f"{type(e).__name__}: {e}",
+            "environment": login_environment,
+        }
+    finally:
+        if proxy_reservation_key:
+            release_proxy_reservation(proxy_reservation_key)
 
 
 @app.post("/api/login/browser/start")
@@ -465,7 +650,7 @@ async def login_xhs_start(proxy: str = "auto"):
     login_tasks[task_id] = {"status": "opening"}
     asyncio.create_task(_run_login(task_id, platform="xhs", proxy_choice=proxy))
     return {"task_id": task_id, "status": "opening",
-            "hint": "已打开小红书窗口,请在其中用小红书 App 扫码登录"}
+            "hint": "已打开小红书官网首页,请在窗口中点击登录并用小红书 App 扫码"}
 
 
 @app.post("/api/login/xhs-creator/start")
@@ -540,8 +725,9 @@ async def login_cookie(body: CookieIn):
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
     state = cookie_string_to_state(body.cookie, platform)
     with get_session() as s:
-        acc = DouyinAccount(nickname=body.nickname or "Cookie账号", platform=platform,
-                            cookie=body.cookie.strip(), storage_state=state)
+        acc = DouyinAccount(
+            nickname=body.nickname or "Cookie账号", platform=platform,
+            identity_mode="native", cookie=body.cookie.strip(), storage_state=state)
         s.add(acc); s.commit(); s.refresh(acc)
         # 分配画像(profile/UA/指纹/代理):Cookie 会在首次开持久 profile 时桥接注入
         ensure_identity(acc, cfg, session=s, assign_proxy=True)
@@ -551,6 +737,7 @@ async def login_cookie(body: CookieIn):
 
 @app.get("/api/accounts")
 async def list_accounts(platform: str | None = None):
+    risk_controller = engine.risk if engine else RiskController(cfg)
     with get_session() as s:
         q = select(DouyinAccount)
         if platform:
@@ -558,8 +745,17 @@ async def list_accounts(platform: str | None = None):
         accs = s.exec(q).all()
         out = []
         for a in accs:
+            risk_state = s.get(AccountRiskState, a.id) if a.id else None
+            next_write_at = risk_controller.next_write_at(a.id) if a.id else None
             used = len(s.exec(select(MonitorTarget.id)
                               .where(MonitorTarget.account_id == a.id)).all())
+            environment = None
+            if a.platform == "xhs" and browser is not None:
+                try:
+                    environment = browser.environment_snapshot(
+                        browser.identity_for(a), headless=False)
+                except Exception:
+                    environment = None
             out.append({
                 "id": a.id, "platform": a.platform, "nickname": a.nickname, "status": a.status,
                 "sec_uid": a.sec_uid, "douyin_id": a.douyin_id, "avatar": a.avatar,
@@ -578,11 +774,33 @@ async def list_accounts(platform: str | None = None):
                 "write_paused_until": (a.write_paused_until.isoformat()
                                         if a.write_paused_until else None),
                 "write_pause_reason": a.write_pause_reason,
+                "identity_mode": a.identity_mode,
+                "risk_level": risk_state.risk_level if risk_state else 0,
+                "risk_cooldown_until": (
+                    risk_state.cooldown_until.isoformat()
+                    if risk_state and risk_state.cooldown_until else None),
+                "risk_signal": risk_state.last_risk_reason if risk_state else "",
+                "next_write_at": (next_write_at.isoformat()
+                                  if next_write_at else None),
                 "ua": a.ua,
                 "profile_dir": a.profile_dir,
+                "environment": environment,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
             })
         return out
+
+
+@app.get("/api/accounts/{account_id}/environment")
+async def account_browser_environment(account_id: int):
+    """Return redacted browser-backend diagnostics for one account."""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    with get_session() as session:
+        account = session.get(DouyinAccount, account_id)
+        if account is None:
+            raise HTTPException(404, "账号不存在")
+        identity = browser.identity_for(account)
+    return browser.environment_snapshot(identity, headless=False)
 
 
 def _mask_proxy(proxy: str) -> str:
@@ -608,7 +826,14 @@ async def del_account(account_id: int):
         acc = s.get(DouyinAccount, account_id)
         if acc:
             pdir = acc.profile_dir or ""
-            s.delete(acc); s.commit()
+            risk_state = s.get(AccountRiskState, account_id)
+            if risk_state:
+                s.delete(risk_state)
+            for event in s.exec(select(RiskEvent).where(
+                    RiskEvent.account_id == account_id)).all():
+                s.delete(event)
+            s.delete(acc)
+            s.commit()
     # 删号同时清理其持久 profile(释放磁盘);代理回到池里(占用计数自然下降)
     if pdir:
         try:
@@ -632,7 +857,17 @@ async def refresh_account_profile(account_id: int):
         platform = acc.platform
     if not state:
         raise HTTPException(400, "该账号无浏览器登录态(Cookie 粘贴账号可能不含完整态),无法拉取资料")
-    res = await _enrich_account_profile(account_id, state)
+
+    async def _refresh_profile():
+        return await _enrich_account_profile(
+            account_id, state, detailed=True)
+
+    res, outcome = await _run_account_read(
+        account_id, OperationKind.READ_LIGHT,
+        f"refresh-profile:{account_id}", _refresh_profile,
+        empty_result={"ok": True})
+    if isinstance(outcome, dict):
+        return outcome
     if res == "invalid":
         raise HTTPException(400, "登录态已失效,请点「重新登录」")
     if res != "ok":
@@ -838,8 +1073,15 @@ async def sync_account_works(account_id: int):
         platform = acc.platform
         uid = acc.sec_uid or ""
         identity = browser.identity_for(acc)
-    async with engine._account_guard(account_id, fallback_key=f"account-works:{account_id}"):
-        items, err = await fetch_account_works(browser, identity, platform, uid)
+    async def _fetch():
+        return await fetch_account_works(browser, identity, platform, uid)
+
+    items, err = await engine.guarded_read_pair(
+        account_id, OperationKind.READ_LIGHT, f"account-works:{account_id}",
+        _fetch, empty_result=[])
+    if err.startswith("risk_deferred:"):
+        return {"ok": True, "fetched": 0, "added": 0, "skipped": True,
+                "reason": err.split(":", 1)[-1]}
     if not items:
         if err and err.startswith("missing_uid"):
             raise HTTPException(400, err.split(":", 1)[-1])
@@ -998,19 +1240,31 @@ async def sync_follows(account_id: int, direction: str = "following"):
             FollowEdge.direction == direction)).all()}
     # 抖音优先直连(following/follower list 分页,比弹窗滚动抓得全);失败再回退浏览器拦截
     users, err = [], ""
-    if platform == "douyin" and engine is not None:
+    attempted_direct = platform == "douyin" and engine is not None
+    if attempted_direct:
         try:
             users, derr = await engine.fetch_douyin_follows_direct(account_id, direction)
         except Exception as e:
             users, derr = [], repr(e)
-        if not users:
+        if derr.startswith("risk_deferred:"):
+            return {"ok": True, "fetched": 0, "added": 0, "skipped": True,
+                    "reason": derr.split(":", 1)[-1]}
+        if not users and derr not in ("", "empty"):
             print(f"[follow] douyin direct 空({derr}),回退浏览器拦截")
-    if not users:
+    allow_browser_fallback = (not attempted_direct or derr == "no_cookie")
+    if not users and allow_browser_fallback:
         if engine is not None:
-            async with engine._account_guard(
-                    account_id, fallback_key=f"follows-browser:{account_id}:{direction}"):
-                users, err = await fetch_follows(
+            async def _fetch_browser_follows():
+                return await fetch_follows(
                     browser, identity, platform, uid, direction, known)
+
+            users, err = await engine.guarded_read_pair(
+                account_id, OperationKind.READ_HEAVY,
+                f"follows-browser:{account_id}:{direction}",
+                _fetch_browser_follows, empty_result=[])
+            if err.startswith("risk_deferred:"):
+                return {"ok": True, "fetched": 0, "added": 0,
+                        "skipped": True, "reason": err.split(":", 1)[-1]}
         else:
             users, err = await fetch_follows(
                 browser, identity, platform, uid, direction, known)
@@ -1085,8 +1339,15 @@ async def sync_dm(account_id: int):
         identity = browser.identity_for(acc)
     if engine is None:
         raise HTTPException(503, "引擎未就绪")
-    async with engine._account_guard(account_id, fallback_key=f"dm:{account_id}"):
-        convs, err = await fetch_dm_conversations(browser, identity, platform)
+    async def _fetch_conversations():
+        return await fetch_dm_conversations(browser, identity, platform)
+
+    convs, err = await engine.guarded_read_pair(
+        account_id, OperationKind.READ_HEAVY, f"dm:{account_id}",
+        _fetch_conversations, empty_result=[])
+    if err.startswith("risk_deferred:"):
+        return {"ok": True, "fetched": 0, "added": 0, "skipped": True,
+                "reason": err.split(":", 1)[-1]}
     if err and err.startswith("logged_out"):
         raise HTTPException(400, "登录态已失效,请点「重新登录」")
     # 小红书网页端私信未开放(entry visible=false)等硬限制:直接把原因回给前端
@@ -1208,11 +1469,17 @@ async def fetch_dm_conversation_history(account_id: int, conv_id: str,
         raise HTTPException(400, "该会话缺 conversation_short_id,请重新同步会话列表")
     if engine is None:
         raise HTTPException(503, "引擎未就绪")
-    async with engine._account_guard(
-            account_id, fallback_key=f"dm-history:{account_id}:{conv_id}"):
-        parsed, err = await fetch_dm_history(
+    async def _fetch_history():
+        return await fetch_dm_history(
             browser, identity, platform, conv_id, short_id,
             conv_type=1, cursor=cursor, debug=debug)
+    parsed, err = await engine.guarded_read_pair(
+        account_id, OperationKind.READ_HEAVY,
+        f"dm-history:{account_id}:{conv_id}", _fetch_history,
+        empty_result={})
+    if err.startswith("risk_deferred:"):
+        return {"ok": True, "messages": 0, "added": 0, "skipped": True,
+                "reason": err.split(":", 1)[-1]}
     if err:
         raise HTTPException(400, err)
     msgs = parsed.get("messages", [])
@@ -1364,12 +1631,26 @@ _PLATFORM_HOST = {"douyin": "douyin.com", "xhs": "xiaohongshu.com",
                   "kuaishou": "kuaishou.com", "shipinhao": "weixin.qq.com"}
 
 
+def _platform_url_allowed(platform: str, value: str) -> bool:
+    expected = _PLATFORM_HOST.get(platform, "").casefold()
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        host = (parsed.hostname or "").casefold()
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        expected and parsed.scheme in {"http", "https"}
+        and (host == expected or host.endswith("." + expected))
+    )
+
+
 @app.post("/api/accounts/{account_id}/open-browser")
 async def open_account_browser(account_id: int, url: str = ""):
     """用该账号登录态弹出一个真实浏览器窗口。默认停在平台首页;传 url 则停在该地址
     (仅允许本平台域名,用于「查看」视频号作品/管理页等需登录态才能打开的页面)。
     留给用户手动操作(查看/收发私信、F12 抓接口、手动维护等)。关闭窗口即落盘 Cookie。
-    注意:窗口开着期间该账号的后台抓取/写操作会因 profile 占用而暂时失败,用完关掉即可。"""
+    小红书复用账号专属 CDP Chrome，窗口开启期间占用全局可见操作队列；其他平台仍使用
+    临时有头 Context。用完关闭窗口后，后台任务会继续执行。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     with get_session() as s:
@@ -1392,7 +1673,7 @@ async def open_account_browser(account_id: int, url: str = ""):
                 platform, "https://www.douyin.com/")
     # 传了 url 且属于本平台域名 -> 停在该地址(否则回首页,防被当跳转开任意站)
     tgt = (url or "").strip()
-    if tgt.startswith("http") and _PLATFORM_HOST.get(platform, "") in tgt:
+    if _platform_url_allowed(platform, tgt):
         home = tgt
     # 持久 profile 只在"首次空目录"才注入登录态;为防 profile 里 Cookie 缺失/过期导致
     # 打开后未登录,这里用 DB 里已知的登录态 Cookie 再注入一次(覆盖刷新)。
@@ -1404,6 +1685,31 @@ async def open_account_browser(account_id: int, url: str = ""):
                 cookies.extend(json.loads(st).get("cookies") or [])
             except Exception:
                 pass
+
+    @asynccontextmanager
+    async def _open_guard():
+        @asynccontextmanager
+        async def _engine_guard():
+            if engine is None:
+                yield None
+                return
+            async with engine.operation_guard(
+                    account_id, OperationKind.LOGIN,
+                    fallback_key=f"open-browser:{account_id}",
+                    operation_target=identity) as guarded:
+                yield guarded
+
+        async with _engine_guard() as guarded:
+            if platform == "xhs":
+                # A user-held XHS window participates in the same machine-wide
+                # visible-action queue as scheduled reads and writes.
+                async with browser.visible_action(identity):
+                    yield guarded
+            else:
+                yield guarded
+
+    guard = _open_guard()
+    await guard.__aenter__()
     try:
         ctx = await browser.open_headed(identity)
         if cookies:
@@ -1411,14 +1717,25 @@ async def open_account_browser(account_id: int, url: str = ""):
                 await ctx.add_cookies(_sanitize_cookies(cookies))
             except Exception as e:
                 print(f"[open-browser] 注入 Cookie 失败: {e!r}")
-        page = await ctx.new_page()
+        page = (await browser.new_page(identity, block_media=False)
+                if platform == "xhs" else await ctx.new_page())
         await page.goto(home, wait_until="domcontentloaded", timeout=30000)
-    except Exception as e:
+        if platform == "xhs":
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+    except BaseException as e:
+        await guard.__aexit__(type(e), e, e.__traceback__)
+        if not isinstance(e, Exception):
+            raise
         raise HTTPException(500, f"打开浏览器失败: {e!r}")
-    open_browsers[account_id] = ctx
 
-    async def _on_close():
-        """用户关窗时抓取当前 cookie 快照并更新 DB。"""
+    async def _close_with_cookie_snapshot():
+        if platform != "douyin":
+            if platform == "xhs":
+                await browser.close_context(identity.key)
+            return
         try:
             state = await ctx.storage_state()
             state_json = json.dumps(state)
@@ -1436,10 +1753,22 @@ async def open_account_browser(account_id: int, url: str = ""):
                         s.add(acc2); s.commit()
             except Exception as e:
                 print(f"[open-browser] 关窗保存 Cookie 失败: {e!r}")
-        open_browsers.pop(account_id, None)
+        try:
+            await ctx.close()
+        except Exception:
+            pass
 
+    close_callback = _close_with_cookie_snapshot if platform == "douyin" else (
+        (lambda: browser.close_context(identity.key)) if platform == "xhs" else None
+    )
+    lease = _OpenBrowserLease(ctx, guard, close_callback=close_callback)
+    open_browsers[account_id] = lease
     try:
-        ctx.on("close", lambda *_: asyncio.ensure_future(_on_close()))
+        ctx.on("close", lambda *_: asyncio.create_task(
+            _release_open_browser(account_id, lease)))
+        if platform == "xhs":
+            page.on("close", lambda *_: asyncio.create_task(
+                _release_open_browser(account_id, lease)))
     except Exception:
         pass
     return {"ok": True}
@@ -1477,10 +1806,7 @@ async def clear_account_write_pause(account_id: int):
         acc = s.get(DouyinAccount, account_id)
         if not acc:
             raise HTTPException(404, "账号不存在")
-        acc.write_paused_until = None
-        acc.write_pause_reason = ""
-        s.add(acc)
-        s.commit()
+    (engine.risk if engine else RiskController(cfg)).clear_account(account_id)
     return {"ok": True}
 
 
@@ -1502,6 +1828,31 @@ async def assign_account_proxy(account_id: int):
     return {"ok": True, "proxy": _mask_proxy(p)}
 
 
+def _proxy_probe_status(status_code: int) -> str:
+    """Map a proxy probe response to a persisted health state."""
+    if 200 <= status_code < 400:
+        return "ok"
+    if status_code == 407:
+        return "auth_error"
+    if status_code in {403, 429}:
+        return "blocked"
+    return "bad"
+
+
+def _proxy_status_ok(status_code: int) -> bool:
+    return _proxy_probe_status(status_code) == "ok"
+
+
+def _proxy_status_from_detail(ok: bool, detail: str) -> str:
+    if ok:
+        return "ok"
+    text = str(detail or "")
+    for code in (407, 403, 429):
+        if f"HTTP {code}" in text:
+            return _proxy_probe_status(code)
+    return "bad"
+
+
 async def _probe_proxy(url: str, platform: str = "douyin", timeout: float = 15):
     """经代理实连一次目标站,返回 (ok, detail)。"""
     import httpx
@@ -1514,7 +1865,7 @@ async def _probe_proxy(url: str, platform: str = "douyin", timeout: float = 15):
     try:
         async with httpx.AsyncClient(proxy=url, timeout=timeout, follow_redirects=True) as cli:
             r = await cli.get(test_url)
-        return r.status_code < 500, f"HTTP {r.status_code}"
+        return _proxy_status_ok(r.status_code), f"HTTP {r.status_code}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
@@ -1675,7 +2026,7 @@ async def test_account_proxy(account_id: int):
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
         if acc:
-            acc.proxy_status = "ok" if ok else "bad"
+            acc.proxy_status = _proxy_status_from_detail(ok, detail)
             s.add(acc); s.commit()
     return {"ok": ok, "detail": detail, "proxy": _mask_proxy(proxy)}
 
@@ -1842,7 +2193,7 @@ async def test_proxy_entry(pid: int):
     with get_session() as s:
         p = s.get(ProxyPool, pid)
         if p:
-            p.status = "ok" if ok else "bad"
+            p.status = _proxy_status_from_detail(ok, detail)
             p.last_checked_at = datetime.utcnow()
             if geo:                            # 归属地写入结构化字段(供「地区」列展示)
                 p.exit_ip = geo.get("ip", "") or p.exit_ip
@@ -4874,7 +5225,8 @@ def _first_val(d: dict, *keys, default=""):
     return default
 
 
-async def _xhs_account_uid(state: str, proxy: str = "") -> str:
+async def _xhs_account_uid(state: str, proxy: str = "", *,
+                           detailed: bool = False):
     """拿到该账号自己的 user_id(self_info → 创作平台资料兜底)。"""
     from .platforms.xhs import XhsApiClient, cookie_str_from_state, has_a1, creator_profile
     cookie = cookie_str_from_state(state)
@@ -4885,11 +5237,27 @@ async def _xhs_account_uid(state: str, proxy: str = "") -> str:
             me = await client.self_info()
             uid = str((me or {}).get("user_id") or "")
             if uid:
-                return uid
-        except Exception:
-            pass
-    prof = await creator_profile(state, proxy=proxy)
-    return (prof or {}).get("sec_uid") or ""
+                return (uid, "") if detailed else uid
+        except Exception as exc:
+            category, _signal = classify_platform_error(exc)
+            if detailed and category in {
+                    RiskCategory.RISK, RiskCategory.AUTH, RiskCategory.NETWORK}:
+                return "", exc
+    try:
+        if detailed:
+            prof, profile_error = await creator_profile(
+                state, proxy=proxy, preserve_error=True)
+        else:
+            prof = await creator_profile(state, proxy=proxy)
+            profile_error = ""
+    except Exception as exc:
+        if detailed:
+            return "", exc
+        raise
+    if detailed and profile_error:
+        return "", profile_error
+    uid = (prof or {}).get("sec_uid") or ""
+    return (uid, "") if detailed else uid
 
 
 def _imgs_of(n: dict) -> list:
@@ -4916,50 +5284,122 @@ async def list_published_notes(account_id: int):
         read_state = acc.storage_state or ""
         creator_state = acc.creator_storage_state or ""
         proxy = acc.proxy or ""
-        identity = browser.identity_for(acc)
         if not (read_state or creator_state):
             raise HTTPException(400, "该账号未登录,请先在账号页扫码登录")
     from .browser import fetch_xhs_notes, fetch_creator_published
     from .platforms.xhs import parse_note_brief
 
-    out, good = [], False
-    if read_state:
-        uid = await _xhs_account_uid(read_state, proxy)
-        if uid:
-            items, _a, _e = await fetch_xhs_notes(browser, identity, uid, set())
-            for raw in items[:80]:
-                b = parse_note_brief(raw)
-                if not b:
-                    continue
-                card = raw.get("note_card") or raw
-                interact = card.get("interact_info") or {}
+    async def _fetch_published_notes():
+        def _payload(items, good_tokens=False, error_category=""):
+            payload = {
+                "notes": items,
+                "total": len(items),
+                "good_tokens": good_tokens,
+            }
+            if error_category:
+                payload["_error_category"] = error_category
+            return payload
+
+        def _failure(error):
+            category, _signal = classify_platform_error(error)
+            return _payload([], error_category=category.value), error
+
+        with get_session() as s:
+            current = s.get(DouyinAccount, account_id)
+            identity = browser.identity_for(current)
+        out, good = [], False
+        if read_state:
+            uid, uid_error = await _xhs_account_uid(
+                read_state, proxy, detailed=True)
+            if uid_error:
+                category, _signal = classify_platform_error(uid_error)
+                if category in {
+                        RiskCategory.RISK, RiskCategory.AUTH,
+                        RiskCategory.NETWORK}:
+                    return _failure(uid_error)
+            if uid:
+                try:
+                    items, _a, read_error = await fetch_xhs_notes(
+                        browser, identity, uid, set())
+                except Exception as exc:
+                    category, _signal = classify_platform_error(exc)
+                    if category in {
+                            RiskCategory.RISK, RiskCategory.AUTH,
+                            RiskCategory.NETWORK}:
+                        return _failure(exc)
+                    items, read_error = [], exc
+                if read_error:
+                    category, _signal = classify_platform_error(read_error)
+                    if category in {
+                            RiskCategory.RISK, RiskCategory.AUTH,
+                            RiskCategory.NETWORK}:
+                        return _failure(read_error)
+                for raw in items[:80]:
+                    b = parse_note_brief(raw)
+                    if not b:
+                        continue
+                    card = raw.get("note_card") or raw
+                    interact = card.get("interact_info") or {}
+                    out.append({
+                        "note_id": b["note_id"],
+                        "title": b.get("title") or "(无标题)",
+                        "type": b.get("type") or "normal",
+                        "cover": b.get("cover") or "",
+                        "images": [],
+                        "like": interact.get("liked_count") or 0,
+                        "time": card.get("time") or 0,
+                        "xsec_token": b.get("xsec_token") or "",
+                        "xsec_source": "pc_feed",
+                    })
+                good = bool(out)
+        error = ""
+        if not out:   # 回退:创作平台笔记管理(显示用)
+            try:
+                notes, error = await fetch_creator_published(browser, identity)
+            except Exception as exc:
+                category, _signal = classify_platform_error(exc)
+                if category in {
+                        RiskCategory.RISK, RiskCategory.AUTH,
+                        RiskCategory.NETWORK}:
+                    return _failure(exc)
+                raise
+            for n in notes[:80]:
+                imgs = _imgs_of(n)
+                vi = n.get("video_info") or {}
+                cover = (imgs[0] if imgs else
+                         (vi.get("cover") if isinstance(vi, dict) else ""))
                 out.append({
-                    "note_id": b["note_id"], "title": b.get("title") or "(无标题)",
-                    "type": b.get("type") or "normal", "cover": b.get("cover") or "",
-                    "images": [], "like": interact.get("liked_count") or 0,
-                    "time": card.get("time") or 0,
-                    "xsec_token": b.get("xsec_token") or "", "xsec_source": "pc_feed",
+                    "note_id": str(_first_val(n, "id", "noteId", "note_id")),
+                    "title": _first_val(
+                        n, "display_title", "title", "desc", default="(无标题)"),
+                    "type": _first_val(n, "type", "noteType", default="normal"),
+                    "cover": cover or "", "images": imgs,
+                    "like": _first_val(n, "likes", "likeCount", default=0),
+                    "time": _first_val(n, "time", "postTime", default=0),
+                    "xsec_token": _first_val(n, "xsec_token", default=""),
+                    "xsec_source": _first_val(
+                        n, "xsec_source", default="pc_note_detail"),
                 })
-            good = bool(out)
-    if not out:   # 回退:创作平台笔记管理(显示用)
-        notes, err = await fetch_creator_published(browser, identity)
-        if "logged_out" in (err or ""):
-            raise HTTPException(400, "登录态已失效,请对该账号点「重新登录」")
-        for n in notes[:80]:
-            imgs = _imgs_of(n)
-            vi = n.get("video_info") or {}
-            cover = imgs[0] if imgs else (vi.get("cover") if isinstance(vi, dict) else "")
-            out.append({
-                "note_id": str(_first_val(n, "id", "noteId", "note_id")),
-                "title": _first_val(n, "display_title", "title", "desc", default="(无标题)"),
-                "type": _first_val(n, "type", "noteType", default="normal"),
-                "cover": cover or "", "images": imgs,
-                "like": _first_val(n, "likes", "likeCount", default=0),
-                "time": _first_val(n, "time", "postTime", default=0),
-                "xsec_token": _first_val(n, "xsec_token", default=""),
-                "xsec_source": _first_val(n, "xsec_source", default="pc_note_detail"),
-            })
-    return {"notes": out, "total": len(out), "good_tokens": good}
+        if error:
+            category, _signal = classify_platform_error(error)
+            return _payload(
+                out, good, error_category=category.value), error
+        return _payload(out, good), ""
+
+    payload, outcome = await _run_account_read(
+        account_id, OperationKind.READ_LIGHT, f"published:{account_id}",
+        _fetch_published_notes,
+        empty_result={"notes": [], "total": 0, "good_tokens": False},
+        unexpected_detail="读取已发布作品失败")
+    if isinstance(outcome, dict):
+        return outcome
+    error_category = payload.pop("_error_category", "")
+    if error_category == RiskCategory.AUTH.value or "logged_out" in (outcome or ""):
+        raise HTTPException(400, "登录态已失效,请对该账号点「重新登录」")
+    if error_category in {
+            RiskCategory.RISK.value, RiskCategory.NETWORK.value}:
+        raise HTTPException(400, f"读取已发布作品失败:{outcome}")
+    return payload
 
 
 @app.get("/api/publish/note-media")
@@ -4976,20 +5416,46 @@ async def publish_note_media(account_id: int, note_id: str,
     cookie = cookie_str_from_state(state)
     if not has_a1(cookie):
         raise HTTPException(400, "登录态缺少 a1")
-    client = XhsApiClient(cookie, cfg.engine.user_agent,
-                          timeout=cfg.engine.request_timeout_seconds, proxy=proxy)
-    try:
-        card = await client.note_detail(note_id, xsec_token=xsec_token, xsec_source=xsec_source)
-    except XhsApiError as e:
-        raise HTTPException(400, f"取笔记失败:{e}")
-    aw = parse_note_detail(card or {}, {"note_id": note_id})
-    if not aw or not aw.medias:
-        raise HTTPException(400, "拿不到该笔记的媒体(xsec_token 对 feed 接口无效)")
-    return {
-        "media_type": aw.media_type, "desc": aw.desc, "cover_url": aw.cover or "",
-        "medias": [{"url": m.url, "kind": m.kind, "ext": m.ext, "index": m.index}
-                   for m in aw.medias],
-    }
+
+    no_media = "拿不到该笔记的媒体(xsec_token 对 feed 接口无效)"
+
+    async def _fetch_note_media():
+        client = XhsApiClient(
+            cookie, cfg.engine.user_agent,
+            timeout=cfg.engine.request_timeout_seconds, proxy=proxy)
+        try:
+            card = await client.note_detail(
+                note_id, xsec_token=xsec_token, xsec_source=xsec_source)
+        except XhsApiError as exc:
+            return None, exc
+        aw = parse_note_detail(card or {}, {"note_id": note_id})
+        if not aw or not aw.medias:
+            return None, no_media
+        return {
+            "media_type": aw.media_type,
+            "desc": aw.desc,
+            "cover_url": aw.cover or "",
+            "medias": [{
+                "url": media.url,
+                "kind": media.kind,
+                "ext": media.ext,
+                "index": media.index,
+            } for media in aw.medias],
+        }, ""
+
+    payload, outcome = await _run_account_read(
+        account_id, OperationKind.READ_HEAVY,
+        f"note-media:{account_id}:{note_id}", _fetch_note_media,
+        empty_result={
+            "media_type": "", "desc": "", "cover_url": "", "medias": []},
+        unexpected_detail="取笔记失败")
+    if isinstance(outcome, dict):
+        return outcome
+    if outcome == no_media:
+        raise HTTPException(400, no_media)
+    if outcome:
+        raise HTTPException(400, f"取笔记失败:{outcome}")
+    return payload
 
 
 @app.get("/api/publish/note-comments")
@@ -5007,25 +5473,59 @@ async def publish_note_comments(account_id: int, note_id: str,
     cookie = cookie_str_from_state(state)
     if not has_a1(cookie):
         raise HTTPException(400, "登录态缺少 a1")
-    client = XhsApiClient(cookie, cfg.engine.user_agent,
-                          timeout=cfg.engine.request_timeout_seconds, proxy=proxy)
-    # 评论接口要 pc_feed 令牌;先调 feed 拿一个新鲜令牌(feed 接受 pc_creatormng 令牌)
-    tok, src = xsec_token, xsec_source
-    try:
-        item = await client.note_detail_raw(note_id, xsec_token=xsec_token, xsec_source=xsec_source)
-        fresh = item.get("xsec_token") or ((item.get("note_card") or {}).get("xsec_token"))
-        if fresh:
-            tok, src = fresh, "pc_feed"
-    except Exception:
-        pass
-    try:
-        d = await client.note_comments(note_id, xsec_token=tok, xsec_source=src)
-    except XhsApiError as e:
-        raise HTTPException(400, f"取评论失败:{e}")
-    raw = d.get("comments") or []
-    fresh = [c for c in (parse_xhs_comment(rc) for rc in flatten_comments(raw)) if c]
-    fresh.sort(key=lambda c: c.get("create_time") or 0, reverse=True)
-    return {"comments": fresh, "total": len(fresh), "has_more": bool(d.get("has_more"))}
+
+    async def _fetch_note_comments():
+        client = XhsApiClient(
+            cookie, cfg.engine.user_agent,
+            timeout=cfg.engine.request_timeout_seconds, proxy=proxy)
+        # 评论接口要 pc_feed 令牌;先调 feed 拿一个新鲜令牌(feed 接受 pc_creatormng 令牌)
+        tok, src = xsec_token, xsec_source
+        try:
+            item = await client.note_detail_raw(
+                note_id, xsec_token=xsec_token, xsec_source=xsec_source)
+            fresh_token = (item.get("xsec_token") or
+                           ((item.get("note_card") or {}).get("xsec_token")))
+            if fresh_token:
+                tok, src = fresh_token, "pc_feed"
+        except XhsApiError as exc:
+            if exc.category in {"risk", "auth", "network"}:
+                return None, exc
+        except Exception as exc:
+            category, _signal = classify_platform_error(exc)
+            if category in {
+                    RiskCategory.RISK, RiskCategory.AUTH,
+                    RiskCategory.NETWORK}:
+                return None, exc
+            raise
+        try:
+            data = await client.note_comments(
+                note_id, xsec_token=tok, xsec_source=src)
+        except XhsApiError as exc:
+            return None, exc
+        raw = data.get("comments") or []
+        comments = [
+            comment for comment in (
+                parse_xhs_comment(item) for item in flatten_comments(raw))
+            if comment
+        ]
+        comments.sort(
+            key=lambda comment: comment.get("create_time") or 0, reverse=True)
+        return {
+            "comments": comments,
+            "total": len(comments),
+            "has_more": bool(data.get("has_more")),
+        }, ""
+
+    payload, outcome = await _run_account_read(
+        account_id, OperationKind.READ_HEAVY,
+        f"note-comments:{account_id}:{note_id}", _fetch_note_comments,
+        empty_result={"comments": [], "total": 0, "has_more": False},
+        unexpected_detail="取评论失败")
+    if isinstance(outcome, dict):
+        return outcome
+    if outcome:
+        raise HTTPException(400, f"取评论失败:{outcome}")
+    return payload
 
 
 class RepostIn(BaseModel):

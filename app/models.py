@@ -40,6 +40,7 @@ class DouyinAccount(SQLModel, table=True):
     last_creator_active: Optional[datetime] = None  # 上次创作者活跃(用于创作者保活)
     write_paused_until: Optional[datetime] = None  # 平台风控后暂停自动写操作
     write_pause_reason: str = ""                    # 最近一次暂停原因
+    identity_mode: str = "legacy"                  # legacy=保留存量画像 | native=浏览器原生画像
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -91,6 +92,36 @@ class AppSetting(SQLModel, table=True):
     """全局键值设置(如默认下载目录)。"""
     key: str = Field(primary_key=True)
     value: str = ""
+
+
+class AccountRiskState(SQLModel, table=True):
+    """跨功能共享的账号平台风险状态，一账号一行。"""
+    account_id: int = Field(primary_key=True)
+    risk_level: int = 0
+    cooldown_until: Optional[datetime] = Field(default=None, index=True)
+    probe_only_until: Optional[datetime] = None
+    consecutive_risk: int = 0
+    consecutive_network_failures: int = 0
+    network_failure_key: str = ""
+    recovery_successes: int = 0
+    last_risk_at: Optional[datetime] = None
+    last_risk_reason: str = ""
+    last_operation_at: Optional[datetime] = None
+    last_write_at: Optional[datetime] = None
+    last_heavy_read_at: Optional[datetime] = None
+    last_recovery_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RiskEvent(SQLModel, table=True):
+    """统一平台操作计数事件；不保存 Cookie、代理凭据或响应正文。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    account_id: int = Field(index=True)
+    network_key: str = Field(default="direct", index=True)
+    operation_kind: str = Field(default="read_light", index=True)
+    outcome: str = Field(default="success", index=True)
+    signal: str = ""
+    occurred_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class NotificationChannel(SQLModel, table=True):
@@ -167,12 +198,13 @@ class PublishTask(SQLModel, table=True):
     visibility: str = "public"                         # 抖音:public 公开 | friends 好友可见 | private 仅自己可见
     allow_save: bool = True                            # 抖音:是否允许他人保存(下载)
     scheduled_at: Optional[datetime] = None            # 定时发布时间(空=尽快发)
-    status: str = "pending"        # pending | publishing | done | failed | canceled
+    status: str = "pending"        # pending | publishing | uncertain | done | failed | canceled
     result_url: str = ""           # 发布成功后的笔记链接(能取到则填)
     error: str = ""
     source_platform: str = ""      # 来源(如 douyin),跨平台转发时填
     source_content_id: Optional[int] = None            # 来源作品记录 id
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    done_at: Optional[datetime] = None
 
 
 class CommentRecord(SQLModel, table=True):
@@ -291,11 +323,11 @@ class CommentTask(SQLModel, table=True):
     target_text: str = ""                                 # 目标评论原文(定位回复目标)
     content: str = ""                                     # 已渲染好的文案
     scheduled_at: Optional[datetime] = None               # 计划发送时间(错峰)
-    # draft=草稿待审(人工通过后才转 pending);pending=待发;其余为执行态
-    status: str = "pending"        # draft | pending | doing | done | failed | canceled
+    # draft=草稿待审;uncertain=已提交但未取得明确结果,不可自动重试
+    status: str = "pending"        # draft | pending | doing | uncertain | done | failed | canceled
     result: str = ""               # 成功后的评论 id / 链接
     error: str = ""
-    method: str = ""               # 实际走的通道:api | browser
+    method: str = ""               # 实际走的通道:manual | api | browser
     created_at: datetime = Field(default_factory=datetime.utcnow)
     done_at: Optional[datetime] = None
 
@@ -405,7 +437,7 @@ class AccountActionTask(SQLModel, table=True):
     conv_id: str = ""                 # send_dm:会话 id(可空,用 target_uid 新开)
     content: str = ""                 # send_dm 的文案
     scheduled_at: Optional[datetime] = None
-    status: str = "pending"        # draft | pending | doing | done | failed | canceled
+    status: str = "pending"        # draft | pending | doing | done | failed | uncertain | canceled
     result: str = ""
     error: str = ""
     method: str = ""               # 实际走的通道:browser

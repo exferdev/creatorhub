@@ -23,6 +23,25 @@ def check_primitives() -> bool:
         return False
 
 
+def check_risk_control() -> bool:
+    try:
+        from app.config import Config
+        from app.risk import RiskController, network_key
+
+        cfg = Config()
+        controller = RiskController(cfg)
+        assert controller.policy.enabled
+        assert controller.policy.cooldown_steps_seconds == [1800, 7200, 21600, 86400]
+        assert network_key("") == "direct"
+        proxy_key = network_key("http://user:secret@proxy.example:8000")
+        assert proxy_key.startswith("proxy:") and "secret" not in proxy_key
+        print("[平台风控] OK: 持久化策略、冷却阶梯和网络出口分组可用")
+        return True
+    except Exception as e:
+        print(f"[平台风控] FAIL: {e}")
+        return False
+
+
 def check_playwright() -> bool:
     try:
         import playwright  # noqa: F401
@@ -46,9 +65,9 @@ def check_playwright() -> bool:
 def check_node() -> bool:
     npm = shutil.which("npm.cmd") or shutil.which("npm")
     if npm:
-        print("[Node.js] OK: 小红书发布依赖可安装/更新")
+        print("[Node.js] OK: 小红书 API 发布兼容模式依赖可安装/更新")
         return True
-    print("[Node.js] INFO: 未检测到（仅影响小红书发布，其他功能可用）")
+    print("[Node.js] INFO: 未检测到（仅影响小红书 API 发布兼容模式）")
     return True
 
 
@@ -72,6 +91,7 @@ def check_share_downloader() -> bool:
 if __name__ == "__main__":
     checks = (
         check_primitives(),
+        check_risk_control(),
         check_playwright(),
         check_node(),
         check_share_downloader(),

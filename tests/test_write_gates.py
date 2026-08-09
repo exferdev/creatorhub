@@ -1,26 +1,41 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import app.db as db
 from app.config import Config, EngineConfig
 from app.engine.monitor import MonitorEngine
-from app.models import AccountActionTask, CommentRule, CommentTask, DouyinAccount
+from app.risk import OperationKind
+from app.models import (
+    AccountActionTask,
+    CommentRule,
+    CommentTask,
+    DmConversation,
+    DouyinAccount,
+    PublishTask,
+    RiskEvent,
+)
 from sqlmodel import select
 
 
 class _BrowserStub:
     def __init__(self):
         self._locks = {}
+        self.identity_calls = 0
+        self.anon_calls = 0
 
     def lock_for(self, key):
         return self._locks.setdefault(key, asyncio.Lock())
 
     def identity_for(self, _account):
+        self.identity_calls += 1
         return None
 
     def anon_identity(self):
+        self.anon_calls += 1
         return None
 
 
@@ -96,11 +111,37 @@ class WriteGateTests(unittest.TestCase):
             session.refresh(task)
             return task.id
 
+    def _xhs_dm_task(self, account_id):
+        with db.get_session() as session:
+            task = AccountActionTask(
+                platform="xhs", account_id=account_id, action="send_dm",
+                target_uid="fixture-user", content="唯一消息",
+                status="pending",
+            )
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            return task.id
+
+    def _publish_task(self, account_id, *, platform="douyin"):
+        with db.get_session() as session:
+            task = PublishTask(
+                platform=platform,
+                account_id=account_id,
+                media_type="images",
+                media_json="[]",
+                status="pending",
+            )
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            return task.id
+
     def test_manual_comment_execution_keeps_task_queued_outside_active_window(self):
         account_id = self._account()
         task_id = self._comment_task(account_id)
         engine = MonitorEngine(self.cfg, _BrowserStub())
-        engine._in_active_window = lambda: False
+        engine._in_active_window = lambda *_args: False
 
         result = asyncio.run(engine.execute_comment_task(task_id))
 
@@ -113,7 +154,7 @@ class WriteGateTests(unittest.TestCase):
         account_id = self._account()
         task_id = self._action_task(account_id)
         engine = MonitorEngine(self.cfg, _BrowserStub())
-        engine._in_active_window = lambda: False
+        engine._in_active_window = lambda *_args: False
 
         result = asyncio.run(engine.execute_action_task(task_id))
 
@@ -125,18 +166,364 @@ class WriteGateTests(unittest.TestCase):
     def test_risk_pause_blocks_and_persists_until_cleared(self):
         account_id = self._account()
         engine = MonitorEngine(self.cfg, _BrowserStub())
-        engine._pause_account_writes(account_id, "status_code=8 风控")
+        engine.risk.record_failure(
+            account_id, OperationKind.COMMENT, "HTTP 429")
 
         message = engine._comment_gate_error(account_id)
         self.assertIn("暂停至", message)
         with db.get_session() as session:
             account = session.get(DouyinAccount, account_id)
             self.assertIsNotNone(account.write_paused_until)
-            account.write_paused_until = None
-            account.write_pause_reason = ""
+        engine.risk.clear_account(account_id)
+        self.assertEqual(engine._comment_gate_error(account_id), "")
+
+    def test_publish_outside_active_window_stays_pending(self):
+        account_id = self._account()
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        engine._in_active_window = lambda *_args: False
+
+        result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            self.assertEqual(task.status, "pending")
+
+    def test_publish_during_risk_pause_stays_pending(self):
+        account_id = self._account()
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        engine.risk.record_failure(
+            account_id, OperationKind.COMMENT, "HTTP 429")
+
+        result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            self.assertEqual(task.status, "pending")
+            self.assertIsNotNone(task.scheduled_at)
+
+    def test_publish_with_missing_account_fails_before_browser_use(self):
+        browser = _BrowserStub()
+        task_id = self._publish_task(999999)
+        engine = MonitorEngine(self.cfg, browser)
+
+        result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(browser.identity_calls, 0)
+        self.assertEqual(browser.anon_calls, 0)
+        with db.get_session() as session:
+            self.assertEqual(session.get(PublishTask, task_id).status, "failed")
+
+    def test_publish_with_bad_proxy_is_deferred_for_recovery(self):
+        account_id = self._account()
+        with db.get_session() as session:
+            account = session.get(DouyinAccount, account_id)
+            account.proxy = "http://bad.example:8000"
+            account.proxy_status = "bad"
             session.add(account)
             session.commit()
-        self.assertEqual(engine._comment_gate_error(account_id), "")
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            self.assertEqual(task.status, "pending")
+            self.assertGreater(task.scheduled_at, datetime.utcnow())
+
+    def test_successful_comment_blocks_immediate_cross_feature_write(self):
+        account_id = self._account()
+        comment_id = self._comment_task(account_id)
+        action_id = self._action_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def sent(*_args, **_kwargs):
+            return True, ""
+
+        with patch("app.engine.monitor.post_comment_browser", sent):
+            first = asyncio.run(engine.execute_comment_task(comment_id))
+        second = asyncio.run(engine.execute_action_task(action_id))
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        with db.get_session() as session:
+            task = session.get(AccountActionTask, action_id)
+            self.assertEqual(task.status, "pending")
+            self.assertIsNotNone(task.scheduled_at)
+
+    def test_dm_risk_response_does_not_retry_through_browser(self):
+        account_id = self._account()
+        with db.get_session() as session:
+            session.add(DmConversation(
+                account_id=account_id,
+                conv_id="conv-fixture",
+                conv_short_id="short-fixture",
+                ticket="ticket-fixture",
+            ))
+            task = AccountActionTask(
+                platform="douyin", account_id=account_id, action="send_dm",
+                conv_id="conv-fixture", target_uid="target", content="hello",
+                status="pending",
+            )
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            task_id = task.id
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        browser_calls = 0
+
+        async def api_risk(*_args, **_kwargs):
+            return False, "HTTP 429"
+
+        async def browser_retry(*_args, **_kwargs):
+            nonlocal browser_calls
+            browser_calls += 1
+            return True, ""
+
+        with patch("app.engine.monitor.send_dm_api", api_risk), \
+                patch("app.engine.monitor.send_dm", browser_retry):
+            result = asyncio.run(engine.execute_action_task(task_id))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(browser_calls, 0)
+        with db.get_session() as session:
+            self.assertEqual(session.get(AccountActionTask, task_id).status, "pending")
+
+    def test_xhs_dm_uncertain_is_not_retried_or_recorded_as_risk_failure(self):
+        account_id = self._account(platform="xhs")
+        task_id = self._xhs_dm_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def ambiguous(*_args, **kwargs):
+            kwargs["on_submit"]()
+            with db.get_session() as session:
+                self.assertEqual(
+                    session.get(AccountActionTask, task_id).error,
+                    "write_submitted:browser",
+                )
+            return False, "write_uncertain:发送后连接中断"
+
+        with patch("app.engine.monitor.send_dm", ambiguous):
+            result = asyncio.run(engine.execute_action_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(AccountActionTask, task_id)
+            self.assertEqual(task.status, "uncertain")
+            self.assertEqual(task.method, "browser")
+            self.assertIsNone(task.scheduled_at)
+            self.assertIsNone(task.done_at)
+            self.assertEqual(session.exec(select(RiskEvent)).all(), [])
+
+    def test_publish_risk_response_returns_task_to_pending(self):
+        account_id = self._account()
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def rejected(*_args, **_kwargs):
+            return False, "", "HTTP 429"
+
+        with patch("app.engine.monitor.publish_douyin", rejected):
+            result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            self.assertEqual(task.status, "pending")
+            self.assertIsNotNone(task.scheduled_at)
+            self.assertGreater(task.scheduled_at, datetime.utcnow())
+
+    def test_publish_auth_expiry_keeps_task_pending_and_invalidates_account(self):
+        account_id = self._account()
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def logged_out(*_args, **_kwargs):
+            return False, "", "logged_out"
+
+        with patch("app.engine.monitor.publish_douyin", logged_out):
+            result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            account = session.get(DouyinAccount, account_id)
+            self.assertEqual(task.status, "pending")
+            self.assertIsNotNone(task.scheduled_at)
+            self.assertEqual(account.status, "invalid")
+
+    def test_xhs_publish_uncertain_is_not_retried_or_recorded_as_done(self):
+        account_id = self._account(platform="xhs")
+        task_id = self._publish_task(account_id, platform="xhs")
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        calls = []
+
+        async def ambiguous(*_args, **kwargs):
+            calls.append(kwargs)
+            kwargs["on_submit"]()
+            with db.get_session() as session:
+                self.assertEqual(
+                    session.get(PublishTask, task_id).error,
+                    "write_submitted:browser")
+            return False, "", "write_uncertain:发布后连接中断"
+
+        with patch("app.engine.monitor.publish_xhs", ambiguous):
+            result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(calls[0]["mode"], "browser")
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            self.assertEqual(task.status, "uncertain")
+            self.assertIsNone(task.done_at)
+            self.assertIsNone(task.scheduled_at)
+
+    def test_disabled_risk_controller_does_not_defer_rejected_publish(self):
+        self.cfg.risk_control.enabled = False
+        account_id = self._account()
+        task_id = self._publish_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def rejected(*_args, **_kwargs):
+            return False, "", "HTTP 429"
+
+        with patch("app.engine.monitor.publish_douyin", rejected):
+            result = asyncio.run(engine.publish_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(PublishTask, task_id)
+            account = session.get(DouyinAccount, account_id)
+            self.assertEqual(task.status, "failed")
+            self.assertIsNone(task.scheduled_at)
+            self.assertIsNone(account.write_paused_until)
+
+    def test_disabled_risk_controller_ignores_existing_compatibility_pause(self):
+        account_id = self._account()
+        with db.get_session() as session:
+            account = session.get(DouyinAccount, account_id)
+            account.write_paused_until = datetime.utcnow() + timedelta(hours=1)
+            account.write_pause_reason = "legacy risk pause"
+            session.add(account)
+            session.commit()
+        self.cfg.risk_control.enabled = False
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        self.assertEqual(engine._write_pause_error(account_id), "")
+
+    def test_comment_at_daily_cap_remains_queued(self):
+        self.cfg.engine.comment_daily_cap_per_account = 1
+        account_id = self._account()
+        with db.get_session() as session:
+            session.add(CommentTask(
+                platform="douyin",
+                account_id=account_id,
+                aweme_id="already-sent",
+                content="done",
+                status="done",
+                done_at=datetime.utcnow(),
+            ))
+            session.commit()
+        task_id = self._comment_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        result = asyncio.run(engine.execute_comment_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(CommentTask, task_id)
+            self.assertEqual(task.status, "pending")
+            self.assertIsNotNone(task.scheduled_at)
+
+    def test_startup_recovers_interrupted_write_tasks(self):
+        account_id = self._account()
+        now = datetime(2026, 8, 7, 1, 0, 0)
+        with db.get_session() as session:
+            comment = CommentTask(
+                account_id=account_id, aweme_id="fixture", content="fixture",
+                status="doing")
+            action = AccountActionTask(
+                account_id=account_id, action="follow", status="doing")
+            publish = PublishTask(
+                account_id=account_id, media_json="[]", status="publishing")
+            submitted_comment = CommentTask(
+                platform="xhs", account_id=account_id, aweme_id="submitted-note",
+                content="submitted", status="doing",
+                error="write_submitted:browser")
+            submitted_publish = PublishTask(
+                platform="xhs", account_id=account_id, media_json="[]",
+                status="publishing", error="write_submitted:browser")
+            submitted_action = AccountActionTask(
+                platform="xhs", account_id=account_id, action="send_dm",
+                target_uid="fixture-user", content="唯一消息", status="doing",
+                error="write_submitted:browser")
+            session.add(comment)
+            session.add(action)
+            session.add(publish)
+            session.add(submitted_comment)
+            session.add(submitted_publish)
+            session.add(submitted_action)
+            session.commit()
+            comment_id, action_id, publish_id = comment.id, action.id, publish.id
+            submitted_comment_id = submitted_comment.id
+            submitted_publish_id = submitted_publish.id
+            submitted_action_id = submitted_action.id
+
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        recovered = engine.recover_interrupted_tasks(now=now)
+
+        self.assertEqual(recovered, 6)
+        with db.get_session() as session:
+            rows = [
+                session.get(CommentTask, comment_id),
+                session.get(AccountActionTask, action_id),
+                session.get(PublishTask, publish_id),
+            ]
+            for row in rows:
+                self.assertEqual(row.status, "pending")
+                self.assertEqual(row.scheduled_at, now + timedelta(minutes=5))
+            submitted_rows = [
+                session.get(CommentTask, submitted_comment_id),
+                session.get(PublishTask, submitted_publish_id),
+                session.get(AccountActionTask, submitted_action_id),
+            ]
+            for row in submitted_rows:
+                self.assertEqual(row.status, "uncertain")
+                self.assertIsNone(row.scheduled_at)
+                self.assertIn("重启", row.error)
+
+    def test_legacy_active_window_check_uses_account_timezone(self):
+        self.cfg.engine.quiet_hours_enabled = True
+        account_id = self._account()
+        with db.get_session() as session:
+            account = session.get(DouyinAccount, account_id)
+            account.timezone_id = "America/New_York"
+            session.add(account)
+            session.commit()
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        engine.risk._in_active_window = (
+            lambda account, _now: account.timezone_id == "America/New_York")
+
+        self.assertTrue(engine._in_active_window(account_id))
+
+    def test_legacy_daily_counter_uses_account_local_midnight(self):
+        account_id = self._account()
+        with db.get_session() as session:
+            account = session.get(DouyinAccount, account_id)
+            account.timezone_id = "America/New_York"
+            session.add(account)
+            session.commit()
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        expected = engine.risk._local_day_start_utc(
+            engine._load_account(account_id), datetime.utcnow())
+
+        self.assertEqual(engine._today_start(account_id), expected)
 
     def test_self_comment_filter_prefers_account_ids(self):
         raw = {"user": {"uid": "self-uid", "nickname": "changed"}}
@@ -179,6 +566,41 @@ class WriteGateTests(unittest.TestCase):
                 CommentTask.rule_id == rule_id)).one()
             self.assertEqual(task.target_text, "hello from visitor")
 
+    def test_concurrent_comment_rule_discovery_rechecks_read_budget_in_lock(self):
+        account_id = self._account()
+        rule_ids = []
+        with db.get_session() as session:
+            for _ in range(2):
+                rule = CommentRule(
+                    platform="douyin", mode="auto_reply", target_kind="self",
+                    account_id=account_id, templates='["ok"]',
+                    max_per_run=1, daily_cap=10, min_gap_seconds=60,
+                )
+                session.add(rule)
+                session.commit()
+                session.refresh(rule)
+                rule_ids.append(rule.id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+        calls = 0
+
+        async def discover(*_args):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.02)
+            return [], ""
+
+        engine._discover_targets = discover
+
+        async def scenario():
+            return await asyncio.gather(*(
+                engine.run_comment_rule(rule_id) for rule_id in rule_ids))
+
+        results = asyncio.run(scenario())
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(sum(
+            1 for result in results if result.get("next_allowed_at")), 1)
+
     def test_xhs_manual_mode_keeps_draft_without_api_call(self):
         account_id = self._account(platform="xhs")
         task_id = self._xhs_comment_task(account_id)
@@ -198,7 +620,59 @@ class WriteGateTests(unittest.TestCase):
             self.assertEqual(task.status, "draft")
             self.assertEqual(task.method, "manual")
 
+    def test_xhs_comment_defaults_to_browser_page_write(self):
+        from app.platforms.xhs.browser_writes import XhsWriteOutcome
+
+        account_id = self._account(platform="xhs")
+        task_id = self._xhs_comment_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        def unexpected_api(*_args, **_kwargs):
+            raise AssertionError("default browser mode must not construct API client")
+
+        engine._xhs_client = unexpected_api
+
+        async def posted(*_args, **_kwargs):
+            return XhsWriteOutcome("success", result="comment-fixture")
+
+        with patch("app.engine.monitor.comment_xhs_browser", posted):
+            result = asyncio.run(engine.execute_comment_task(task_id))
+
+        self.assertTrue(result["ok"])
+        with db.get_session() as session:
+            task = session.get(CommentTask, task_id)
+            self.assertEqual(task.status, "done")
+            self.assertEqual(task.method, "browser")
+            self.assertEqual(task.result, "comment-fixture")
+
+    def test_xhs_comment_uncertain_stops_without_retry(self):
+        from app.platforms.xhs.browser_writes import XhsWriteOutcome
+
+        account_id = self._account(platform="xhs")
+        task_id = self._xhs_comment_task(account_id)
+        engine = MonitorEngine(self.cfg, _BrowserStub())
+
+        async def ambiguous(*_args, **kwargs):
+            kwargs["on_submit"]()
+            with db.get_session() as session:
+                self.assertEqual(
+                    session.get(CommentTask, task_id).error,
+                    "write_submitted:browser")
+            return XhsWriteOutcome("uncertain", error="发送后连接中断")
+
+        with patch("app.engine.monitor.comment_xhs_browser", ambiguous):
+            result = asyncio.run(engine.execute_comment_task(task_id))
+
+        self.assertFalse(result["ok"])
+        with db.get_session() as session:
+            task = session.get(CommentTask, task_id)
+            self.assertEqual(task.status, "uncertain")
+            self.assertEqual(task.method, "browser")
+            self.assertIsNone(task.done_at)
+            self.assertIsNone(task.scheduled_at)
+
     def test_xhs_rule_creates_review_draft_then_auto_publishes_after_approval(self):
+        self.cfg.engine.xhs_comment_write_mode = "api"
         account_id = self._account(platform="xhs")
         with db.get_session() as session:
             rule = CommentRule(
