@@ -167,14 +167,13 @@ def _build_history_body(conv_id: str, conv_type: int = 1, conv_short_id: int = 0
     ])
 
 
-def _build_send_body(conv_id: str, text: str, conv_type: int = 1,
-                      conv_short_id: int = 0, ticket: str = "") -> bytes:
+def _build_send_body(conv_id: str, text: str, conv_type: int = 1) -> bytes:
+    """简化的发送消息 inner body (对齐 test_chat_cdp.py 实测格式: field1=conv_id, 2=type, 4=纯文本, 6=0)"""
     return b"".join([
-        _pb_string(1, conv_id), _pb_varint_f(2, conv_type),
-        _pb_varint_f(3, conv_short_id), _pb_string(4, ticket),
-        _pb_string(5, json.dumps({"content": text, "type": 1})),
-        _pb_varint_f(6, 0), _pb_varint_f(7, 2), _pb_varint_f(8, 2),
-        _pb_varint_f(9, 0), _pb_varint_f(17, 1), _pb_varint_f(23, 1),
+        _pb_string(1, conv_id),
+        _pb_varint_f(2, conv_type),
+        _pb_string(4, text),
+        _pb_varint_f(6, 0),
     ])
 
 
@@ -485,11 +484,10 @@ class DouyinIMClient:
 
     # ── send_message: 发送 ──
 
-    def send_message(self, conv_id: str, text: str, conv_type: int = 1,
-                      conv_short_id: int = 0, ticket: str = "") -> dict:
-        inner = _build_send_body(conv_id, text, conv_type, conv_short_id, ticket)
+    def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
+        inner = _build_send_body(conv_id, text, conv_type)
         body = self._make_request(SVC_SEND, inner)
-        raw = self._post("/v1/message/send", body)
+        raw = self._post("/v1/message/send_message", body)
         print(f"[im-protocol] send_message raw={len(raw)}b hex={raw.hex() if len(raw) < 100 else raw[:50].hex()}")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
         env = _pb_get_fields(raw)
