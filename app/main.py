@@ -1563,14 +1563,33 @@ def _get_im_client(account_id: int) -> "DouyinIMClient":
 
 @app.get("/api/dm/protocol/conversations")
 async def dm_protocol_conversations(account_id: int):
-    """协议模式:获取会话列表。"""
+    """协议模式:获取会话列表,同步存入 DB 供浏览器模式复用。"""
     client = _get_im_client(account_id)
     convs = await asyncio.to_thread(client.get_message_by_init)
-    return [{
-        "conv_id": c["conv_id"], "conv_short_id": c.get("conv_short_id", ""),
-        "peer_uid": c["peer_uid"], "peer_sec_uid": c.get("peer_sec_uid", ""),
-        "last_text": c.get("last_text", ""), "last_time": c.get("last_time", 0),
-    } for c in convs]
+    # 存入 DB,使浏览器模式和协议模式共享同一套数据
+    with get_session() as s:
+        for c in convs:
+            existing = s.exec(select(DmConversation).where(
+                DmConversation.account_id == account_id,
+                DmConversation.conv_id == c["conv_id"])).first()
+            if existing:
+                existing.last_text = c.get("last_text") or existing.last_text
+                existing.last_time = c.get("last_time") or existing.last_time
+            else:
+                s.add(DmConversation(
+                    platform="douyin", account_id=account_id,
+                    conv_id=c["conv_id"], conv_short_id=c.get("conv_short_id", ""),
+                    peer_uid=c["peer_uid"], peer_sec_uid=c.get("peer_sec_uid", ""),
+                    peer_nickname="", peer_avatar="",
+                    last_text=c.get("last_text", ""), last_time=c.get("last_time", 0),
+                ))
+        s.commit()
+    # 用 DB 统一格式返回(包含已缓存的昵称头像)
+    with get_session() as s:
+        db_convs = s.exec(select(DmConversation).where(
+            DmConversation.account_id == account_id)
+        ).order_by(DmConversation.last_time.desc()).all()
+        return [_conv_dict(c) for c in db_convs]
 
 
 @app.get("/api/dm/protocol/messages")

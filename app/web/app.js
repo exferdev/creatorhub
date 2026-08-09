@@ -1917,6 +1917,12 @@ function convRow(c) {
 }
 async function syncDm() {
   if (!HUB_ACC) { toast("请先选择账号", "err"); return; }
+  // 协议模式下直接拉取协议会话
+  if (DM_PROTOCOL) {
+    await refreshDmConvsProto();
+    toast("协议同步完成", "ok");
+    return;
+  }
   await withBusy(evtBtn(), "同步中", async () => {
     try { const r = await api("/api/accounts/" + HUB_ACC + "/dm/sync", { method: "POST" }); toast(`同步完成:抓到 ${r.fetched} 个会话,新增 ${r.added}`, "ok"); }
     catch (e) { toast("同步失败:" + e.message, "err"); }
@@ -2002,18 +2008,39 @@ async function toggleDmProtocol() {
   if (DM_PROTOCOL) {
     btn.classList.add("active");
     btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发 (开)`;
-    st.style.display = "inline"; st.textContent = "已连接 ✓";
+    st.style.display = "inline"; st.textContent = "连接中…";
     try { await api(`/api/accounts/${HUB_ACC}/dm/protocol/ws`, { method: "POST" }); } catch (_) {}
     startDmProtoStream();
+    st.textContent = "已连接 ✓";
+    refreshDmConvsProto();        // 协议模式下立即拉取会话列表
   } else {
     btn.classList.remove("active");
     btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发`;
     st.style.display = "none";
     st.textContent = "";
     stopDmProtoStream();
+    refreshDmConvs();             // 切回浏览器模式刷新 DB 缓存
   }
-  // 如果已打开会话,重新加载消息(走协议或浏览器)
   if (DM_CONV) openDmConv(DM_CONV);
+}
+
+// 覆盖 refreshDmConvs: 协议模式下走协议 API
+const _refreshDmConvsOrig = refreshDmConvs;
+refreshDmConvs = function() {
+  return DM_PROTOCOL ? refreshDmConvsProto() : _refreshDmConvsOrig();
+};
+
+async function refreshDmConvsProto() {
+  const box = $("dm-convs"); if (!box) return;
+  if (!HUB_ACC) { box.innerHTML = `<div class="empty" style="padding:24px"><div class="empty-t">请先选择账号</div></div>`; return; }
+  try {
+    const list = await api("/api/dm/protocol/conversations?account_id=" + HUB_ACC);
+    DM_CONVS = list;
+    if ($("hb-dm")) $("hb-dm").textContent = list.length;
+    box.innerHTML = list.length ? list.map(convRow).join("")
+      : `<div class="empty" style="padding:24px"><div class="empty-ic">${ic("i-send")}</div><div class="empty-t">暂无会话</div><div class="empty-sub">已通过协议拉取</div></div>`;
+    if (DM_CONV) { const el = box.querySelector(`.dm-conv[data-conv="${cssAttr(DM_CONV)}"]`); if (el) el.classList.add("active"); }
+  } catch (e) { box.innerHTML = `<div class="empty" style="padding:24px"><div class="empty-t">协议加载失败:${esc(e.message)}</div></div>`; }
 }
 
 function startDmProtoStream() {
