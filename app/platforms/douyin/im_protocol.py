@@ -167,15 +167,12 @@ def _build_history_body(conv_id: str, conv_type: int = 1, conv_short_id: int = 0
     ])
 
 
-def _build_send_body(conv_id: str, text: str, conv_type: int = 1,
-                      conv_short_id: int = 0, ticket: str = "") -> bytes:
-    """发送消息 inner body (完整格式: field1=conv_id, 2=type, 3=short_id, 4=ticket, 5=JSON, 6=0)"""
+def _build_send_body(conv_id: str, text: str, conv_type: int = 1) -> bytes:
+    """field4=纯文本格式 (服务端接受,返回961字节OK; field5 JSON格式被2字节拒绝)"""
     return b"".join([
         _pb_string(1, conv_id),
         _pb_varint_f(2, conv_type),
-        _pb_varint_f(3, conv_short_id),
-        _pb_string(4, ticket),
-        _pb_string(5, json.dumps({"content": text, "type": 1})),
+        _pb_string(4, text),
         _pb_varint_f(6, 0),
     ])
 
@@ -487,9 +484,8 @@ class DouyinIMClient:
 
     # ── send_message: 发送 ──
 
-    def send_message(self, conv_id: str, text: str, conv_type: int = 1,
-                      conv_short_id: int = 0, ticket: str = "") -> dict:
-        inner = _build_send_body(conv_id, text, conv_type, conv_short_id, ticket)
+    def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
+        inner = _build_send_body(conv_id, text, conv_type)
         body = self._make_request(SVC_SEND, inner)
         raw = self._post("/v1/message/send", body)
         print(f"[im-protocol] send_message raw={len(raw)}b")

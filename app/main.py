@@ -1649,20 +1649,10 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 
 @app.post("/api/accounts/{account_id}/dm/protocol/send")
 async def dm_protocol_send(account_id: int, body: SendDmIn):
-    """协议模式:发送私信。"""
+    """协议模式:发送私信。服务端接受field4纯文本格式,返回OK但投递受平台关系策略限制。"""
     client = await _get_im_client(account_id)
-    # 从 DB 查会话的 short_id 和 ticket(发送必需参数)
-    conv_short_id = 0; ticket = ""
-    with get_session() as s:
-        conv = s.exec(select(DmConversation).where(
-            DmConversation.account_id == account_id,
-            DmConversation.conv_id == body.conv_id)).first()
-        if conv:
-            try: conv_short_id = int(conv.conv_short_id or 0)
-            except: pass
-            ticket = getattr(conv, "ticket", "") or ""
     result = await asyncio.to_thread(
-        client.send_message, body.conv_id, body.content, 1, conv_short_id, ticket)
+        client.send_message, body.conv_id, body.content)
     if result.get("ok"):
         # 立即存 DB 避免聊天列表刷新延迟
         from datetime import datetime as _dt, timezone as _tz
