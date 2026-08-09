@@ -939,7 +939,7 @@ class DouyinIMClient:
             _pb_string(11, "douyin_pc"),
         ])
 
-        # 复制 field 15 指纹字段,更新的 identity_security_token
+        # 复制 field 15 指纹字段,更新 identity_security_token
         for fp_entry in env.get(15, []):
             if not isinstance(fp_entry, bytes):
                 continue
@@ -948,11 +948,11 @@ class DouyinIMClient:
             val = _pb_first(kv, 2, b"")
             if key == "identity_security_token" and security_token:
                 val = security_token.encode()
-            elif isinstance(val, bytes):
-                pass
-            else:
+            if val is None:
                 val = b""
-            new_outer += _pb_bytes(15, _pb_string(1, key) + _pb_string(2, val.decode() if isinstance(val, bytes) else str(val)))
+            if isinstance(val, int):
+                val = str(val).encode()
+            new_outer += _pb_bytes(15, _pb_string(1, key) + _pb_bytes(2, val))
 
         # 复制尾部字段
         for fnum in [18, 21, 22, 23, 24, 25]:
