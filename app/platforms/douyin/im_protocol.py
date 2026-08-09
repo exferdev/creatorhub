@@ -698,30 +698,15 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """生成 a_bogus: 优先 VM decode, 回退 V8 frontier_sign。"""
+        """生成 a_bogus: 纯Python SM3+RC4 算法 (移植自 douyin-web-api-sdk)"""
         from urllib.parse import urlencode
+        from .bdms.abogus import generate_a_bogus
         qs = ""
         if query_params:
             qs = urlencode({k: v for k, v in query_params.items() if v})
-        uri = qs
-        # 方案A: VM decode (ylcangel, 纯JS VMP解释器)
-        ab = _vm_make_abogus(uri) if uri else ""
-        if ab:
-            print(f"[im-protocol] vm a_bogus=OK ({len(ab)} chars)")
-            return ab
-        # 方案B: V8 frontier_sign (x-bogus header)
-        url = f"https://imapi.douyin.com{path}"
-        if qs:
-            url += "?" + qs
-        try:
-            from . import signer as _signer
-            if getattr(_signer, '_ready', False) and getattr(_signer, '_signer', None):
-                return _signer._signer.frontier_sign(
-                    url=url, method="POST",
-                    ua=self.ua, platform=self.platform) or ""
-        except Exception:
-            pass
-        return ""
+        if not qs:
+            return ""
+        return generate_a_bogus(qs, self.ua)
 
     def _post(self, path: str, body: bytes, query_params: dict = None,
               a_bogus: str = "", extra_headers: dict = None) -> bytes:
