@@ -1542,6 +1542,123 @@ async def hub_summary(account_id: int):
         }
 
 
+# ─────────── 协议私信 API (imapi.douyin.com protobuf,无需浏览器)───────────
+class SendDmIn(BaseModel):
+    conv_id: str
+    content: str
+
+_protocol_clients: Dict[int, "DouyinIMClient"] = {}
+
+
+def _get_im_client(account_id: int) -> "DouyinIMClient":
+    if account_id not in _protocol_clients:
+        from .platforms.douyin.im_protocol import DouyinIMClient
+        with get_session() as s:
+            acc = s.get(DouyinAccount, account_id)
+            if not acc:
+                raise HTTPException(404, "账号不存在")
+            _protocol_clients[account_id] = DouyinIMClient.from_account(acc)
+    return _protocol_clients[account_id]
+
+
+@app.get("/api/dm/protocol/conversations")
+async def dm_protocol_conversations(account_id: int):
+    """协议模式:获取会话列表。"""
+    client = _get_im_client(account_id)
+    convs = await asyncio.to_thread(client.get_message_by_init)
+    return [{
+        "conv_id": c["conv_id"], "conv_short_id": c.get("conv_short_id", ""),
+        "peer_uid": c["peer_uid"], "peer_sec_uid": c.get("peer_sec_uid", ""),
+        "last_text": c.get("last_text", ""), "last_time": c.get("last_time", 0),
+    } for c in convs]
+
+
+@app.get("/api/dm/protocol/messages")
+async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0):
+    """协议模式:获取会话消息。"""
+    client = _get_im_client(account_id)
+    msgs, has_more, next_cursor = await asyncio.to_thread(
+        client.get_by_conversation, conv_id, 1, 0, cursor, 50)
+    return {"messages": msgs, "has_more": has_more, "next_cursor": next_cursor}
+
+
+@app.post("/api/accounts/{account_id}/dm/protocol/send")
+async def dm_protocol_send(account_id: int, body: SendDmIn):
+    """协议模式:发送私信。"""
+    client = _get_im_client(account_id)
+    result = await asyncio.to_thread(
+        client.send_message, body.conv_id, body.content)
+    return result
+
+
+@app.post("/api/accounts/{account_id}/dm/protocol/ws")
+async def dm_protocol_ws_start(account_id: int):
+    """启动协议 WebSocket 实时接收。由前端调 SSE 流内部拉起。"""
+    from app.platforms.douyin.im_protocol import DouyinIMClient
+    client = _get_im_client(account_id)
+    client._account_id = account_id
+    if not hasattr(client, "_ws_started") or not client._ws_started:
+        client._ws_started = True
+        api_stop = asyncio.Event()
+        client._stop = api_stop
+        asyncio.create_task(_run_im_ws(client, account_id, api_stop))
+    return {"ok": True, "ws_url": client.ws_url, "access_key": client.access_key}
+
+
+async def _run_im_ws(client, account_id: int, stop: asyncio.Event):
+    """后台运行 IM WebSocket 连接:心跳 + 接收新消息推送。"""
+    try:
+        await client.ws_connect()
+        heartbeat_task = asyncio.create_task(client.ws_heartbeat(stop))
+        from .models import DmConversation
+        def _on_message(msg: dict):
+            try:
+                with get_session() as s:
+                    # 推送新消息通知到 SSE
+                    cid = msg.get("conv_id", "")
+                    if cid:
+                        _im_notify(account_id, cid)
+            except Exception:
+                pass
+        await client.ws_listen(_on_message, stop)
+        heartbeat_task.cancel()
+    except Exception as e:
+        print(f"[im-protocol-ws] 账号 #{account_id} WS 异常: {e!r}")
+    finally:
+        await client.ws_close()
+        client._ws_started = False
+
+
+# SSE 推送:协议消息转发
+_im_sse_queues: Dict[int, asyncio.Queue] = {}
+
+def _im_notify(account_id: int, conv_id: str):
+    """推送新消息事件到 SSE 客户端。"""
+    q = _im_sse_queues.get(account_id)
+    if q:
+        try:
+            q.put_nowait(conv_id)
+        except asyncio.QueueFull:
+            pass
+
+
+@app.get("/api/dm/protocol/stream")
+async def dm_protocol_stream(account_id: int):
+    """SSE 流:协议 DM 实时推送。前端打开协议面板时订阅。"""
+    q = asyncio.Queue(maxsize=64)
+    _im_sse_queues[account_id] = q
+    async def event_stream():
+        try:
+            while True:
+                conv_id = await q.get()
+                yield f"data: {json.dumps({'conv_id': conv_id})}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            _im_sse_queues.pop(account_id, None)
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ─────────── 本账号管理:写操作队列(取关/回关/发私信)───────────
 class ActionIn(BaseModel):
     account_id: int

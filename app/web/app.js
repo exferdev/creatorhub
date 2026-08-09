@@ -1893,7 +1893,7 @@ function startDmStream() {
     DM_SSE.onerror = () => { /* EventSource 自带重连 */ };
   } catch (_) {}
 }
-function stopDmStream() { if (DM_SSE) { try { DM_SSE.close(); } catch (_) {} DM_SSE = null; DM_SSE_ACC = ""; } }
+function stopDmStream() { if (DM_SSE) { try { DM_SSE.close(); } catch (_) {} DM_SSE = null; DM_SSE_ACC = ""; } stopDmProtoStream(); }
 
 async function refreshDmConvs() {
   const box = $("dm-convs"); if (!box) return;
@@ -1992,6 +1992,95 @@ async function sendDm() {
     } catch (e) { toast("发送失败:" + e.message, "err"); }
   });
 }
+
+// ─── 协议私信模式 (imapi protobuf, 无需浏览器) ───
+let DM_PROTOCOL = false, DM_PROTO_SSE = null;
+
+async function toggleDmProtocol() {
+  DM_PROTOCOL = !DM_PROTOCOL;
+  const btn = $("dm-protocol-btn"); const st = $("dm-protocol-status");
+  if (DM_PROTOCOL) {
+    btn.classList.add("active");
+    btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发 (开)`;
+    st.style.display = "inline"; st.textContent = "已连接 ✓";
+    try { await api(`/api/accounts/${HUB_ACC}/dm/protocol/ws`, { method: "POST" }); } catch (_) {}
+    startDmProtoStream();
+  } else {
+    btn.classList.remove("active");
+    btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发`;
+    st.style.display = "none";
+    st.textContent = "";
+    stopDmProtoStream();
+  }
+  // 如果已打开会话,重新加载消息(走协议或浏览器)
+  if (DM_CONV) openDmConv(DM_CONV);
+}
+
+function startDmProtoStream() {
+  stopDmProtoStream();
+  if (!HUB_ACC) return;
+  try {
+    DM_PROTO_SSE = new EventSource(`/api/dm/protocol/stream?account_id=${HUB_ACC}`);
+    DM_PROTO_SSE.onmessage = (e) => {
+      let evt; try { evt = JSON.parse(e.data); } catch (_) { return; }
+      if (evt.conv_id === DM_CONV) refreshDmMessages();
+      else refreshDmConvs();
+    };
+  } catch (_) {}
+}
+
+function stopDmProtoStream() {
+  if (DM_PROTO_SSE) { try { DM_PROTO_SSE.close(); } catch (_) {} DM_PROTO_SSE = null; }
+}
+
+async function refreshDmMessagesProto() {
+  const thread = $("dm-thread"); if (!thread || !HUB_ACC || !DM_CONV) return;
+  try {
+    const d = await api(`/api/dm/protocol/messages?account_id=${HUB_ACC}&conv_id=${encodeURIComponent(DM_CONV)}`);
+    const msgs = d.messages || [];
+    thread.innerHTML = msgs.length
+      ? msgs.map(m => `<div class="dm-bubble ${m.direction === "out" ? "out" : "in"}">${dmBody(m)}<span class="t">${fmtTime(m.create_time)}</span></div>`).join("")
+      : `<div class="empty"><div class="empty-t">暂无消息</div></div>`;
+    thread.scrollTop = thread.scrollHeight;
+  } catch (e) { thread.innerHTML = `<div class="empty"><div class="empty-t">加载失败:${esc(e.message)}</div></div>`; }
+}
+
+async function sendDmProto() {
+  const inp = $("dm-input"); const text = (inp.value || "").trim();
+  if (!text || !DM_CONV || !HUB_ACC) return;
+  try {
+    await api(`/api/accounts/${HUB_ACC}/dm/protocol/send`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conv_id: DM_CONV, content: text })
+    });
+    inp.value = ""; toast("已发送(协议)", "ok");
+    await new Promise(r => setTimeout(r, 500));
+    await openDmConv(DM_CONV);
+  } catch (e) { toast("发送失败:" + e.message, "err"); }
+}
+
+// 覆盖 sendDm: 协议模式下走协议发送
+const _sendDmOrig = sendDm;
+sendDm = function() { return DM_PROTOCOL ? sendDmProto() : _sendDmOrig(); };
+
+// 覆盖 openDmConv: 协议模式下用协议 API 拉消息
+const _openDmConvOrig = openDmConv;
+openDmConv = function(convId) {
+  return DM_PROTOCOL ? openDmConvProto(convId) : _openDmConvOrig(convId);
+};
+
+async function openDmConvProto(convId) {
+  DM_CONV = convId;
+  document.querySelectorAll("#dm-convs .dm-conv").forEach(e => e.classList.toggle("active", e.dataset.conv === convId));
+  const thread = $("dm-thread");
+  thread.innerHTML = `<div class="empty"><div class="empty-t">加载中…(协议)</div></div>`;
+  try {
+    await api(`/api/accounts/${HUB_ACC}/dm/conversations/${convId}/fetch-history`, { method: "POST" });
+  } catch (_) {}
+  refreshDmMessagesProto();
+  markDmRead(convId);
+}
+
 function accOptions(list, ph) {
   return `<option value="">${ph}</option>` +
     list.map(a => `<option value="${a.id}">${esc(a.nickname)}${a.has_creator ? " · 创作号" : ""}</option>`).join("");

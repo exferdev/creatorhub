@@ -2343,9 +2343,11 @@
 
       <div data-hubpanel="dm" style="display:none">
         <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:12px">
-          <div class="hint" style="margin:0;flex:1"><span class="ic-text"><svg aria-hidden="true"><use href="#i-msg"/></svg><b>抖音私信</b></span>：点「<b>同步</b>」拉取会话列表，打开会话后自动加载完整聊天记录。发消息使用「<b>打开浏览器收发</b>」。小红书网页端暂未开放私信，快手能力待验证。</div>
+          <div class="hint" style="margin:0;flex:1"><span class="ic-text"><svg aria-hidden="true"><use href="#i-msg"/></svg><b>抖音私信</b></span>：点「<b>同步</b>」拉取会话列表。浏览器模式需打开窗口收发；协议模式走 imapi 直连(无需浏览器)。</div>
           <button class="ghost sm" style="flex:0 0 auto" onclick="syncDm()"><svg><use href="#i-download"/></svg>同步</button>
-          <button style="flex:0 0 auto" onclick="openHubAccountBrowser()"><svg><use href="#i-send"/></svg>打开浏览器收发</button>
+          <button style="flex:0 0 auto" onclick="openHubAccountBrowser()" id="dm-open-browser-btn"><svg><use href="#i-send"/></svg>打开浏览器收发</button>
+          <button class="ghost sm" style="flex:0 0 auto" onclick="toggleDmProtocol()" id="dm-protocol-btn"><svg><use href="#i-bolt"/></svg>协议收发</button>
+          <span id="dm-protocol-status" class="mut" style="flex:0 0 auto;display:none;font-size:11px;white-space:nowrap"></span>
         </div>
         <div class="dm-wrap">
           <div class="dm-list" id="dm-convs"></div>
