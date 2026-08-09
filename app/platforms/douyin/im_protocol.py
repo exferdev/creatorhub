@@ -346,6 +346,7 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
     """计算 bd-ticket-guard-client-data 和 bd-ticket-guard-ree-public-key 请求头。"""
     result = {}
     if not ec_private_pem or not server_cert_pem:
+        print(f"[im-protocol] guard: no ec_key/cert (ec={bool(ec_private_pem)}, cert={bool(server_cert_pem)})")
         return result
     # 还原 \\n 为真实换行
     ec_private_pem = ec_private_pem.replace("\\n", "\n")
@@ -359,9 +360,11 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
             decoded = _b64_ck.b64decode(guard_cookie + "===")
             gd = _json.loads(decoded)
             ts_sign = gd.get("ts_sign", "")
-        except Exception:
-            pass
+            print(f"[im-protocol] guard: ts_sign={'OK' if ts_sign else 'NOT_FOUND'}, keys={list(gd.keys())[:5]}")
+        except Exception as e:
+            print(f"[im-protocol] guard cookie parse error: {e!r}")
     if not ts_sign:
+        print(f"[im-protocol] guard: no ts_sign in cookie")
         return result
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
