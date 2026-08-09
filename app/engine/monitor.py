@@ -2395,7 +2395,6 @@ class MonitorEngine:
                 accs = s.exec(
                     select(DouyinAccount)
                     .where(DouyinAccount.platform == "douyin")
-                    .where(DouyinAccount.status == "active")
                 ).all()
                 candidates = []
                 for a in accs:

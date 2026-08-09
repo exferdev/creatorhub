@@ -920,6 +920,8 @@ async def check_account_health_endpoint(account_id: int):
         if acc2:
             acc2.cookie_status = status
             acc2.last_health_check = datetime.utcnow()
+            if status == "valid":
+                acc2.status = "active"
             s.add(acc2); s.commit()
     return {"ok": True, "valid": health.get("valid"), "status": status,
             "error": health.get("error", "") if not health.get("valid") else ""}
