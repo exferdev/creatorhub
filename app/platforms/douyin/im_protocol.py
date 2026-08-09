@@ -850,6 +850,157 @@ class DouyinIMClient:
 
     def send_message(self, conv_id: str, text: str, conv_type: int = 1,
                       page=None, a_bogus: str = "") -> dict:
+        """发送消息: 优先用模板(含完整field15安全字段),回退动态构建。"""
+        short_id = 0
+        from .models import DmConversation
+        import sqlite3 as _sq
+        try:
+            db_path = Path(__file__).resolve().parent.parent.parent / "data" / "creatorhub.db"
+            if db_path.exists():
+                with _sq.connect(str(db_path)) as db:
+                    row = db.execute(
+                        "SELECT conv_short_id FROM dmconversation WHERE conv_id=? LIMIT 1",
+                        (conv_id,)).fetchone()
+                    if row and row[0]:
+                        short_id = int(row[0])
+        except Exception:
+            pass
+
+        # 方案A: 模板发送 (含完整浏览器安全字段)
+        try:
+            result = self._send_via_template(conv_id, short_id or 0, text, conv_type, a_bogus)
+            if result.get("ok"):
+                return result
+            print(f"[im-protocol] template failed, fallback dynamic: {result.get('msg','')}")
+        except Exception as e:
+            print(f"[im-protocol] template error: {e!r}")
+
+        # 方案B: 动态构建 (fallback)
+        return self._send_via_dynamic(conv_id, text, conv_type, page, a_bogus)
+
+    # ── 模板发送 ──
+
+    _tpl_data = None
+
+    def _load_template(self) -> bytearray:
+        if DouyinIMClient._tpl_data is not None:
+            return DouyinIMClient._tpl_data
+        path = Path(__file__).resolve().parent / "bdms" / "send_template.bin"
+        if not path.exists():
+            raise RuntimeError("Template not found: " + str(path))
+        with open(path, "rb") as f:
+            DouyinIMClient._tpl_data = bytearray(f.read())
+        return DouyinIMClient._tpl_data
+
+    def _send_via_template(self, conv_id: str, short_id: int, text: str,
+                           conv_type: int = 1, a_bogus: str = "") -> dict:
+        import base64 as _b64, uuid
+        tmpl = bytearray(self._load_template())
+        env = _pb_get_fields(bytes(tmpl))
+        inner_raw = _pb_first(env, 8)
+        inner_env = _pb_get_fields(inner_raw)
+        b100 = _pb_first(inner_env, 100)
+        msg_env = _pb_get_fields(b100)
+
+        msg_json = json.dumps({
+            "mention_users": [], "aweType": 700,
+            "richTextInfos": [], "text": text,
+        }, ensure_ascii=False)
+        client_msg_id = str(uuid.uuid4())
+
+        # 获取最新的 identity_security_token
+        security_token = ""
+        try:
+            security_token = _fetch_identity_token(
+                self.cookies, str(self.self_uid or self.device_id), self.ua)
+        except Exception:
+            pass
+
+        # 重建 field 100 (send message body)
+        new_b100 = b"".join([
+            _pb_string(1, conv_id),
+            _pb_varint_f(2, conv_type),
+            _pb_varint_f(3, short_id),
+            _pb_string(4, msg_json),
+            _pb_string(5, client_msg_id),
+            _pb_varint_f(6, _pb_first(msg_env, 6) or 5),
+        ])
+
+        new_inner = _pb_bytes(100, new_b100)
+        new_outer = b"".join([
+            _pb_varint_f(1, _pb_first(env, 1) or 100),
+            _pb_varint_f(2, _pb_first(env, 2) or 0),
+            _pb_string(3, _pb_str(_pb_first(env, 3, b"")) or "0.1.8"),
+            _pb_string(4, _pb_str(_pb_first(env, 4, b"")) or ""),
+            _pb_varint_f(5, _pb_first(env, 5) or 3),
+            _pb_varint_f(6, _pb_first(env, 6) or 1),
+            _pb_string(7, _pb_str(_pb_first(env, 7, b"")) or "8aa2dcb:Detached"),
+            _pb_bytes(8, new_inner),
+            _pb_string(9, _pb_str(_pb_first(env, 9, b"")) or "0"),
+            _pb_string(11, "douyin_pc"),
+        ])
+
+        # 复制 field 15 指纹字段,更新的 identity_security_token
+        for fp_entry in env.get(15, []):
+            if not isinstance(fp_entry, bytes):
+                continue
+            kv = _pb_get_fields(fp_entry)
+            key = _pb_str(_pb_first(kv, 1, b""))
+            val = _pb_first(kv, 2, b"")
+            if key == "identity_security_token" and security_token:
+                val = security_token.encode()
+            elif isinstance(val, bytes):
+                pass
+            else:
+                val = b""
+            new_outer += _pb_bytes(15, _pb_string(1, key) + _pb_string(2, val.decode() if isinstance(val, bytes) else str(val)))
+
+        # 复制尾部字段
+        for fnum in [18, 21, 22, 23, 24, 25]:
+            v = _pb_first(env, fnum)
+            if v is not None:
+                if isinstance(v, int):
+                    new_outer += _pb_varint_f(fnum, v)
+                elif isinstance(v, bytes):
+                    new_outer += _pb_bytes(fnum, v)
+
+        # URL + a_bogus
+        from urllib.parse import urlencode
+        from .bdms.abogus import generate_a_bogus
+        ms_token = self.cookies.get("msToken", "")
+        verify_fp = self.cookies.get("UIFID_TEMP", "")[:19] or ""
+        params = {"msToken": ms_token or ""}
+        if verify_fp and len(verify_fp) > 10:
+            params["verifyFp"] = params["fp"] = f"verify_{verify_fp}"
+        if not a_bogus:
+            a_bogus = generate_a_bogus(urlencode({k: v for k, v in params.items() if v}), self.ua)
+            print(f"[im-protocol] tmpl a_bogus={'OK' if a_bogus else 'FAIL'}")
+        params["a_bogus"] = a_bogus
+        url = f"{self.API_BASE}/v1/message/send?" + urlencode({k: v for k, v in params.items() if v})
+
+        import curl_cffi.requests as curl
+        sess = curl.Session()
+        sess.headers.update({
+            "Content-Type": "application/x-protobuf",
+            "User-Agent": self.ua,
+            "Referer": "https://www.douyin.com/",
+            "Origin": "https://www.douyin.com",
+        })
+        resp = sess.post(url, data=bytes(new_outer), cookies=self.cookies, timeout=30)
+        print(f"[im-protocol] tmpl send: {resp.status_code}, {len(resp.content)}b")
+        if not resp.content:
+            return {"ok": False, "msg": "empty", "cmd": 0}
+        raw = resp.content
+        env2 = _pb_get_fields(raw)
+        return {"ok": (_pb_first(env2, 3) == 0),
+                "msg": _pb_str(_pb_first(env2, 4, b"")),
+                "cmd": _pb_first(env2, 1) or 0,
+                "error_code": _pb_first(env2, 3) or 0}
+
+    # ── 动态构建发送 (fallback) ──
+
+    def _send_via_dynamic(self, conv_id: str, text: str, conv_type: int = 1,
+                          page=None, a_bogus: str = "") -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
         # 获取投递必需的 identity_security_token (scene=web_im)
         security_token = ""
