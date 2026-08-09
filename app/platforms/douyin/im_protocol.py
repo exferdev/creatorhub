@@ -361,11 +361,16 @@ class DouyinIMClient:
 
     def _post(self, path: str, body: bytes) -> bytes:
         import curl_cffi.requests as curl
-        resp = self._sess.post(
-            f"{self.API_BASE}{path}", data=body,
-            cookies=self.cookies, timeout=30,
-        )
-        return resp.content
+        try:
+            resp = self._sess.post(
+                f"{self.API_BASE}{path}", data=body,
+                cookies=self.cookies, timeout=30,
+            )
+            print(f"[im-protocol] POST {path} -> {resp.status_code}, {len(resp.content)} bytes")
+            return resp.content
+        except Exception as e:
+            print(f"[im-protocol] POST {path} ERROR: {e!r}")
+            return b""
 
     def _make_request(self, service_id: int, inner_body: bytes,
                       inner_field: int = None) -> bytes:
@@ -490,7 +495,7 @@ class DouyinIMClient:
             self._ws = await websockets.connect(
                 self.ws_url,
                 subprotocols=["binary", "base64", "pbbp2"],
-                extra_headers={"User-Agent": self.ua},
+                additional_headers={"User-Agent": self.ua},
                 ping_interval=None,
                 max_size=2 ** 22,
             )
