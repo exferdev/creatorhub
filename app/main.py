@@ -1584,6 +1584,7 @@ async def dm_protocol_conversations(account_id: int):
             if existing:
                 existing.last_text = c.get("last_text") or existing.last_text
                 existing.last_time = c.get("last_time") or existing.last_time
+                existing.ticket = c.get("ticket") or existing.ticket
             else:
                 s.add(DmConversation(
                     platform="douyin", account_id=account_id,
@@ -1591,6 +1592,7 @@ async def dm_protocol_conversations(account_id: int):
                     peer_uid=c["peer_uid"], peer_sec_uid=c.get("peer_sec_uid", ""),
                     peer_nickname="", peer_avatar="",
                     last_text=c.get("last_text", ""), last_time=c.get("last_time", 0),
+                    ticket=c.get("ticket", ""),
                 ))
             # 保存 get_message_by_init 自带的初始消息
             for m in c.get("messages", []) or []:
@@ -1649,8 +1651,18 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 async def dm_protocol_send(account_id: int, body: SendDmIn):
     """协议模式:发送私信。"""
     client = await _get_im_client(account_id)
+    # 从 DB 查会话的 short_id 和 ticket(发送必需参数)
+    conv_short_id = 0; ticket = ""
+    with get_session() as s:
+        conv = s.exec(select(DmConversation).where(
+            DmConversation.account_id == account_id,
+            DmConversation.conv_id == body.conv_id)).first()
+        if conv:
+            try: conv_short_id = int(conv.conv_short_id or 0)
+            except: pass
+            ticket = getattr(conv, "ticket", "") or ""
     result = await asyncio.to_thread(
-        client.send_message, body.conv_id, body.content)
+        client.send_message, body.conv_id, body.content, 1, conv_short_id, ticket)
     if result.get("ok"):
         # 立即存 DB 避免聊天列表刷新延迟
         from datetime import datetime as _dt, timezone as _tz
