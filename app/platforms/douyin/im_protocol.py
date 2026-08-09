@@ -164,6 +164,8 @@ def _build_request(service_id: int, method_id: int, inner_body: bytes,
             _pb_string(1, "identity_security_device_id") + _pb_string(2, security_device_id))
         body += _pb_bytes(15, _pb_string(1, "identity_security_aid") + _pb_string(2, ""))
     body += b"".join([
+        # field 31: float 0 (浏览器请求中有)
+        b'\xfd\x01\x00\x00\x00\x00',
         _pb_varint_f(18, 1),
         _pb_string(21, "douyin_web"),
         _pb_string(22, "web_sdk"),
@@ -612,7 +614,8 @@ class DouyinIMClient:
 
     # ── send_message: 发送 ──
 
-    def send_message(self, conv_id: str, text: str, conv_type: int = 1) -> dict:
+    def send_message(self, conv_id: str, text: str, conv_type: int = 1,
+                      page=None) -> dict:
         inner = _build_send_body(conv_id, text, conv_type)
         # 获取投递必需的 identity_security_token (scene=web_im)
         security_token = ""
@@ -625,14 +628,16 @@ class DouyinIMClient:
         body = self._make_request(SVC_SEND, inner,
                                   security_token=security_token,
                                   security_device_id=security_device_id)
-        # 构建带签名参数的 URL (浏览器实测需要 a_bogus+msToken+verifyFp)
+        # 优先通过浏览器 page.evaluate(fetch) 发送 — SDK 自动注入 guard headers
+        if page:
+            return self._send_via_browser(page, body)
+        # 回退: 纯 HTTP + a_bogus (投递可能受限)
         ms_token = self.cookies.get("msToken", "")
         verify_fp = self.cookies.get("UIFID_TEMP", "")[:19] or ""
         url_path = "/v1/message/send"
         query_params = {"msToken": ms_token or ""}
         if verify_fp and len(verify_fp) > 10:
             query_params["verifyFp"] = query_params["fp"] = f"verify_{verify_fp}"
-        # 用 V8 签名器生成 a_bogus
         a_bogus = ""
         try:
             a_bogus = self._gen_abogus(url_path, query_params)
@@ -647,6 +652,39 @@ class DouyinIMClient:
         cmd = _pb_first(env, 1) or 0
         err = _pb_first(env, 3) or 0
         return {"ok": (msg == "OK"), "msg": msg, "cmd": cmd, "error_code": err}
+
+    def _send_via_browser(self, page, body: bytes) -> dict:
+        """通过浏览器 page.evaluate(fetch) 发送,SDK 自动注入 bd-ticket-guard 头。"""
+        import base64 as _b64
+        body_b64 = _b64.b64encode(body).decode()
+        js = f"""
+        (async () => {{
+            const buf = Uint8Array.from(atob("{body_b64}"), c => c.charCodeAt(0));
+            const resp = await fetch("https://imapi.douyin.com/v1/message/send", {{
+                method: "POST", body: buf.buffer,
+                headers: {{"Content-Type": "application/x-protobuf"}},
+                credentials: "include", referrer: "https://www.douyin.com/",
+            }});
+            const raw = new Uint8Array(await resp.arrayBuffer());
+            const hex = Array.from(raw.slice(0, 200)).map(b => b.toString(16).padStart(2,'0')).join('');
+            return JSON.stringify({{status: resp.status, len: raw.length, hex: hex}});
+        }})()
+        """
+        try:
+            import asyncio
+            result_json = asyncio.get_event_loop().run_until_complete(
+                page.evaluate(js))
+            result = json.loads(result_json)
+            if result.get("status") == 200 and result.get("len", 0) > 0:
+                raw = bytes.fromhex(result["hex"]) if result.get("hex") else b""
+                env = _pb_get_fields(raw) if raw else {}
+                return {"ok": (_pb_first(env, 3) == 0),
+                        "msg": _pb_str(_pb_first(env, 4, b"")),
+                        "cmd": _pb_first(env, 1) or 0,
+                        "error_code": _pb_first(env, 3) or 0}
+        except Exception as e:
+            print(f"[im-protocol] browser send error: {e!r}")
+        return {"ok": False, "msg": "browser eval failed", "cmd": 0, "error_code": -1}
 
     # ── mark_read: 标记已读 ──
 
