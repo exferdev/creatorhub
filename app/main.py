@@ -1653,8 +1653,7 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
     client = await _get_im_client(account_id)
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
-    # 尝试获取浏览器 page — SDK 自动注入 bd-ticket-guard + x-tt-session-dtrait
-    page = None
+    # 尝试通过浏览器 page.evaluate(fetch) — SDK 自动注入 guard headers
     if browser and acc:
         try:
             identity = browser.identity_for(acc)
@@ -1663,15 +1662,15 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
             await page.goto("https://www.douyin.com/", wait_until="domcontentloaded",
                              timeout=15000)
             await page.wait_for_timeout(2000)
+            result = await client.send_via_browser(page, body.conv_id, body.content)
+            await page.close()
         except Exception as e:
-            print(f"[dm-protocol] browser page failed: {e!r}")
-            if page: await page.close(); page = None
-
-    result = await asyncio.to_thread(
-        client.send_message, body.conv_id, body.content, 1, page)
-    if page:
-        try: await page.close()
-        except: pass
+            print(f"[dm-protocol] browser send failed, fallback HTTP: {e!r}")
+            result = await asyncio.to_thread(
+                client.send_message, body.conv_id, body.content)
+    else:
+        result = await asyncio.to_thread(
+            client.send_message, body.conv_id, body.content)
     if result.get("ok"):
         from datetime import datetime as _dt, timezone as _tz
         now_ts = int(_dt.now(_tz.utc).timestamp())

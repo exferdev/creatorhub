@@ -654,8 +654,23 @@ class DouyinIMClient:
         return {"ok": (msg == "OK"), "msg": msg, "cmd": cmd, "error_code": err}
 
     def _send_via_browser(self, page, body: bytes) -> dict:
+        """同步版本(废弃), 改用 async send_via_browser()"""
+        return {"ok": False, "msg": "use async send_via_browser", "cmd": 0, "error_code": -1}
+
+    async def send_via_browser(self, page, conv_id: str, text: str,
+                               conv_type: int = 1) -> dict:
         """通过浏览器 page.evaluate(fetch) 发送,SDK 自动注入 bd-ticket-guard 头。"""
         import base64 as _b64
+        inner = _build_send_body(conv_id, text, conv_type)
+        security_token = ""
+        try:
+            security_token = _fetch_identity_token(
+                self.cookies, str(self.self_uid or self.device_id), self.ua)
+        except Exception:
+            pass
+        body = self._make_request(SVC_SEND, inner,
+                                  security_token=security_token,
+                                  security_device_id=str(self.self_uid or self.device_id))
         body_b64 = _b64.b64encode(body).decode()
         js = f"""
         (async () => {{
@@ -671,10 +686,9 @@ class DouyinIMClient:
         }})()
         """
         try:
-            import asyncio
-            result_json = asyncio.get_event_loop().run_until_complete(
-                page.evaluate(js))
+            result_json = await page.evaluate(js)
             result = json.loads(result_json)
+            print(f"[im-protocol] browser send: status={result.get('status')}, len={result.get('len')}")
             if result.get("status") == 200 and result.get("len", 0) > 0:
                 raw = bytes.fromhex(result["hex"]) if result.get("hex") else b""
                 env = _pb_get_fields(raw) if raw else {}
