@@ -314,10 +314,83 @@ def _vm_make_abogus(uri: str) -> str:
         _vm_racer = MiniRacer()
         # 浏览器环境补丁
         _vm_racer.eval("var window = this; var self = this; var globalThis = this;")
-        _vm_racer.eval("var navigator = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', appName: 'Netscape', appVersion: '5.0', platform: 'Win32', vendorSubs: {} };")
-        _vm_racer.eval("var document = { cookie: '' }")
-        _vm_racer.eval("var screen = { width: 1920, height: 1080 }")
-        _vm_racer.eval("var location = { href: 'https://www.douyin.com', protocol: 'https:' }")
+        # navigator — 完整模拟, 修复 Symbol.toStringTag
+        _vm_racer.eval("""
+            var navigator = {
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+                appName: 'Netscape',
+                appVersion: '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                platform: 'Win32',
+                vendorSubs: {},
+                vendor: 'Google Inc.',
+                language: 'zh-CN',
+                languages: ['zh-CN', 'zh'],
+                cookieEnabled: true,
+                hardwareConcurrency: 8,
+                deviceMemory: 8,
+                maxTouchPoints: 0,
+                webdriver: false,
+                doNotTrack: null,
+                userAgentData: { brands: [
+                    { brand: 'Chromium', version: '149' },
+                    { brand: 'Google Chrome', version: '149' },
+                    { brand: 'Not)A;Brand', version: '99' },
+                ]},
+                plugins: [],
+                connection: { rtt: 100 },
+                toString: function() { return '[object Navigator]'; },
+            };
+            navigator[Symbol.toStringTag] = 'Navigator';
+        """)
+        # document — Canvas 支持
+        _vm_racer.eval("""
+            var document = {
+                cookie: '',
+                all: {},
+                characterSet: 'UTF-8',
+                compatMode: 'CSS1Compat',
+                createElement: function(tag) {
+                    if (tag.toLowerCase() === 'canvas') {
+                        return {
+                            getContext: function() { return null; },
+                            toDataURL: function() { return 'data:image/png;base64,AAAA'; },
+                            width: 1920, height: 1080,
+                        };
+                    }
+                    return {};
+                },
+                toString: function() { return '[object HTMLDocument]'; },
+            };
+            document[Symbol.toStringTag] = 'HTMLDocument';
+        """)
+        # screen
+        _vm_racer.eval("""
+            var screen = {
+                width: 1920, height: 1080,
+                availWidth: 1920, availHeight: 1080,
+                colorDepth: 24, pixelDepth: 24,
+            };
+        """)
+        # location / history
+        _vm_racer.eval("""
+            var location = { href: 'https://www.douyin.com/', protocol: 'https:', hostname: 'www.douyin.com', pathname: '/' };
+            location[Symbol.toStringTag] = 'Location';
+            var history = {};
+            history[Symbol.toStringTag] = 'History';
+            window.history = history;
+        """)
+        # Audio
+        _vm_racer.eval("""
+            function Audio() { this.play = function(){}; }
+            window.Audio = Audio;
+        """)
+        # PluginArray / MSPluginsCollection
+        _vm_racer.eval("""
+            function PluginArray() {}
+            PluginArray[Symbol.toStringTag] = 'PluginArray';
+            navigator.plugins = new PluginArray();
+            var MSPluginsCollection = undefined;
+        """)
         for fname in ["utils.js", "sm3.js", "vm_decode.js"]:
             path = _VM_JS_DIR / fname
             if path.exists():
