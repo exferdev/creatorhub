@@ -16,6 +16,16 @@ if (envUtils && envUtils.restoreProcess) {
 }
 
 var captured_a_bogus = null;
+
+// 拦截 console 输出,避免污染 stdout JSON 通信
+var _origLog = console.log;
+console.log = function() {
+    var args = Array.prototype.slice.call(arguments);
+    var msg = args.join(' ');
+    if (msg.indexOf('a_bogus') !== -1) captured_a_bogus = msg.split('=').pop().trim();
+    process.stderr.write('[bdms-log] ' + msg + '\n');
+};
+
 var originalSet = URLSearchParams.prototype.set;
 URLSearchParams.prototype.set = function(key, value) {
     if (key === 'a_bogus') {
