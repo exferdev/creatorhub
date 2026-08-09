@@ -301,7 +301,33 @@ def _bdms_start():
             print(f"[bdms-bridge] init: {line.strip()[:100] if line else 'no output'}")
     except Exception as e:
         print(f"[bdms-bridge] start error: {e!r}")
-        _bdms_proc = None
+_bdms_proc = None
+_vm_racer = None
+_VM_JS_DIR = Path(__file__).resolve().parent / "bdms"
+
+
+def _vm_make_abogus(uri: str) -> str:
+    """用 VM decode (ylcangel方案) 生成 a_bogus — 无需 bdms.js Node子进程。"""
+    global _vm_racer
+    if _vm_racer is None:
+        from py_mini_racer import MiniRacer
+        _vm_racer = MiniRacer()
+        # 浏览器环境补丁
+        _vm_racer.eval("var window = this; var self = this; var globalThis = this;")
+        _vm_racer.eval("var navigator = { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', appName: 'Netscape', appVersion: '5.0', platform: 'Win32', vendorSubs: {} };")
+        _vm_racer.eval("var document = { cookie: '' }")
+        _vm_racer.eval("var screen = { width: 1920, height: 1080 }")
+        _vm_racer.eval("var location = { href: 'https://www.douyin.com', protocol: 'https:' }")
+        for fname in ["utils.js", "sm3.js", "vm_decode.js"]:
+            path = _VM_JS_DIR / fname
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    _vm_racer.eval(f.read())
+    try:
+        result = _vm_racer.eval(f'makeABogus("{uri}", 0)')
+        return str(result) if result else ""
+    except Exception:
+        return ""
 
 
 def _bdms_a_bogus(url: str, uifid: str = "", method: str = "POST", body: str = None) -> str:
@@ -599,21 +625,21 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """生成 a_bogus: 优先 bdms.js Node子进程,回退 V8 frontier_sign。"""
+        """生成 a_bogus: 优先 VM decode, 回退 V8 frontier_sign。"""
         from urllib.parse import urlencode
         qs = ""
         if query_params:
             qs = urlencode({k: v for k, v in query_params.items() if v})
+        uri = qs
+        # 方案A: VM decode (ylcangel, 纯JS VMP解释器)
+        ab = _vm_make_abogus(uri) if uri else ""
+        if ab:
+            print(f"[im-protocol] vm a_bogus=OK ({len(ab)} chars)")
+            return ab
+        # 方案B: V8 frontier_sign (x-bogus header)
         url = f"https://imapi.douyin.com{path}"
         if qs:
             url += "?" + qs
-        # 方案A: bdms.js Node 子进程 (生成 a_bogus URL 参数)
-        uifid = self.cookies.get("UIFID_TEMP", "")[:36] or ""
-        ab = _bdms_a_bogus(url, uifid)
-        if ab:
-            print(f"[im-protocol] bdms a_bogus=OK")
-            return ab
-        # 方案B: V8 frontier_sign (生成 x-bogus header)
         try:
             from . import signer as _signer
             if getattr(_signer, '_ready', False) and getattr(_signer, '_signer', None):
