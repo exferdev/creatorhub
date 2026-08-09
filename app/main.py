@@ -1653,13 +1653,14 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
         client.send_message, body.conv_id, body.content)
     if result.get("ok"):
         # 立即存 DB 避免聊天列表刷新延迟
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone as _tz
+        now_ts = int(_dt.now(_tz.utc).timestamp())
         with get_session() as s:
-            mid = f"{body.conv_id}_{int(_dt.utcnow().timestamp())}"
+            mid = f"{body.conv_id}_{now_ts}"
             s.add(DmMessage(
                 platform="douyin", account_id=account_id, conv_id=body.conv_id,
                 msg_id=mid, direction="out", text=body.content, msg_type=1,
-                create_time=int(_dt.utcnow().timestamp()),
+                create_time=now_ts,
                 raw_json=json.dumps({"content": body.content, "type": 1}),
             ))
             s.commit()
