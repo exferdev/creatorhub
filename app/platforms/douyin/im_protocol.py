@@ -656,9 +656,12 @@ class DouyinIMClient:
         from urllib.parse import urlencode
         url = f"{self.API_BASE}{path}"
         params = dict(query_params or {})
+        if a_bogus:
+            params["a_bogus"] = a_bogus
         if params:
             qs = urlencode({k: v for k, v in params.items() if v})
             url += "?" + qs
+        print(f"[im-protocol] POST {path}?a_bogus={'SET' if a_bogus else 'NO'}")
         hdrs = dict(extra_headers or {})
         if a_bogus:
             # bdms 生成的 a_bogus 放 URL, V8 frontier_sign 的 x-bogus 放 header
@@ -816,7 +819,7 @@ class DouyinIMClient:
             print(f"[im-protocol] a_bogus={'OK' if a_bogus else 'FAIL'}")
         else:
             print(f"[im-protocol] a_bogus=precomputed")
-        # 计算 bd-ticket-guard-client-data (ECDH 签名头)
+        # 将 a_bogus 从 query_params 中排除后再计算签名的 URI
         extra_headers = {}
         if self.ec_private_key and self.server_cert:
             try:
@@ -825,10 +828,11 @@ class DouyinIMClient:
                     ec_private_pem=self.ec_private_key,
                     server_cert_pem=self.server_cert)
                 extra_headers.update(guard_h)
-                extra_headers["bd-ticket-guard-version"] = "2"
-                extra_headers["bd-ticket-guard-web-version"] = "2"
-                extra_headers["bd-ticket-guard-web-sign-type"] = "1"
-                print(f"[im-protocol] guard headers: {sorted(extra_headers.keys())}")
+                extra_headers.update({
+                    "bd-ticket-guard-version": "2",
+                    "bd-ticket-guard-web-version": "2",
+                    "bd-ticket-guard-web-sign-type": "1",
+                })
             except Exception as e:
                 print(f"[im-protocol] guard sign error: {e!r}")
         raw = self._post(url_path, body, query_params=query_params, a_bogus=a_bogus,
