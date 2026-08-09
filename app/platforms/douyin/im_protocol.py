@@ -336,6 +336,79 @@ def _fetch_identity_token(cookies: Dict[str, str], device_id: str, ua: str,
     return ""
 
 
+# ═══════════════════════════════════════════════════════════════════
+# bd-ticket-guard-client-data ECDH 签名 (参考 douyin-web-api-sdk)
+# ═══════════════════════════════════════════════════════════════════
+
+def _compute_guard_headers(cookies: Dict[str, str], path: str, ua: str = "") -> Dict[str, str]:
+    """计算 bd-ticket-guard-client-data 和 bd-ticket-guard-ree-public-key 请求头。"""
+    result = {}
+    # 1. 提取 ts_sign 和 ticket
+    guard_cookie = cookies.get("bd_ticket_guard_client_data_v2", "")
+    ts_sign, ticket = "", ""
+    if guard_cookie:
+        try:
+            import base64 as _b64
+            import json as _json
+            decoded = _b64.b64decode(guard_cookie + "===")
+            gd = _json.loads(decoded)
+            ts_sign = gd.get("ts_sign", "")
+            ticket = gd.get("ticket", "")
+        except Exception:
+            pass
+    if not ts_sign or not ticket:
+        return result
+
+    # 2. 获取 server certificate 公钥 (从 localStorage 对应的 cookie)
+    #    实际运行时需从账号存储中读取 EC 私钥和 server cert
+    ec_private_pem = ""   # 账号特定,见 guard_keys.json
+    server_cert_pem = ""  # 同上
+
+    # 3. ECDH → shared secret → HMAC-SHA256 → req_sign
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives import hashes, hmac
+        from cryptography.x509 import load_pem_x509_certificate
+        import base64 as _b64_c
+        import time as _time
+
+        priv_key = load_pem_private_key(ec_private_pem.encode(), password=None)
+        cert = load_pem_x509_certificate(server_cert_pem.encode())
+        server_pub = cert.public_key()
+
+        # ECDH shared secret
+        shared_key = priv_key.exchange(ec.ECDH(), server_pub)
+
+        # HMAC-SHA256(req_content)
+        ts = int(_time.time())
+        req_content = f"ticket,path,timestamp"
+        sign_input = f"{ticket},{path},{ts}"
+        h = hmac.HMAC(shared_key, hashes.SHA256())
+        h.update(sign_input.encode())
+        req_sign = _b64_c.b64encode(h.finalize()).decode().rstrip("=")
+
+        client_data = _json.dumps({
+            "ts_sign": ts_sign,
+            "req_content": req_content,
+            "req_sign": req_sign,
+            "timestamp": ts,
+        })
+        result["bd-ticket-guard-client-data"] = _b64_c.b64encode(
+            client_data.encode()).decode()
+
+        # 4. Build ree-public-key from client public key
+        client_pub = priv_key.public_key()
+        pub_bytes = client_pub.public_bytes(
+            ec.Encoding.X962, ec.PublicFormat.UncompressedPoint)
+        result["bd-ticket-guard-ree-public-key"] = _b64_c.b64encode(
+            pub_bytes).decode()
+    except Exception as e:
+        print(f"[im-protocol] guard sign error: {e!r}")
+
+    return result
+
+
 _MSG_LABEL = {1: "[文本]", 2: "[图片]", 3: "[视频]", 4: "[语音]", 5: "[表情]",
               6: "[链接]", 7: "[文件]", 8: "[卡片]", 9: "[红包]"}
 
