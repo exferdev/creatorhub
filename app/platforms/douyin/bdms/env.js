@@ -587,43 +587,6 @@ var location = window.location;
 // 模拟 screen
 var screen = window.screen;
 
-// 模拟 XMLHttpRequest
-function XMLHttpRequest() {
-    this.readyState = 0;
-    this.status = 0;
-    this.statusText = '';
-    this.responseText = '';
-    this.response = '';
-    this.responseType = '';
-    this.timeout = 0;
-    this.withCredentials = false;
-    this._headers = {};
-}
-XMLHttpRequest.prototype.open = function(method, url, async) {
-    this._method = method;
-    this._url = url;
-    this._async = async !== false;
-    this.readyState = 1;
-};
-XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
-    this._headers[name] = value;
-};
-XMLHttpRequest.prototype.send = function(data) {
-    this.readyState = 4;
-    this.status = 200;
-    // 不真正发送请求，只是模拟
-};
-XMLHttpRequest.prototype.abort = function() {};
-XMLHttpRequest.prototype.getAllResponseHeaders = function() { return ''; };
-XMLHttpRequest.prototype.getResponseHeader = function(name) { return null; };
-XMLHttpRequest.prototype.addEventListener = function() {};
-XMLHttpRequest.prototype.removeEventListener = function() {};
-XMLHttpRequest.UNSENT = 0;
-XMLHttpRequest.OPENED = 1;
-XMLHttpRequest.HEADERS_RECEIVED = 2;
-XMLHttpRequest.LOADING = 3;
-XMLHttpRequest.DONE = 4;
-
 // 模拟 Image
 function Image(width, height) {
     this.width = width || 0;

@@ -58,8 +58,23 @@ function get_a_bogus(url, uifid, method, body) {
             });
         }
         xhr.bdmsInvokeList = invokeList;
+        // 确保 bdms already hooked send
+        if (typeof XMLHttpRequest.prototype._bdms_original_send === 'undefined') {
+            process.stderr.write('[bdms-log] WARN: bdms did not hook XMLHttpRequest.send\n');
+        }
         xhr.send((method === 'GET' || method === 'HEAD') ? null : (body || null));
-    } catch (e) { return null; }
+        // 强制同步等待，给 JSVMP 时间完成
+        if (captured_a_bogus) return captured_a_bogus;
+        process.stderr.write('[bdms-log] no a_bogus from URLSearchParams hook, retry with XHR response...\n');
+        // 尝试从 XHR 响应 URL 中提取
+        if (xhr.responseURL && xhr.responseURL.indexOf('a_bogus=') !== -1) {
+            var m = xhr.responseURL.match(/a_bogus=([^&]+)/);
+            if (m) return decodeURIComponent(m[1]);
+        }
+    } catch (e) {
+        process.stderr.write('[bdms-log] get_a_bogus error: ' + e.message + '\n');
+        return null;
+    }
     return captured_a_bogus;
 }
 
