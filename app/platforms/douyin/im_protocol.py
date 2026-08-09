@@ -675,14 +675,11 @@ class DouyinIMClient:
         # 用自定义 JS 发送, 让页面 SDK 拦截 fetch 时自动注入 a_bogus + guard headers
         js = f"""
         (async () => {{
-            // 先记录 SDK 是否已加载
             const hasSDK = !!(window.byted_acrawler && window.byted_acrawler.frontierSign);
             const hasBdms = typeof window.__bdms_init !== 'undefined' || !!document.querySelector('script[src*="bdms"]');
-            
-            // 拦截自己的 response 获取 response body
-            let responseBody = '';
-            const origFetch = window.fetch;
-            const resp = await origFetch("https://imapi.douyin.com/v1/message/send", {{
+
+            // 直接调 window.fetch(不走 origFetch 缓存) — SDK 拦截的是 window.fetch
+            const resp = await window.fetch("https://imapi.douyin.com/v1/message/send", {{
                 method: "POST",
                 body: Uint8Array.from(atob("{body_b64}"), c => c.charCodeAt(0)).buffer,
                 headers: {{"Content-Type": "application/x-protobuf"}},
