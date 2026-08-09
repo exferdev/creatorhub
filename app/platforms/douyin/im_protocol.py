@@ -332,7 +332,8 @@ class DouyinIMClient:
         except Exception:
             pass
         # 从 cookie 或其他来源提取 device_id
-        device_id = cookies.get("uid_tt", "") or account.douyin_id or "0"
+        # 优先用数字 douyin_id, fallback 到 uid_tt cookie
+        device_id = account.douyin_id or cookies.get("uid_tt", "") or "0"
         ua = getattr(account, "ua", "") or ""
         plat = "MacIntel" if "Mac" in ua else "Win32"
         return cls(cookies, device_id, ua=ua, platform=plat, proxy=proxy)
@@ -347,9 +348,10 @@ class DouyinIMClient:
 
     @property
     def ws_url(self) -> str:
+        did = self.self_uid or self.device_id  # self_uid 是真正的数字 UID
         params = {
             "aid": "6383", "fpid": self.fpid,
-            "device_id": self.device_id, "access_key": self.access_key,
+            "device_id": did, "access_key": self.access_key,
             "device_platform": "douyin_pc", "version_code": "360000",
         }
         return f"{self.WS_BASE}?{urlencode(params)}"
@@ -411,9 +413,23 @@ class DouyinIMClient:
             ticket = _pb_str(_pb_first(core, 4, b""))
             peer_uid = _peer_uid_from_conv_id(conv_id, self.self_uid)
             if not peer_uid: continue
-            msg = _pb_get_fields(_pb_first(conv, 2, b"") or b"")
-            content = _pb_first(msg, 8, b"")
-            content = content if isinstance(content, bytes) else b""
+
+            # 会话包含的消息 (get_message_by_init 自带)
+            messages_raw = [m for m in conv.get(2, []) if isinstance(m, bytes)]
+            init_messages = [_parse_msg(m) for m in messages_raw]
+            init_messages = [m for m in init_messages if m]
+
+            # 最后一条消息
+            last_msg_raw = messages_raw[-1] if messages_raw else None
+            if last_msg_raw:
+                msg = _pb_get_fields(last_msg_raw)
+                last_content = _pb_first(msg, 8, b"")
+                last_content = last_content if isinstance(last_content, bytes) else b""
+                last_type = _pb_first(msg, 6)
+                last_ts = _msg_create_ts(msg)
+            else:
+                last_content, last_type, last_ts = b"", None, 0
+
             peer_sec = ""
             for p in core.get(6, []):
                 if not isinstance(p, bytes): continue
@@ -423,17 +439,21 @@ class DouyinIMClient:
                         if _pb_str(_pb_first(ppf, 1)) == peer_uid:
                             peer_sec = _pb_str(_pb_first(ppf, 5)); break
                 if peer_sec: break
-            if not peer_sec and _pb_first(msg, 7) != int(self.self_uid or 0):
-                peer_sec = _pb_str(_pb_first(msg, 14, b""))
+            if not peer_sec and last_msg_raw:
+                lm = _pb_get_fields(last_msg_raw)
+                if _pb_first(lm, 7) != int(self.self_uid or 0):
+                    peer_sec = _pb_str(_pb_first(lm, 14, b""))
+
             cursor = _pb_first(conv, 4) or 0
             results.append({
                 "conv_id": conv_id, "conv_short_id": conv_short_id,
                 "peer_uid": peer_uid, "peer_sec_uid": peer_sec,
                 "ticket": ticket,
-                "last_text": _preview_text(content, _pb_first(msg, 6)),
-                "last_msg_type": _pb_first(msg, 6),
-                "last_time": _msg_create_ts(msg),
+                "last_text": _preview_text(last_content, last_type),
+                "last_msg_type": last_type,
+                "last_time": last_ts,
                 "cursor": cursor,
+                "messages": init_messages,     # ← 新增:get_message_by_init返回中自带的初始消息
             })
         return results
 

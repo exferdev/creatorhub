@@ -1550,7 +1550,7 @@ class SendDmIn(BaseModel):
 _protocol_clients: Dict[int, "DouyinIMClient"] = {}
 
 
-def _get_im_client(account_id: int) -> "DouyinIMClient":
+async def _get_im_client(account_id: int, init: bool = False) -> "DouyinIMClient":
     if account_id not in _protocol_clients:
         from .platforms.douyin.im_protocol import DouyinIMClient
         with get_session() as s:
@@ -1558,13 +1558,20 @@ def _get_im_client(account_id: int) -> "DouyinIMClient":
             if not acc:
                 raise HTTPException(404, "账号不存在")
             _protocol_clients[account_id] = DouyinIMClient.from_account(acc)
-    return _protocol_clients[account_id]
+    client = _protocol_clients[account_id]
+    if init and not client.self_uid:
+        # 首次调用获取 self_uid (用于 WS device_id)
+        try:
+            await asyncio.to_thread(client.get_message_by_init)
+        except Exception:
+            pass
+    return client
 
 
 @app.get("/api/dm/protocol/conversations")
 async def dm_protocol_conversations(account_id: int):
     """协议模式:获取会话列表,同步存入 DB 供浏览器模式复用。"""
-    client = _get_im_client(account_id)
+    client = await _get_im_client(account_id)
     convs = await asyncio.to_thread(client.get_message_by_init)
     # 存入 DB,使浏览器模式和协议模式共享同一套数据
     with get_session() as s:
@@ -1583,6 +1590,21 @@ async def dm_protocol_conversations(account_id: int):
                     peer_nickname="", peer_avatar="",
                     last_text=c.get("last_text", ""), last_time=c.get("last_time", 0),
                 ))
+            # 保存 get_message_by_init 自带的初始消息
+            for m in c.get("messages", []) or []:
+                mid = f"{c['conv_id']}_{m.get('create_time', 0)}"
+                dupe = s.exec(select(DmMessage).where(
+                    DmMessage.account_id == account_id,
+                    DmMessage.conv_id == c["conv_id"],
+                    DmMessage.msg_id == mid)).first()
+                if not dupe:
+                    s.add(DmMessage(
+                        platform="douyin", account_id=account_id, conv_id=c["conv_id"],
+                        msg_id=mid, direction=m.get("direction", "in"),
+                        text=m.get("text", ""), msg_type=m.get("msg_type", 0),
+                        create_time=m.get("create_time", 0),
+                        raw_json=m.get("raw_json", ""),
+                    ))
         s.commit()
     # 用 DB 统一格式返回(包含已缓存的昵称头像)
     with get_session() as s:
@@ -1596,7 +1618,7 @@ async def dm_protocol_conversations(account_id: int):
 async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
                                 conv_short_id: int = 0):
     """协议模式:获取会话消息,同步存入 DB。"""
-    client = _get_im_client(account_id)
+    client = await _get_im_client(account_id)
     msgs, has_more, next_cursor = await asyncio.to_thread(
         client.get_by_conversation, conv_id, 1, conv_short_id, cursor, 50)
     print(f"[im-protocol-messages] conv={conv_id[:30]} msgs={len(msgs)} has_more={has_more}>")
@@ -1624,7 +1646,7 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 @app.post("/api/accounts/{account_id}/dm/protocol/send")
 async def dm_protocol_send(account_id: int, body: SendDmIn):
     """协议模式:发送私信。"""
-    client = _get_im_client(account_id)
+    client = await _get_im_client(account_id)
     result = await asyncio.to_thread(
         client.send_message, body.conv_id, body.content)
     return result
@@ -1632,9 +1654,9 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
 
 @app.post("/api/accounts/{account_id}/dm/protocol/ws")
 async def dm_protocol_ws_start(account_id: int):
-    """启动协议 WebSocket 实时接收。由前端调 SSE 流内部拉起。"""
+    """启动协议 WebSocket 实时接收。先初始化获取 UID,再连接 WS。"""
     from app.platforms.douyin.im_protocol import DouyinIMClient
-    client = _get_im_client(account_id)
+    client = await _get_im_client(account_id, init=True)
     client._account_id = account_id
     if not hasattr(client, "_ws_started") or not client._ws_started:
         client._ws_started = True
