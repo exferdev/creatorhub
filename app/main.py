@@ -1651,6 +1651,18 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
     client = await _get_im_client(account_id)
     result = await asyncio.to_thread(
         client.send_message, body.conv_id, body.content)
+    if result.get("ok"):
+        # 立即存 DB 避免聊天列表刷新延迟
+        from datetime import datetime as _dt
+        with get_session() as s:
+            mid = f"{body.conv_id}_{int(_dt.utcnow().timestamp())}"
+            s.add(DmMessage(
+                platform="douyin", account_id=account_id, conv_id=body.conv_id,
+                msg_id=mid, direction="out", text=body.content, msg_type=1,
+                create_time=int(_dt.utcnow().timestamp()),
+                raw_json=json.dumps({"content": body.content, "type": 1}),
+            ))
+            s.commit()
     return result
 
 
