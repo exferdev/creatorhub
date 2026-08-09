@@ -357,10 +357,16 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
         try:
             import base64 as _b64_ck
             import json as _json
-            decoded = _b64_ck.b64decode(guard_cookie + "===")
+            from urllib.parse import unquote
+            cookie_val = unquote(guard_cookie)
+            # 补齐 base64 padding
+            padding = 4 - len(cookie_val) % 4
+            if padding != 4:
+                cookie_val += "=" * padding
+            decoded = _b64_ck.b64decode(cookie_val)
             gd = _json.loads(decoded)
             ts_sign = gd.get("ts_sign", "")
-            print(f"[im-protocol] guard: ts_sign={'OK' if ts_sign else 'NOT_FOUND'}, keys={list(gd.keys())[:5]}")
+            print(f"[im-protocol] guard: ts_sign={'OK' if ts_sign else 'NOT_FOUND'}")
         except Exception as e:
             print(f"[im-protocol] guard cookie parse error: {e!r}")
     if not ts_sign:
@@ -368,7 +374,7 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
         return result
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PublicFormat
         from cryptography.hazmat.primitives import hashes, hmac
         from cryptography.x509 import load_pem_x509_certificate
         import base64 as _b64_c
@@ -401,8 +407,7 @@ def _compute_guard_headers(cookies: Dict[str, str], path: str,
 
         # 4. Build ree-public-key from client public key
         client_pub = priv_key.public_key()
-        pub_bytes = client_pub.public_bytes(
-            ec.Encoding.X962, ec.PublicFormat.UncompressedPoint)
+        pub_bytes = client_pub.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
         result["bd-ticket-guard-ree-public-key"] = _b64_c.b64encode(
             pub_bytes).decode()
     except Exception as e:
