@@ -916,13 +916,18 @@ class DouyinIMClient:
             pass
 
         # 重建 field 100 (send message body)
+        # 模板字段: 1=conv_id, 2=type, 3=short_id, 4=content, 5=exts(bytes), 6=msg_type, 7=binary(bytes), 8=client_msg_id
+        f5_raw = _pb_first(msg_env, 5)  # 扩展字段 (bytes)
+        f7_raw = _pb_first(msg_env, 7)  # 二进制块 (bytes)
         new_b100 = b"".join([
             _pb_string(1, conv_id),
             _pb_varint_f(2, conv_type),
             _pb_varint_f(3, short_id),
             _pb_string(4, msg_json),
-            _pb_string(5, client_msg_id),
+            _pb_bytes(5, f5_raw) if isinstance(f5_raw, bytes) else b"",
             _pb_varint_f(6, _pb_first(msg_env, 6) or 5),
+            _pb_bytes(7, f7_raw) if isinstance(f7_raw, bytes) else b"",
+            _pb_string(8, client_msg_id),
         ])
 
         new_inner = _pb_bytes(100, new_b100)
@@ -983,7 +988,10 @@ class DouyinIMClient:
             "Origin": "https://www.douyin.com",
         })
         resp = sess.post(url, data=bytes(new_outer), cookies=self.cookies, timeout=30)
-        print(f"[im-protocol] tmpl send: {resp.status_code}, {len(resp.content)}b")
+        print(f"[im-protocol] tmpl send: {resp.status_code}, {len(resp.content)}b body={len(bytes(new_outer))}b")
+        # 调试: 保存body到文件
+        with open(Path(__file__).resolve().parent / "bdms" / "debug_body.bin", "wb") as f:
+            f.write(bytes(new_outer))
         if not resp.content:
             return {"ok": False, "msg": "empty", "cmd": 0}
         raw = resp.content
