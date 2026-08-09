@@ -1649,12 +1649,30 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 
 @app.post("/api/accounts/{account_id}/dm/protocol/send")
 async def dm_protocol_send(account_id: int, body: SendDmIn):
-    """协议模式:发送私信。服务端接受field4纯文本格式,返回OK但投递受平台关系策略限制。"""
+    """协议模式:发送私信。优先走浏览器 fetch 让 SDK 注入 guard headers。"""
     client = await _get_im_client(account_id)
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+    # 尝试获取浏览器 page — SDK 自动注入 bd-ticket-guard + x-tt-session-dtrait
+    page = None
+    if browser and acc:
+        try:
+            identity = browser.identity_for(acc)
+            ctx = await browser.context_for(identity)
+            page = await ctx.new_page()
+            await page.goto("https://www.douyin.com/", wait_until="domcontentloaded",
+                             timeout=15000)
+            await page.wait_for_timeout(2000)
+        except Exception as e:
+            print(f"[dm-protocol] browser page failed: {e!r}")
+            if page: await page.close(); page = None
+
     result = await asyncio.to_thread(
-        client.send_message, body.conv_id, body.content)
+        client.send_message, body.conv_id, body.content, 1, page)
+    if page:
+        try: await page.close()
+        except: pass
     if result.get("ok"):
-        # 立即存 DB 避免聊天列表刷新延迟
         from datetime import datetime as _dt, timezone as _tz
         now_ts = int(_dt.now(_tz.utc).timestamp())
         with get_session() as s:
