@@ -16,9 +16,11 @@ import asyncio
 import gzip
 import hashlib
 import json
+import os as _os
 import random as _random
 import string as _string
 import struct
+import subprocess as _sp
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Callable
@@ -268,6 +270,58 @@ def _peer_uid_from_conv_id(conv_id: str, self_uid: str) -> str:
 
 def compute_access_key(device_id: str) -> str:
     return hashlib.md5((_FPID + _APP_KEY + str(device_id) + _SALT).encode()).hexdigest()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# bdms.js Node.js 子进程管理 (生成 a_bogus URL 参数)
+# ═══════════════════════════════════════════════════════════════════
+
+_bdms_proc = None
+
+def _bdms_start():
+    """启动 bdms_bridge.mjs Node.js 子进程。"""
+    global _bdms_proc
+    if _bdms_proc is not None:
+        return
+    script = Path(__file__).resolve().parent / "bdms" / "bdms_bridge.mjs"
+    if not script.exists():
+        print("[bdms-bridge] script not found:", script)
+        return
+    try:
+        _bdms_proc = _sp.Popen(
+            ["node", str(script)],
+            stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.PIPE,
+            text=True, bufsize=1
+        )
+        # 读取 ready 信号
+        line = _bdms_proc.stderr.readline()
+        if line and '"ready":true' in line:
+            print("[bdms-bridge] ready")
+        else:
+            print(f"[bdms-bridge] init: {line.strip()[:100] if line else 'no output'}")
+    except Exception as e:
+        print(f"[bdms-bridge] start error: {e!r}")
+        _bdms_proc = None
+
+
+def _bdms_a_bogus(url: str, uifid: str = "", method: str = "POST", body: str = None) -> str:
+    """通过 bdms.js Node.js 子进程生成 a_bogus。"""
+    global _bdms_proc
+    _bdms_start()
+    if not _bdms_proc:
+        return ""
+    try:
+        req = json.dumps({"url": url, "uifid": uifid, "method": method, "body": body or ""})
+        _bdms_proc.stdin.write(req + "\n")
+        _bdms_proc.stdin.flush()
+        line = _bdms_proc.stdout.readline()
+        if line:
+            resp = json.loads(line)
+            return resp.get("a_bogus", "")
+        return ""
+    except Exception as e:
+        print(f"[bdms-bridge] error: {e!r}")
+        return ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -545,23 +599,27 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """用 V8 signer.frontier_sign() 生成 X-Bogus header (替代 URL a_bogus)。"""
+        """生成 a_bogus: 优先 bdms.js Node子进程,回退 V8 frontier_sign。"""
+        from urllib.parse import urlencode
+        qs = ""
+        if query_params:
+            qs = urlencode({k: v for k, v in query_params.items() if v})
+        url = f"https://imapi.douyin.com{path}"
+        if qs:
+            url += "?" + qs
+        # 方案A: bdms.js Node 子进程 (生成 a_bogus URL 参数)
+        uifid = self.cookies.get("UIFID_TEMP", "")[:36] or ""
+        ab = _bdms_a_bogus(url, uifid)
+        if ab:
+            print(f"[im-protocol] bdms a_bogus=OK")
+            return ab
+        # 方案B: V8 frontier_sign (生成 x-bogus header)
         try:
             from . import signer as _signer
-            ready = getattr(_signer, '_ready', False)
-            has_signer = bool(getattr(_signer, '_signer', None))
-            if not (ready and has_signer):
-                return ""
-            from urllib.parse import urlencode
-            qs = ""
-            if query_params:
-                qs = urlencode({k: v for k, v in query_params.items() if v})
-            url = f"https://imapi.douyin.com{path}"
-            if qs:
-                url += "?" + qs
-            return _signer._signer.frontier_sign(
-                url=url, method="POST",
-                ua=self.ua, platform=self.platform) or ""
+            if getattr(_signer, '_ready', False) and getattr(_signer, '_signer', None):
+                return _signer._signer.frontier_sign(
+                    url=url, method="POST",
+                    ua=self.ua, platform=self.platform) or ""
         except Exception:
             pass
         return ""
@@ -577,7 +635,8 @@ class DouyinIMClient:
             url += "?" + qs
         hdrs = dict(extra_headers or {})
         if a_bogus:
-            hdrs["x-bogus"] = a_bogus
+            # bdms 生成的 a_bogus 放 URL, V8 frontier_sign 的 x-bogus 放 header
+            params["a_bogus"] = a_bogus
         try:
             resp = self._sess.post(url, data=body, cookies=self.cookies,
                                     headers=hdrs, timeout=30)
@@ -728,22 +787,11 @@ class DouyinIMClient:
             query_params["verifyFp"] = query_params["fp"] = f"verify_{verify_fp}"
         if not a_bogus:
             a_bogus = self._gen_abogus(url_path, query_params)
-            print(f"[im-protocol] x-bogus={'OK' if a_bogus else 'FAIL'}")
+            print(f"[im-protocol] a_bogus={'OK' if a_bogus else 'FAIL'}")
         else:
-            print(f"[im-protocol] x-bogus=precomputed")
+            print(f"[im-protocol] a_bogus=precomputed")
         # 计算 bd-ticket-guard-client-data (ECDH 签名头)
         extra_headers = {}
-        # x-bogus header (signer.frontier_sign 生成)
-        xb = ""
-        if not a_bogus:
-            xb = self._gen_abogus(url_path, query_params)
-            print(f"[im-protocol] x-bogus={'OK' if xb else 'FAIL'}")
-        else:
-            xb = a_bogus
-            print(f"[im-protocol] x-bogus=precomputed")
-        if xb:
-            extra_headers["x-bogus"] = xb
-            query_params["X-Bogus"] = xb  # 也放到 URL 作为 a_bogus 等价
         if self.ec_private_key and self.server_cert:
             try:
                 guard_h = _compute_guard_headers(
