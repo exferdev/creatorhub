@@ -1587,8 +1587,8 @@ async def dm_protocol_conversations(account_id: int):
     # 用 DB 统一格式返回(包含已缓存的昵称头像)
     with get_session() as s:
         db_convs = s.exec(select(DmConversation).where(
-            DmConversation.account_id == account_id)
-        ).order_by(DmConversation.last_time.desc()).all()
+            DmConversation.account_id == account_id
+        ).order_by(DmConversation.last_time.desc())).all()
         return [_conv_dict(c) for c in db_convs]
 
 
