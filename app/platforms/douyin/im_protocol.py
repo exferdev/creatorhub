@@ -672,23 +672,35 @@ class DouyinIMClient:
                                   security_token=security_token,
                                   security_device_id=str(self.self_uid or self.device_id))
         body_b64 = _b64.b64encode(body).decode()
+        # 用自定义 JS 发送, 让页面 SDK 拦截 fetch 时自动注入 a_bogus + guard headers
         js = f"""
         (async () => {{
-            const buf = Uint8Array.from(atob("{body_b64}"), c => c.charCodeAt(0));
-            const resp = await fetch("https://imapi.douyin.com/v1/message/send", {{
-                method: "POST", body: buf.buffer,
+            // 先记录 SDK 是否已加载
+            const hasSDK = !!(window.byted_acrawler && window.byted_acrawler.frontierSign);
+            const hasBdms = typeof window.__bdms_init !== 'undefined' || !!document.querySelector('script[src*="bdms"]');
+            
+            // 拦截自己的 response 获取 response body
+            let responseBody = '';
+            const origFetch = window.fetch;
+            const resp = await origFetch("https://imapi.douyin.com/v1/message/send", {{
+                method: "POST",
+                body: Uint8Array.from(atob("{body_b64}"), c => c.charCodeAt(0)).buffer,
                 headers: {{"Content-Type": "application/x-protobuf"}},
-                credentials: "include", referrer: "https://www.douyin.com/",
+                credentials: "include",
+                referrer: "https://www.douyin.com/",
             }});
             const raw = new Uint8Array(await resp.arrayBuffer());
             const hex = Array.from(raw.slice(0, 200)).map(b => b.toString(16).padStart(2,'0')).join('');
-            return JSON.stringify({{status: resp.status, len: raw.length, hex: hex}});
+            return JSON.stringify({{status: resp.status, len: raw.length, hex: hex,
+                hasSDK: hasSDK, hasBdms: hasBdms}});
         }})()
         """
         try:
             result_json = await page.evaluate(js)
             result = json.loads(result_json)
-            print(f"[im-protocol] browser send: status={result.get('status')}, len={result.get('len')}")
+            print(f"[im-protocol] browser send: status={result.get('status')}, "
+                  f"len={result.get('len')}, hasSDK={result.get('hasSDK')}, "
+                  f"hasBdms={result.get('hasBdms')}")
             if result.get("status") == 200 and result.get("len", 0) > 0:
                 raw = bytes.fromhex(result["hex"]) if result.get("hex") else b""
                 env = _pb_get_fields(raw) if raw else {}
