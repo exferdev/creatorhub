@@ -457,18 +457,23 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """用 V8 签名器生成 a_bogus"""
+        """用 V8 signer.generate_a_bogus() 生成 a_bogus (需要 V8 运行时初始化)。"""
         try:
             from . import signer as _signer
-            if _signer._ready and _signer._signer:
-                qs = ""
-                if query_params:
-                    from urllib.parse import urlencode
-                    qs = urlencode({k: v for k, v in query_params.items() if v})
-                url = f"https://imapi.douyin.com{path}"
-                if qs:
-                    url += "?" + qs
-                return _signer._signer.generate_a_bogus(url, self.ua) or ""
+            if not (_signer._ready and _signer._signer):
+                return ""
+            from urllib.parse import urlencode
+            qs = ""
+            if query_params:
+                qs = urlencode({k: v for k, v in query_params.items() if v})
+            url = f"https://imapi.douyin.com{path}"
+            if qs:
+                url += "?" + qs
+            cookie_str = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+            return _signer._signer.generate_a_bogus(
+                url=url, method="POST",
+                cookies=cookie_str, ua=self.ua,
+                debug=False) or ""
         except Exception:
             pass
         return ""
@@ -631,8 +636,9 @@ class DouyinIMClient:
         a_bogus = ""
         try:
             a_bogus = self._gen_abogus(url_path, query_params)
-        except Exception:
-            pass
+            print(f"[im-protocol] a_bogus={'OK' if a_bogus else 'FAIL'}")
+        except Exception as e:
+            print(f"[im-protocol] a_bogus error: {e!r}")
         raw = self._post(url_path, body, query_params=query_params, a_bogus=a_bogus)
         print(f"[im-protocol] send_message raw={len(raw)}b")
         if not raw: return {"ok": False, "msg": "empty", "cmd": 0}
