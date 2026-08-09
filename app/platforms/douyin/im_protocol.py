@@ -283,7 +283,7 @@ def _bdms_start():
     global _bdms_proc
     if _bdms_proc is not None:
         return
-    script = Path(__file__).resolve().parent / "bdms" / "bdms_bridge.mjs"
+    script = Path(__file__).resolve().parent / "bdms" / "bdms_bridge.cjs"
     if not script.exists():
         print("[bdms-bridge] script not found:", script)
         return
