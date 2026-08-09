@@ -939,20 +939,17 @@ class DouyinIMClient:
             _pb_string(11, "douyin_pc"),
         ])
 
-        # 复制 field 15 指纹字段,更新 identity_security_token
+        # 复制 field 15 指纹字段 (保持原始字节), 仅替换 identity_security_token
+        need_token = bool(security_token)
         for fp_entry in env.get(15, []):
             if not isinstance(fp_entry, bytes):
                 continue
-            kv = _pb_get_fields(fp_entry)
-            key = _pb_str(_pb_first(kv, 1, b""))
-            val = _pb_first(kv, 2, b"")
-            if key == "identity_security_token" and security_token:
-                val = security_token.encode()
-            if val is None:
-                val = b""
-            if isinstance(val, int):
-                val = str(val).encode()
-            new_outer += _pb_bytes(15, _pb_string(1, key) + _pb_bytes(2, val))
+            if need_token:
+                kv = _pb_get_fields(fp_entry)
+                key = _pb_str(_pb_first(kv, 1, b""))
+                if key == "identity_security_token":
+                    fp_entry = _pb_string(1, "identity_security_token") + _pb_string(2, security_token)
+            new_outer += _pb_bytes(15, fp_entry)
 
         # 复制尾部字段
         for fnum in [18, 21, 22, 23, 24, 25]:
