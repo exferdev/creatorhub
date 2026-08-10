@@ -1596,11 +1596,19 @@ async def dm_protocol_conversations(account_id: int):
                 ))
             # 保存 get_message_by_init 自带的初始消息
             for m in c.get("messages", []) or []:
-                mid = f"{c['conv_id']}_{m.get('create_time', 0)}"
+                msg_text = m.get("text", "")
+                msg_dir = m.get("direction", "in")
+                msg_time = m.get("create_time", 0)
+                # 去重: 先按msg_id,再按文本+方向+时间窗口
+                mid = f"{c['conv_id']}_{msg_time}"
                 dupe = s.exec(select(DmMessage).where(
                     DmMessage.account_id == account_id,
                     DmMessage.conv_id == c["conv_id"],
-                    DmMessage.msg_id == mid)).first()
+                    or_(DmMessage.msg_id == mid,
+                        and_(DmMessage.text == msg_text, DmMessage.direction == msg_dir,
+                             DmMessage.create_time >= msg_time - 10,
+                             DmMessage.create_time <= msg_time + 10)),
+                )).first()
                 if not dupe:
                     s.add(DmMessage(
                         platform="douyin", account_id=account_id, conv_id=c["conv_id"],
@@ -1662,14 +1670,23 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
         from datetime import datetime as _dt, timezone as _tz
         now_ts = int(_dt.now(_tz.utc).timestamp())
         with get_session() as s:
-            mid = f"{body.conv_id}_{now_ts}"
-            s.add(DmMessage(
-                platform="douyin", account_id=account_id, conv_id=body.conv_id,
-                msg_id=mid, direction="out", text=body.content, msg_type=1,
-                create_time=now_ts,
-                raw_json=json.dumps({"content": body.content, "type": 1}),
-            ))
-            s.commit()
+            # 去重: 同一会话+方向+文本在5秒内不重复写入
+            dupe = s.exec(select(DmMessage).where(
+                DmMessage.account_id == account_id,
+                DmMessage.conv_id == body.conv_id,
+                DmMessage.direction == "out",
+                DmMessage.text == body.content,
+                DmMessage.create_time >= now_ts - 10,
+            )).first()
+            if not dupe:
+                mid = f"{body.conv_id}_{now_ts}"
+                s.add(DmMessage(
+                    platform="douyin", account_id=account_id, conv_id=body.conv_id,
+                    msg_id=mid, direction="out", text=body.content, msg_type=1,
+                    create_time=now_ts,
+                    raw_json=json.dumps({"content": body.content, "type": 1}),
+                ))
+                s.commit()
     return result
 
 
