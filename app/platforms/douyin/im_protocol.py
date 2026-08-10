@@ -234,6 +234,10 @@ def _msg_create_ts(msg_fields: Dict[int, list]) -> int:
     v5 = _pb_first(msg_fields, 5)
     if isinstance(v5, int) and v5 > 1_000_000_000_000_000:
         return v5 // 1_000_000
+    # 兜底: 出站消息用当前时间, 入站消息返回 0 (无法确定)
+    direction = "in" if _pb_str(_pb_first(msg_fields, 7)) != _pb_str(_pb_first(msg_fields, 1)) else "out"
+    if direction == "out":
+        return int(time.time())
     return 0
 
 
