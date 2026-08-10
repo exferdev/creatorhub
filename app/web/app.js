@@ -2009,6 +2009,7 @@ async function initDmProtocol() {
   btn.classList.add("active");
   btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发 (开)`;
   st.style.display = "inline"; st.textContent = "连接中…";
+  stopDmStream();                                    // 关闭浏览器SSE，避免双流
   try { await api(`/api/accounts/${HUB_ACC}/dm/protocol/ws`, { method: "POST" }); } catch (_) {}
   st.textContent = "已连接 ✓";
   startDmProtoStream();
@@ -2021,17 +2022,18 @@ async function toggleDmProtocol() {
     btn.classList.add("active");
     btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发 (开)`;
     st.style.display = "inline"; st.textContent = "连接中…";
+    stopDmStream();                                    // 关闭浏览器SSE
     try { await api(`/api/accounts/${HUB_ACC}/dm/protocol/ws`, { method: "POST" }); } catch (_) {}
     startDmProtoStream();
     st.textContent = "已连接 ✓";
-    refreshDmConvsProto();        // 协议模式下立即拉取会话列表
+    refreshDmConvsProto();
   } else {
     btn.classList.remove("active");
     btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发`;
     st.style.display = "none";
     st.textContent = "";
     stopDmProtoStream();
-    refreshDmConvs();             // 切回浏览器模式刷新 DB 缓存
+    refreshDmConvs();
   }
   if (DM_CONV) openDmConv(DM_CONV);
 }
@@ -2062,7 +2064,7 @@ function startDmProtoStream() {
     DM_PROTO_SSE = new EventSource(`/api/dm/protocol/stream?account_id=${HUB_ACC}`);
     DM_PROTO_SSE.onmessage = (e) => {
       let evt; try { evt = JSON.parse(e.data); } catch (_) { return; }
-      if (evt.conv_id === DM_CONV) refreshDmMessages();
+      if (evt.conv_id === DM_CONV) refreshDmMessages();   // 走覆盖版本,协议模式读DB
       else refreshDmConvs();
     };
   } catch (_) {}
@@ -2082,6 +2084,12 @@ async function refreshDmMessagesProto() {
     thread.scrollTop = thread.scrollHeight;
   } catch (e) { thread.innerHTML = `<div class="empty"><div class="empty-t">加载失败:${esc(e.message)}</div></div>`; }
 }
+
+// 覆盖 refreshDmMessages: 协议模式下用 DB 拉取
+const _refreshDmMessagesOrig = refreshDmMessages;
+refreshDmMessages = function() {
+  return DM_PROTOCOL ? refreshDmMessagesProto() : _refreshDmMessagesOrig();
+};
 
 async function sendDmProto() {
   const inp = $("dm-input"); const text = (inp.value || "").trim();
