@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, and_
 from sqlmodel import select
 
 from .browser import (BrowserManager, cookie_string_to_state,
