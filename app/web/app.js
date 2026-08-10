@@ -1625,7 +1625,7 @@ function switchHubTab(name) {
   try { localStorage.setItem("dym-hubtab", name); } catch (e) {}
   document.querySelectorAll("[data-hubpanel]").forEach(p => { p.style.display = p.dataset.hubpanel === name ? "" : "none"; });
   document.querySelectorAll("[data-hubtab]").forEach(t => t.classList.toggle("active", t.dataset.hubtab === name));
-  if (name === "dm") startDmStream(); else stopDmStream();
+  if (name === "dm") { startDmStream(); initDmProtocol(); } else stopDmStream();
   refreshHubPanel();
 }
 // 计数徽章:纯查库汇总,进面板/换账号/切平台即刷新,不用点进子页才有数
@@ -1642,7 +1642,7 @@ function refreshHubPanel() {
   if (HUB_TAB === "myworks") refreshMyWorks();
   else if (HUB_TAB === "following") refreshFollows("following");
   else if (HUB_TAB === "fans") refreshFollows("fan");
-  else if (HUB_TAB === "dm") { refreshDmConvs(); startDmStream(); }
+  else if (HUB_TAB === "dm") { refreshDmConvs(); startDmStream(); initDmProtocol(); }
   else if (HUB_TAB === "stats") loadHubStats();
 }
 
@@ -2000,7 +2000,19 @@ async function sendDm() {
 }
 
 // ─── 协议私信模式 (imapi protobuf, 无需浏览器) ───
-let DM_PROTOCOL = false, DM_PROTO_SSE = null;
+let DM_PROTOCOL = true, DM_PROTO_SSE = null;
+
+async function initDmProtocol() {
+  if (!DM_PROTOCOL) return;
+  const btn = $("dm-protocol-btn"); const st = $("dm-protocol-status");
+  if (!btn || btn.classList.contains("active")) return;
+  btn.classList.add("active");
+  btn.innerHTML = `<svg><use href="#i-bolt"/></svg>协议收发 (开)`;
+  st.style.display = "inline"; st.textContent = "连接中…";
+  try { await api(`/api/accounts/${HUB_ACC}/dm/protocol/ws`, { method: "POST" }); } catch (_) {}
+  st.textContent = "已连接 ✓";
+  startDmProtoStream();
+}
 
 async function toggleDmProtocol() {
   DM_PROTOCOL = !DM_PROTOCOL;
