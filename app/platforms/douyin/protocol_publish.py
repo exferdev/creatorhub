@@ -559,19 +559,40 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
         signed_params = dict(params)
         url_without_ab = base_url + "?" + urlencode(signed_params)
         try:
-            sign_res = _signer.sign({
-                "url": url_without_ab, "method": "POST",
-                "data": body_json, "a_bogus": True,
-                "cookies": _signer_cookie_str(cookies),
-                "ua": ua, "platform": _browser_platform(ua),
-            })
-            print(f"[dy-protocol] sign result: ok={sign_res.get('ok')}, X-Bogus={str(sign_res.get('X-Bogus',''))[:20] if sign_res.get('X-Bogus') else None}, a_bogus={str(sign_res.get('a_bogus',''))[:20] if sign_res.get('a_bogus') else None}")
-            if sign_res.get("ok") and sign_res.get("a_bogus"):
-                signed_params["a_bogus"] = sign_res["a_bogus"]
-            elif sign_res.get("ok") and sign_res.get("X-Bogus"):
-                signed_params["a_bogus"] = sign_res["X-Bogus"]
+            # A/B: 优先用纯Python abogus.py 生成 a_bogus (与私信路径同算法)
+            from .bdms.abogus import generate_a_bogus as _py_abogus
+            ab = _py_abogus(urlencode(signed_params), ua)
+            print(f"[dy-protocol] py-abogus: {'OK' if ab else 'FAIL'}")
+            if ab:
+                signed_params["a_bogus"] = ab
+            else:
+                # 回退: V8 signer 生成
+                sign_res = _signer.sign({
+                    "url": url_without_ab, "method": "POST",
+                    "data": body_json, "a_bogus": True,
+                    "cookies": _signer_cookie_str(cookies),
+                    "ua": ua, "platform": _browser_platform(ua),
+                })
+                print(f"[dy-protocol] V8 sign result: ok={sign_res.get('ok')}, a_bogus={str(sign_res.get('a_bogus',''))[:20] if sign_res.get('a_bogus') else None}")
+                if sign_res.get("ok") and sign_res.get("a_bogus"):
+                    signed_params["a_bogus"] = sign_res["a_bogus"]
+                elif sign_res.get("ok") and sign_res.get("X-Bogus"):
+                    signed_params["a_bogus"] = sign_res["X-Bogus"]
         except Exception as e:
-            print(f"[dy-protocol] sign exception: {e!r}")
+            print(f"[dy-protocol] py-abogus exception, fallback V8: {e!r}")
+            try:
+                sign_res = _signer.sign({
+                    "url": url_without_ab, "method": "POST",
+                    "data": body_json, "a_bogus": True,
+                    "cookies": _signer_cookie_str(cookies),
+                    "ua": ua, "platform": _browser_platform(ua),
+                })
+                if sign_res.get("ok") and sign_res.get("a_bogus"):
+                    signed_params["a_bogus"] = sign_res["a_bogus"]
+                elif sign_res.get("ok") and sign_res.get("X-Bogus"):
+                    signed_params["a_bogus"] = sign_res["X-Bogus"]
+            except Exception as e2:
+                print(f"[dy-protocol] V8 sign exception: {e2!r}")
 
         query = urlencode(signed_params)
         url = f"https://creator.douyin.com{base_path}?{query}"
