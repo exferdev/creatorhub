@@ -3,7 +3,7 @@
 基于 douyin-ops publisher.py 的协议逆向，但 HTTP 层改用 page.evaluate(fetch)
 走真实浏览器 TLS 指纹（继承 CreatorHub 反检测体系），而非 curl_cffi 模拟。
 
-签名（X-Bogus / a_bogus）由同模块的 signer.py（Python V8 + webmssdk SDK）计算。
+签名（X-Bogus / a_bogus）由纯 Python 实现 (bdms/xbogus.py, bdms/abogus.py)。
 msToken 由 ms_token.py 提供。
 """
 from __future__ import annotations
@@ -28,7 +28,6 @@ import requests as req
 from ...browser.identity import Identity, _platform_bits
 from ...browser.manager import BrowserManager
 from . import ms_token as _ms_token
-from . import signer as _signer
 
 logger = logging.getLogger(__name__)
 
@@ -188,9 +187,14 @@ async def _get_sts2(page, cookies: dict, ms_token_str: str, ua: str = "") -> dic
     path = "/aweme/mid/video/sts2"
     path_q = path + "?" + urlencode(p)
 
+    # X-Bogus 纯 Python 实现 (替代 V8 frontier_sign)
     xb = None
-    if _signer._ready and _signer._signer:
-        xb = _signer._signer.frontier_sign(path_q, "GET", ua=ua, platform=_browser_platform(ua))
+    try:
+        from .bdms.xbogus import generate_x_bogus
+        xb = generate_x_bogus(path_q)
+        print(f"[dy-protocol] xbogus: {'OK' if xb else 'FAIL'}")
+    except Exception as e:
+        print(f"[dy-protocol] xbogus error: {e!r}")
     hdrs = {"Referer": "https://creator.douyin.com/"}
     if xb:
         hdrs["x-bogus"] = xb
@@ -608,7 +612,7 @@ async def publish_douyin_protocol(
     """协议模式发布抖音作品。返回 (ok, item_id_or_error, error_detail)。
 
     走 8 步协议流程，HTTP 请求通过浏览器 page.evaluate(fetch) 发送。
-    签名由 Python V8 引擎 (signer.py) 计算。
+    签名由纯 Python 实现 (bdms/xbogus.py + bdms/abogus.py)。
     """
     files = [str(Path(p)) for p in media_paths if p and Path(p).exists()]
     if not files:
@@ -624,8 +628,6 @@ async def publish_douyin_protocol(
 
     if not cookie_dict.get("sessionid"):
         return False, "", "登录态缺少 sessionid，请重新登录该抖音账号"
-
-    _signer.ensure_ready()
 
     ctx = await mgr.context_for(identity)
     page = await ctx.new_page()
@@ -757,8 +759,6 @@ async def publish_douyin_image_protocol(
 
     if not cookie_dict.get("sessionid"):
         return False, "", "登录态缺少 sessionid，请重新登录该抖音账号"
-
-    _signer.ensure_ready()
 
     ctx = await mgr.context_for(identity)
     page = await ctx.new_page()
