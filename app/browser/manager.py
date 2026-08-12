@@ -34,7 +34,6 @@ _PROXY_WEBRTC_ARGS = [
 # 存量 legacy 账号必须保持原来的启动参数，避免已建立的浏览器画像突然漂移。
 _LEGACY_ARGS = [
     "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
     "--disable-infobars",
     # 关键:禁止 WebRTC 走非代理 UDP。否则真实 Chromium 会通过 STUN 直接暴露宿主
     # 公网/内网 IP,绕过我们在 HTTP 层设的账号代理 —— 所有号在 WebRTC 上露同一真实
