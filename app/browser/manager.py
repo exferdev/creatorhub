@@ -148,6 +148,7 @@ class BrowserManager:
         # 优先使用机器上安装的稳定版 Chrome；没有时回退到 Playwright
         # 附带的 Chrome for Testing。登录窗口因此更接近用户日常浏览器环境。
         self._browser_channel: Optional[str] = None
+        self._channels: Dict[str, int] = {}   # channel → Chromium 大版本 (探测结果)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -156,13 +157,17 @@ class BrowserManager:
             self._pw, self.profiles_root)
 
     async def _detect_chrome_major(self) -> Optional[int]:
-        """选择可用浏览器并探测其 Chromium 大版本。
+        """探测本机可用浏览器 channel 并读取真实 Chromium 大版本。
 
-        优先系统稳定版 Chrome，缺失时使用 Playwright bundled Chromium。
-        账号 UA 池写死了 Chrome 版本,但真实内核可能是另一版本 —— 二者不一致时,
+        优先系统稳定版 Chrome/Edge，缺失时使用 Playwright bundled Chromium。
+        账号 UA 池写死了 Chrome/Edg 版本,但真实内核可能是另一版本 —— 二者不一致时,
         Sec-CH-UA 请求头 / navigator.userAgentData 由真实内核发出,会和 UA 字符串对不上,
-        成为自动化特征。这里读一次真实 UA,后续把账号 UA 的版本号归一到它。"""
-        for channel in ("chrome", None):
+        成为自动化特征。这里读一次真实 UA,后续把账号 UA 的版本号归一到它。
+        channel 按账号 UA 分配 (Edg/→msedge, Chrome/→chrome), 不同内核渲染路径不同,
+        产生真实不同的 canvas/WebGL 指纹, 支持多账号防关联。
+        """
+        self._channels: Dict[str, int] = {}
+        for channel in ("chrome", "msedge", None):
             launch_kwargs: Dict[str, Any] = {
                 "headless": True,
                 # Playwright 默认注入 --no-sandbox 触发 Chrome 127+ 横幅警告,
@@ -175,27 +180,43 @@ class BrowserManager:
                 browser = await self._pw.chromium.launch(**launch_kwargs)
             except Exception:
                 continue
-            self._browser_channel = channel
             try:
                 pg = await browser.new_page()
                 ua = await pg.evaluate("navigator.userAgent")
                 m = re.search(r"Chrome/(\d+)", ua or "")
-                return int(m.group(1)) if m else None
+                self._channels[channel or "chromium"] = int(m.group(1)) if m else 0
             except Exception:
-                return None
+                pass
             finally:
                 try:
                     await browser.close()
                 except Exception:
                     pass
-        self._browser_channel = None
+        self._browser_channel = next(
+            (c for c in ("chrome", "msedge") if c in self._channels), None)
+        self._chrome_major = self._channels.get(self._browser_channel or "", 0) or None
+        return self._chrome_major
+
+    def _channel_for_ua(self, ua: str) -> Optional[str]:
+        """按账号 UA 分配浏览器 channel (Edg/→msedge, Chrome/→chrome)。"""
+        if "Edg/" in ua and "msedge" in self._channels:
+            return "msedge"
+        if "chrome" in self._channels:
+            return "chrome"
         return None
 
     def _normalize_ua(self, ua: str) -> str:
-        """把账号 UA 的 Chrome/Edg 大版本对齐到真实内核版本(未探测到则原样返回)。"""
-        if not self._chrome_major or not ua:
+        """把账号 UA 的 Chrome/Edg 大版本对齐到真实内核版本(未探测到则原样返回)。
+
+        channel 按 UA 匹配 (Edg/→msedge, Chrome/→chrome), 用对应内核版本归一化,
+        保证 UA 字符串与真实内核 / Sec-CH-UA 一致。
+        """
+        if not self._channels or not ua:
             return ua
-        v = self._chrome_major
+        ch = self._channel_for_ua(ua)
+        v = self._channels.get(ch or "", 0)
+        if not v:
+            return ua
         ua = re.sub(r"Chrome/\d+", f"Chrome/{v}", ua)
         ua = re.sub(r"Edg/\d+", f"Edg/{v}", ua)
         return ua
@@ -242,7 +263,8 @@ class BrowserManager:
 
     def _sec_ch_ua_headers(self, ua: str) -> Optional[Dict[str, str]]:
         """按归一后的 UA 生成一致的 Client Hints 头,覆盖真实内核默认发出的值。"""
-        v = self._chrome_major
+        ch = self._channel_for_ua(ua)
+        v = self._channels.get(ch or "", 0)
         if not v:
             return None
         if "Edg/" in ua:
@@ -304,7 +326,12 @@ class BrowserManager:
             # Windows 沙箱可用, 显式移除以恢复沙箱安全性 (不影响指纹)。
             ignore_default_args=["--no-sandbox"],
         )
-        if self._browser_channel:
+        if self._channels:
+            # channel 按账号 UA 分配: Edg/→msedge, Chrome/→chrome (真实渲染差异, 防关联)
+            ch = self._channel_for_ua(ua)
+            if ch:
+                kwargs["channel"] = ch
+        elif self._browser_channel:
             kwargs["channel"] = self._browser_channel
         legacy = identity.identity_mode != "native"
         if legacy:
