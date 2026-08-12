@@ -32,8 +32,10 @@ _PROXY_WEBRTC_ARGS = [
 ]
 
 # 存量 legacy 账号必须保持原来的启动参数，避免已建立的浏览器画像突然漂移。
+# 注: --disable-blink-features=AutomationControlled 在 Chrome 127+ 已失效并触发
+# "不受支持的命令行标记"横幅 (chromium issue 40537366), 已移除; webdriver 防检测
+# 由 add_init_script(fingerprint_script) 承担, 与 Chrome 版本无关。
 _LEGACY_ARGS = [
-    "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
     # 关键:禁止 WebRTC 走非代理 UDP。否则真实 Chromium 会通过 STUN 直接暴露宿主
     # 公网/内网 IP,绕过我们在 HTTP 层设的账号代理 —— 所有号在 WebRTC 上露同一真实
@@ -319,11 +321,10 @@ class BrowserManager:
         proxy = _parse_proxy(identity.proxy)
         if not legacy:
             # native 账号使用 Chrome/操作系统自己的视口、语言、时区与硬件画像。
-            # 防自动化: 命令行禁用 AutomationControlled 特性(webdriver 从根源不置位),
-            # 与 add_init_script 的 webdriver 覆盖形成双保险。WebRTC 约束仅在显式
-            # 配置代理时加入,避免 UDP 绕过代理出口。
+            # webdriver 防检测由 add_init_script(fingerprint_script) 承担 (Chrome 127+
+            # 命令行参数已失效); WebRTC 约束仅在显式配置代理时加入,避免 UDP 绕过代理出口。
             kwargs["no_viewport"] = True
-            native_args = ["--disable-blink-features=AutomationControlled"]
+            native_args = []
             if proxy:
                 native_args.extend(_PROXY_WEBRTC_ARGS)
             kwargs["args"] = native_args
