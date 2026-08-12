@@ -191,7 +191,7 @@ def get_ms_token(cookies: dict = None, force_refresh: bool = False,
                  ms_appid: str = "2906", ua: str = "") -> dict:
     """获取 msToken，自动选择最优策略。
 
-    优先级: strData重放(纯Python) > 缓存(7天) > mssdk API
+    优先级: strData重放(纯Python) > 缓存(7天) > mssdk API > 远程签名服务
     ua 应传账号真实浏览器身份的 User-Agent,保证这里直连的 HTTP 请求
     和该账号浏览器实际发出的请求头一致。
     """
@@ -210,5 +210,17 @@ def get_ms_token(cookies: dict = None, force_refresh: bool = False,
         result = refresh_ms_token_via_mssdk(cookies, ms_tok, ua=ua)
         if result.get("ok"):
             return result
+
+    # 模式B: 远程签名服务兜底 (Worker 仅提供纯算 strdata, mssdk 重放必须本地 IP)
+    try:
+        from .sign_client import remote_strdata
+        strdata = _load_strdata() or remote_strdata()
+        if strdata:
+            r = refresh_ms_token_via_strdata(strdata, ms_appid=ms_appid, ua=ua)
+            if r.get("ok"):
+                _save_strdata(strdata)
+                return r
+    except Exception:
+        pass
 
     return {"ok": False, "error": "all strategies failed — 需要先缓存 strData", "source": "none"}

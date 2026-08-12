@@ -702,14 +702,24 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """生成 a_bogus: 纯Python SM3+RC4 算法 (移植自 douyin-web-api-sdk)"""
+        """生成 a_bogus: 远程签名服务优先, 回退纯Python本地算法。"""
         from urllib.parse import urlencode
-        from .bdms.abogus import generate_a_bogus
         qs = ""
         if query_params:
             qs = urlencode({k: v for k, v in query_params.items() if v})
         if not qs:
             return ""
+        # 模式B: 远程签名服务 (Cloudflare Worker)
+        try:
+            from .sign_client import remote_abogus
+            ab = remote_abogus(qs, self.ua)
+            if ab:
+                print(f"[im-protocol] remote abogus=OK")
+                return ab
+        except Exception:
+            pass
+        # 模式A: 本地纯Python
+        from .bdms.abogus import generate_a_bogus
         return generate_a_bogus(qs, self.ua)
 
     def _post(self, path: str, body: bytes, query_params: dict = None,

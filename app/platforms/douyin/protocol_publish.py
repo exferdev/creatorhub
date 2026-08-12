@@ -187,14 +187,22 @@ async def _get_sts2(page, cookies: dict, ms_token_str: str, ua: str = "") -> dic
     path = "/aweme/mid/video/sts2"
     path_q = path + "?" + urlencode(p)
 
-    # X-Bogus 纯 Python 实现 (替代 V8 frontier_sign)
+    # X-Bogus: 远程签名服务优先, 回退纯Python本地算法
     xb = None
     try:
-        from .bdms.xbogus import generate_x_bogus
-        xb = generate_x_bogus(path_q)
-        print(f"[dy-protocol] xbogus: {'OK' if xb else 'FAIL'}")
-    except Exception as e:
-        print(f"[dy-protocol] xbogus error: {e!r}")
+        from .sign_client import remote_xbogus
+        xb = remote_xbogus(path_q)
+        if xb:
+            print(f"[dy-protocol] remote xbogus=OK")
+    except Exception:
+        pass
+    if not xb:
+        try:
+            from .bdms.xbogus import generate_x_bogus
+            xb = generate_x_bogus(path_q)
+            print(f"[dy-protocol] local xbogus: {'OK' if xb else 'FAIL'}")
+        except Exception as e:
+            print(f"[dy-protocol] xbogus error: {e!r}")
     hdrs = {"Referer": "https://creator.douyin.com/"}
     if xb:
         hdrs["x-bogus"] = xb
@@ -551,10 +559,19 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
         body_json = json.dumps(current_body, ensure_ascii=False, separators=(",", ":"))
         signed_params = dict(params)
         url_without_ab = base_url + "?" + urlencode(signed_params)
-        # create_v2 a_bogus 用纯Python abogus.py (A/B 已验证, 移除 V8 generate_a_bogus)
-        from .bdms.abogus import generate_a_bogus as _py_abogus
-        ab = _py_abogus(urlencode(signed_params), ua)
-        print(f"[dy-protocol] py-abogus: {'OK' if ab else 'FAIL'}")
+        # create_v2 a_bogus: 远程优先, 回退纯Python (A/B 已验证)
+        ab = ""
+        try:
+            from .sign_client import remote_abogus
+            ab = remote_abogus(urlencode(signed_params), ua)
+            if ab:
+                print(f"[dy-protocol] remote abogus=OK")
+        except Exception:
+            pass
+        if not ab:
+            from .bdms.abogus import generate_a_bogus as _py_abogus
+            ab = _py_abogus(urlencode(signed_params), ua)
+            print(f"[dy-protocol] local abogus: {'OK' if ab else 'FAIL'}")
         if ab:
             signed_params["a_bogus"] = ab
 
