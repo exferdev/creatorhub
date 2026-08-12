@@ -218,18 +218,20 @@ def _platform_bits(ua: str):
 
 def fingerprint_script(seed: str, ua: str = "") -> str:
     """基于 seed 确定性派生的指纹注入脚本(add_init_script),同账号每次一致。
-    覆盖:navigator.webdriver / hardwareConcurrency / deviceMemory,
-    navigator.platform + userAgentData(与 UA 一致),WebGL vendor/renderer,
-    canvas 与 AudioContext 的固定微噪声(幂等,不改动源画布/缓冲,避免多次读取不一致)。
+
+    仅覆盖「属性」类指纹 (navigator.webdriver / hardwareConcurrency /
+    deviceMemory / platform / userAgentData), 与 UA/Sec-CH-UA 三者一致。
+
+    不覆盖任何原生「方法」 (canvas/getImageData、WebGL getParameter、
+    Audio getChannelData): JS 层方法覆盖可被第三方检测识别为"人工修改"
+    (toString/描述符/行为统计多层判定), 且确定性噪声可被剥离, 差异化无效。
+    真实渲染由浏览器自身保证; 多账号防关联靠 代理IP + 属性seed差异化
+    (可选: 按账号分配不同 Chrome channel 产生真实渲染差异)。
     """
     rnd = random.Random(seed)
     hw = rnd.choice([4, 6, 8, 12, 16])
     mem = rnd.choice([4, 8, 16])
-    noise = [rnd.randint(0, 7) for _ in range(8)]           # canvas 像素低位偏移
-    noise_js = json.dumps(noise)
-    audio_noise = rnd.uniform(1e-7, 1e-6)                   # AudioContext 极小扰动
-    platform, ua_data_plat, webgl_pool = _platform_bits(ua)
-    gl_vendor, gl_renderer = rnd.choice(webgl_pool)
+    platform, ua_data_plat, _webgl_pool = _platform_bits(ua)
     v = "0"
     m = re.search(r"Chrome/(\d+)", ua or "")
     if m:
@@ -248,29 +250,6 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
   const def = (o, k, v) => {{ try {{
     Object.defineProperty(o, k, {{get: () => v, configurable: true}});
   }} catch (e) {{}} }};
-  // ---- toString 伪装 (参考 playwright_stealth utils.patchToString) ----
-  // 覆盖原生方法后, 其 toString() 必须仍返回 [native code], 否则被检测为"人工修改"
-  const _nativeToStr = Function.toString + '';
-  const _mkNative = (name) => _nativeToStr.replace('toString', name || '');
-  const _origFTS = Function.prototype.toString;
-  const _patchedObjs = new Set();
-  let _patched = false;
-  const _patchToString = (obj) => {{
-    _patchedObjs.add(obj);
-    if (_patched) return;
-    _patched = true;
-    Function.prototype.toString = new Proxy(_origFTS, {{
-      apply(target, ctx) {{
-        try {{
-          if (ctx === Function.prototype.toString) return _mkNative('toString');
-          if (_patchedObjs.has(ctx)) return _mkNative(ctx.name);
-          const hasSameProto = Object.getPrototypeOf(_origFTS).isPrototypeOf(ctx.toString);
-          if (!hasSameProto) return ctx.toString();
-        }} catch (e) {{}}
-        return target.call(ctx);
-      }}
-    }});
-  }};
   def(navigator, 'webdriver', false);
   def(navigator, 'hardwareConcurrency', {hw});
   def(navigator, 'deviceMemory', {mem});
@@ -288,65 +267,6 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
       }}),
     }};
     def(navigator, 'userAgentData', uad);
-  }} catch (e) {{}}
-  // WebGL vendor/renderer
-  try {{
-    const patch = (proto) => {{
-      const gp = proto.getParameter;
-      proto.getParameter = function(p) {{
-        if (p === 37445) return {json.dumps(gl_vendor)};   // UNMASKED_VENDOR_WEBGL
-        if (p === 37446) return {json.dumps(gl_renderer)}; // UNMASKED_RENDERER_WEBGL
-        return gp.apply(this, arguments);
-      }};
-    }};
-    if (window.WebGLRenderingContext) {{ patch(WebGLRenderingContext.prototype); _patchToString(WebGLRenderingContext.prototype.getParameter); }}
-    if (window.WebGL2RenderingContext) {{ patch(WebGL2RenderingContext.prototype); _patchToString(WebGL2RenderingContext.prototype.getParameter); }}
-  }} catch (e) {{}}
-  // canvas 噪声:只在「读取副本」上加,不回写源画布 -> 幂等,多次读一致
-  const NOISE = {noise_js};
-  const addNoise = (data) => {{
-    for (let i = 0; i < data.length; i += 4) {{
-      data[i] = (data[i] + NOISE[(i >> 2) % NOISE.length]) & 0xff;
-    }}
-  }};
-  const _gid = CanvasRenderingContext2D.prototype.getImageData;
-  CanvasRenderingContext2D.prototype.getImageData = function() {{
-    const d = _gid.apply(this, arguments);   // 源画布未被改动,每次读都是原始像素
-    try {{ addNoise(d.data); }} catch (e) {{}}
-    return d;
-  }};
-  const _toDataURL = HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL = function() {{
-    try {{
-      const w = this.width, h = this.height;
-      if (w && h) {{
-        const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        const cx = c.getContext('2d');
-        cx.drawImage(this, 0, 0);
-        const d = _gid.apply(cx, [0, 0, w, h]);   // 用原生 getImageData 取副本,避免二次加噪
-        addNoise(d.data);
-        cx.putImageData(d, 0, 0);
-        return _toDataURL.apply(c, arguments);    // 源画布始终干净
-      }}
-    }} catch (e) {{}}
-    return _toDataURL.apply(this, arguments);
-  }};
-  _patchToString(CanvasRenderingContext2D.prototype.getImageData);
-  _patchToString(HTMLCanvasElement.prototype.toDataURL);
-  // AudioContext 噪声:每个 buffer 只扰动一次(WeakSet 记账),避免重复叠加
-  try {{
-    const seen = new WeakSet();
-    const _gcd = AudioBuffer.prototype.getChannelData;
-    AudioBuffer.prototype.getChannelData = function() {{
-      const d = _gcd.apply(this, arguments);
-      if (!seen.has(this)) {{
-        seen.add(this);
-        try {{ for (let i = 0; i < d.length; i += 100) d[i] += {audio_noise:.10f}; }} catch (e) {{}}
-      }}
-      return d;
-    }};
-    _patchToString(AudioBuffer.prototype.getChannelData);
   }} catch (e) {{}}
 }})();
 """
