@@ -163,6 +163,9 @@ class BrowserManager:
         for channel in ("chrome", None):
             launch_kwargs: Dict[str, Any] = {
                 "headless": True,
+                # Playwright 默认注入 --no-sandbox 触发 Chrome 127+ 横幅警告,
+                # Windows 沙箱可用, 显式移除以恢复沙箱安全性 (不影响指纹)。
+                "ignore_default_args": ["--no-sandbox"],
             }
             if channel:
                 launch_kwargs["channel"] = channel
@@ -295,6 +298,9 @@ class BrowserManager:
         ua = self._normalize_ua(identity.ua or self.default_ua)
         kwargs: Dict[str, Any] = dict(
             user_data_dir=str(pdir), headless=headless,
+            # Playwright 默认注入 --no-sandbox 触发 Chrome 127+ 横幅警告,
+            # Windows 沙箱可用, 显式移除以恢复沙箱安全性 (不影响指纹)。
+            ignore_default_args=["--no-sandbox"],
         )
         if self._browser_channel:
             kwargs["channel"] = self._browser_channel
