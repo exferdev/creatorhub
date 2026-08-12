@@ -248,6 +248,29 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
   const def = (o, k, v) => {{ try {{
     Object.defineProperty(o, k, {{get: () => v, configurable: true}});
   }} catch (e) {{}} }};
+  // ---- toString 伪装 (参考 playwright_stealth utils.patchToString) ----
+  // 覆盖原生方法后, 其 toString() 必须仍返回 [native code], 否则被检测为"人工修改"
+  const _nativeToStr = Function.toString + '';
+  const _mkNative = (name) => _nativeToStr.replace('toString', name || '');
+  const _origFTS = Function.prototype.toString;
+  const _patchedObjs = new Set();
+  let _patched = false;
+  const _patchToString = (obj) => {{
+    _patchedObjs.add(obj);
+    if (_patched) return;
+    _patched = true;
+    Function.prototype.toString = new Proxy(_origFTS, {{
+      apply(target, ctx) {{
+        try {{
+          if (ctx === Function.prototype.toString) return _mkNative('toString');
+          if (_patchedObjs.has(ctx)) return _mkNative(ctx.name);
+          const hasSameProto = Object.getPrototypeOf(_origFTS).isPrototypeOf(ctx.toString);
+          if (!hasSameProto) return ctx.toString();
+        }} catch (e) {{}}
+        return target.call(ctx);
+      }}
+    }});
+  }};
   def(navigator, 'webdriver', false);
   def(navigator, 'hardwareConcurrency', {hw});
   def(navigator, 'deviceMemory', {mem});
@@ -276,8 +299,8 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
         return gp.apply(this, arguments);
       }};
     }};
-    if (window.WebGLRenderingContext) patch(WebGLRenderingContext.prototype);
-    if (window.WebGL2RenderingContext) patch(WebGL2RenderingContext.prototype);
+    if (window.WebGLRenderingContext) {{ patch(WebGLRenderingContext.prototype); _patchToString(WebGLRenderingContext.prototype.getParameter); }}
+    if (window.WebGL2RenderingContext) {{ patch(WebGL2RenderingContext.prototype); _patchToString(WebGL2RenderingContext.prototype.getParameter); }}
   }} catch (e) {{}}
   // canvas 噪声:只在「读取副本」上加,不回写源画布 -> 幂等,多次读一致
   const NOISE = {noise_js};
@@ -309,6 +332,8 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
     }} catch (e) {{}}
     return _toDataURL.apply(this, arguments);
   }};
+  _patchToString(CanvasRenderingContext2D.prototype.getImageData);
+  _patchToString(HTMLCanvasElement.prototype.toDataURL);
   // AudioContext 噪声:每个 buffer 只扰动一次(WeakSet 记账),避免重复叠加
   try {{
     const seen = new WeakSet();
@@ -321,6 +346,7 @@ def fingerprint_script(seed: str, ua: str = "") -> str:
       }}
       return d;
     }};
+    _patchToString(AudioBuffer.prototype.getChannelData);
   }} catch (e) {{}}
 }})();
 """
