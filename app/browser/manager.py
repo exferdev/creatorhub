@@ -319,10 +319,14 @@ class BrowserManager:
         proxy = _parse_proxy(identity.proxy)
         if not legacy:
             # native 账号使用 Chrome/操作系统自己的视口、语言、时区与硬件画像。
-            # 仅在显式配置代理时约束 WebRTC，避免 UDP 绕过代理出口。
+            # 防自动化: 命令行禁用 AutomationControlled 特性(webdriver 从根源不置位),
+            # 与 add_init_script 的 webdriver 覆盖形成双保险。WebRTC 约束仅在显式
+            # 配置代理时加入,避免 UDP 绕过代理出口。
             kwargs["no_viewport"] = True
+            native_args = ["--disable-blink-features=AutomationControlled"]
             if proxy:
-                kwargs["args"] = list(_PROXY_WEBRTC_ARGS)
+                native_args.extend(_PROXY_WEBRTC_ARGS)
+            kwargs["args"] = native_args
         if proxy:
             kwargs["proxy"] = proxy
         ctx = await self._pw.chromium.launch_persistent_context(**kwargs)
