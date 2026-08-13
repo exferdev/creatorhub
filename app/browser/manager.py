@@ -326,8 +326,65 @@ class BrowserManager:
         return self._locks.setdefault(key, asyncio.Lock())
 
     # ── 持久化 context ──
+    @staticmethod
+    def _fingerprint_seed_from(fp_seed: str) -> int:
+        """fp_seed(hex) → CloakBrowser --fingerprint 32位种子 (确定性, 同账号每次一致)。"""
+        try:
+            return int(fp_seed, 16) % 2 ** 32
+        except (ValueError, TypeError):
+            return 10000 + (abs(hash(fp_seed or "")) % 90000)
+
+    async def _launch_cloak(self, identity: Identity, headless: bool) -> BrowserContext:
+        """CloakBrowser 引擎级启动 (v146 免费, 无并发限制)。
+
+        C++ 源码 58 补丁: canvas(toDataURL层seed噪声)/GPU/audio/字体/屏幕/硬件 按
+        --fingerprint=seed 差异化且无痕 (getImageData 真实, 函数 native)。
+        fp_seed 确定性映射 → 同账号每次同指纹 (返回访问者一致)。
+        """
+        from cloakbrowser import launch_persistent_context_async
+        pdir = Path(identity.profile_dir)
+        pdir.mkdir(parents=True, exist_ok=True)
+        seed = self._fingerprint_seed_from(identity.fp_seed)
+        proxy = _parse_proxy(identity.proxy)
+        kwargs: Dict[str, Any] = dict(
+            headless=headless,
+            args=[f"--fingerprint={seed}"],
+            viewport={"width": identity.viewport_w, "height": identity.viewport_h},
+            locale=identity.locale or "zh-CN",
+            timezone_id=identity.timezone_id or "Asia/Shanghai",
+        )
+        if proxy:
+            kwargs["proxy"] = proxy
+        ctx = await launch_persistent_context_async(str(pdir), **kwargs)
+        # probe 实际 UA 回写 (CloakBrowser 引擎层按 seed 生成, 同账号每次一致)
+        probe_page = None
+        try:
+            pages = list(ctx.pages)
+            probe_page = pages[0] if pages else await ctx.new_page()
+            actual_ua = await probe_page.evaluate("navigator.userAgent")
+            if actual_ua:
+                identity.ua = str(actual_ua)
+                if identity.account_id is not None and self._native_ua_callback:
+                    self._native_ua_callback(identity.account_id, identity.ua)
+        except Exception:
+            pass
+        finally:
+            if probe_page is not None and probe_page not in list(ctx.pages):
+                try:
+                    await probe_page.close()
+                except Exception:
+                    pass
+        return ctx
+
     async def _launch_persistent(self, identity: Identity, headless: bool = True
                                  ) -> BrowserContext:
+        # CloakBrowser 引擎级方案 (C++ 源码补丁, canvas toDataURL/GPU/audio 按 seed 差异化,
+        # 无痕, 免 license 并发限制)。抖音账号优先, 失败回退系统 Chrome。
+        if identity.platform == "douyin":
+            try:
+                return await self._launch_cloak(identity, headless)
+            except Exception as e:
+                print(f"[browser] cloakbrowser launch failed -> fallback: {e!r}")
         pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
         was_empty = not any(pdir.iterdir())
