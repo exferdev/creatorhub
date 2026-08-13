@@ -1,0 +1,37 @@
+# 腾讯云 SCF 部署配置
+# 使用 Serverless Framework (serverless.com) 或腾讯云 SCF 控制台部署
+service: fingerprint-db
+
+provider:
+  name: tencent
+  runtime: Python3.9
+  region: ap-shanghai
+  environment:
+    COS_REGION: ap-shanghai
+    COS_BUCKET: fingerprint-db-1250000000
+    COS_SECRET_ID: ${env:COS_SECRET_ID}
+    COS_SECRET_KEY: ${env:COS_SECRET_KEY}
+    API_KEY: ${env:FINGERPRINT_API_KEY}
+
+functions:
+  ingest:
+    handler: funcs.ingest.main_handler
+    events:
+      - apigw:
+          path: /api/v1/samples
+          method: POST
+  synth:
+    handler: funcs.synth.main_handler
+    events:
+      - timer:
+          name: daily-synth
+          cron: "0 3 * * *"          # 每日 03:00 重生成
+  serve:
+    handler: funcs.serve.main_handler
+    events:
+      - apigw:
+          path: /api/v1/{proxy+}
+          method: GET
+
+plugins:
+  - serverless-tencent-scf
