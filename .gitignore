@@ -28,3 +28,4 @@ config.yaml
 
 # 内部方案文档(不随公开仓库发布)
 docs/
+fingerprint-db/tencent/.env.local
