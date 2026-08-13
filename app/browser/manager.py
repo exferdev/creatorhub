@@ -149,6 +149,7 @@ class BrowserManager:
         # 附带的 Chrome for Testing。登录窗口因此更接近用户日常浏览器环境。
         self._browser_channel: Optional[str] = None
         self._channels: Dict[str, int] = {}   # channel → Chromium 大版本 (探测结果)
+        self._shardx_sdk = None                # ShardX SDK 实例 (惰性, 抖音引擎级方案)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -328,11 +329,104 @@ class BrowserManager:
     # ── 持久化 context ──
     @staticmethod
     def _fingerprint_seed_from(fp_seed: str) -> int:
-        """fp_seed(hex) → CloakBrowser --fingerprint 32位种子 (确定性, 同账号每次一致)。"""
+        """fp_seed(hex) → 确定性整数种子 (同账号每次一致)。"""
         try:
             return int(fp_seed, 16) % 2 ** 32
         except (ValueError, TypeError):
             return 10000 + (abs(hash(fp_seed or "")) % 90000)
+
+    @staticmethod
+    def _patch_pathlib_utf8() -> None:
+        """shardx SDK 在 Windows 用 Path.read_text() 默认 GBK 读 UTF-8 JSON,
+        monkey-patch 默认 encoding 为 UTF-8 (全局安全)。"""
+        import pathlib as _pl
+        if getattr(_pl.Path.read_text, "_ch_patched", False):
+            return
+        _orig = _pl.Path.read_text
+
+        def _read_text(self, encoding=None, errors=None):
+            if encoding is None:
+                encoding = "utf-8"
+            return _orig(self, encoding, errors)
+
+        _pl.Path.read_text = _read_text
+        _pl.Path.read_text._ch_patched = True  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _proxy_to_url(proxy: Optional[Dict[str, str]]) -> Optional[str]:
+        """Playwright proxy dict → URL 字符串 (ShardX/BrowserSession 参数格式)。"""
+        if not proxy:
+            return None
+        server = proxy.get("server", "")
+        if proxy.get("username"):
+            prefix = server.split("://", 1)
+            scheme = (prefix[0] + "://") if len(prefix) > 1 else ""
+            host = prefix[1] if len(prefix) > 1 else server
+            return f"{scheme}{proxy['username']}:{proxy.get('password', '')}@{host}"
+        return server
+
+    async def _launch_shardx(self, identity: Identity, headless: bool) -> BrowserContext:
+        """ShardX 引擎级启动 (Chromium 149, 170 真机设备库)。
+
+        真机 GPU/硬件/UA 模板内部一致 → BrowserScan WebGL/Audio/隐身 全过 (实测)。
+        canvas 确定性 per-profile 噪声差异化且无痕; fp_seed 确定性选模板 +
+        .shardx_id 持久化 → 同账号每次同指纹/同 profile 状态。
+        """
+        self._patch_pathlib_utf8()
+        from shardx import ShardX
+        if self._shardx_sdk is None:
+            self._shardx_sdk = ShardX()
+        sdk = self._shardx_sdk
+        pdir = Path(identity.profile_dir)
+        pdir.mkdir(parents=True, exist_ok=True)
+        sid_file = pdir / ".shardx_id"
+        prof = None
+        if sid_file.exists():
+            try:
+                prof = sdk.open_profile(sid_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                prof = None
+        if prof is None:
+            templates = sdk.list_profiles(platform="Windows")
+            if not templates:
+                templates = sdk.list_profiles()
+            idx = self._fingerprint_seed_from(identity.fp_seed) % len(templates)
+            prof = sdk.create_profile(templates[idx])
+            prof.set_noise("canvas")          # canvas 确定性噪声; audio/webgl 保持真实
+            sdk.save_profile(prof)
+            try:
+                sid_file.write_text(prof.id, encoding="utf-8")
+            except Exception:
+                pass
+        proxy_url = self._proxy_to_url(_parse_proxy(identity.proxy))
+        bsess = sdk.launch(prof, cdp=True, proxy=proxy_url, headless=headless)
+        try:
+            browser = await self._pw.chromium.connect_over_cdp(bsess.cdp_url)
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        except Exception:
+            with suppress(Exception):
+                bsess.stop()
+            raise
+        ctx._shardx_bsess = bsess  # type: ignore[attr-defined]  # 关闭时杀进程
+        # probe 实际 UA 回写 (真机模板生成, 同账号每次一致)
+        probe_page = None
+        try:
+            pages = list(ctx.pages)
+            probe_page = pages[0] if pages else await ctx.new_page()
+            actual_ua = await probe_page.evaluate("navigator.userAgent")
+            if actual_ua:
+                identity.ua = str(actual_ua)
+                if identity.account_id is not None and self._native_ua_callback:
+                    self._native_ua_callback(identity.account_id, identity.ua)
+        except Exception:
+            pass
+        finally:
+            if probe_page is not None and probe_page not in list(ctx.pages):
+                try:
+                    await probe_page.close()
+                except Exception:
+                    pass
+        return ctx
 
     async def _launch_cloak(self, identity: Identity, headless: bool) -> BrowserContext:
         """CloakBrowser 引擎级启动 (v146 免费, 无并发限制)。
@@ -384,9 +478,13 @@ class BrowserManager:
 
     async def _launch_persistent(self, identity: Identity, headless: bool = True
                                  ) -> BrowserContext:
-        # CloakBrowser 引擎级方案 (C++ 源码补丁, canvas toDataURL/GPU/audio 按 seed 差异化,
-        # 无痕, 免 license 并发限制)。抖音账号优先, 失败回退系统 Chrome。
+        # ShardX 引擎级方案 (Chromium 149, 170 真机设备库; BrowserScan WebGL/Audio/
+        # 隐身全过, 实测)。抖音账号优先, 失败回退 CloakBrowser → 系统 Chrome。
         if identity.platform == "douyin":
+            try:
+                return await self._launch_shardx(identity, headless)
+            except Exception as e:
+                print(f"[browser] shardx launch failed -> cloak fallback: {e!r}")
             try:
                 return await self._launch_cloak(identity, headless)
             except Exception as e:
@@ -543,6 +641,10 @@ class BrowserManager:
         if ctx is not None:
             with suppress(Exception):
                 await ctx.close()
+            bsess = getattr(ctx, "_shardx_bsess", None)
+            if bsess is not None:
+                with suppress(Exception):
+                    bsess.stop()
 
     async def context_for(self, identity: Identity) -> BrowserContext:
         """取(或惰性创建)账号专属常驻 context。"""
