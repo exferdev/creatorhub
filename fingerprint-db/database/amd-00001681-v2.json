@@ -12,7 +12,7 @@
       "en-US",
       "en"
     ],
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5135.608 Safari/537.36",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.5976.192 Safari/537.36",
     "platform": "Windows",
     "platform_value": "Win32",
     "platform_version": "19.0.0",
@@ -23,7 +23,7 @@
   },
   "client_hints": {
     "brand": "Google Chrome",
-    "brand_version": "104",
+    "brand_version": "106",
     "platform_version": "19.0.0",
     "architecture": "x86",
     "bitness": "64",
@@ -32,27 +32,27 @@
     "grease_version": "24",
     "chrome_build": 0,
     "chrome_patch": 7827,
-    "brand_full_version": "104.0.5135.608",
-    "grease_full_version": "104.0.0.0"
+    "brand_full_version": "106.0.5976.192",
+    "grease_full_version": "106.0.0.0"
   },
   "screen": {
-    "width": 1536,
-    "height": 864,
-    "avail_width": 1536,
-    "avail_height": 824,
+    "width": 3840,
+    "height": 2160,
+    "avail_width": 3840,
+    "avail_height": 2120,
     "color_depth": 24,
     "pixel_depth": 24,
-    "device_pixel_ratio": 1.0,
+    "device_pixel_ratio": 1.5,
     "color_gamut": "srgb",
     "dynamic_range_high": false,
     "avail_left": 0,
     "avail_top": 0
   },
   "window": {
-    "outer_width": 1536,
-    "outer_height": 863,
-    "inner_width": 1536,
-    "inner_height": 728
+    "outer_width": 3840,
+    "outer_height": 2159,
+    "inner_width": 3840,
+    "inner_height": 2024
   },
   "webgl": {
     "vendor": "Google Inc. (Google)",
@@ -139,7 +139,7 @@
     }
   },
   "audio": {
-    "sample_rate": 48000,
+    "sample_rate": 44100,
     "channel_count": 2
   },
   "connection": {
@@ -211,7 +211,7 @@
   "noise": {
     "canvas": {
       "enabled": true,
-      "seed": 1838211919
+      "seed": 950516499
     },
     "webgl": {
       "enabled": false,

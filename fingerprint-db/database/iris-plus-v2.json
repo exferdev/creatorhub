@@ -12,18 +12,18 @@
       "en-US",
       "en"
     ],
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.7619.214 Safari/537.36",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.4926.792 Safari/537.36",
     "platform": "Windows",
     "platform_value": "Win32",
     "platform_version": "19.0.0",
-    "hardware_concurrency": 8,
+    "hardware_concurrency": 6,
     "device_memory": 8,
     "vendor": "Google Inc.",
     "max_touch_points": 0
   },
   "client_hints": {
     "brand": "Google Chrome",
-    "brand_version": "127",
+    "brand_version": "102",
     "platform_version": "19.0.0",
     "architecture": "x86",
     "bitness": "64",
@@ -32,8 +32,8 @@
     "grease_version": "24",
     "chrome_build": 0,
     "chrome_patch": 7827,
-    "brand_full_version": "127.0.7619.214",
-    "grease_full_version": "127.0.0.0"
+    "brand_full_version": "102.0.4926.792",
+    "grease_full_version": "102.0.0.0"
   },
   "screen": {
     "width": 2560,
@@ -211,7 +211,7 @@
   "noise": {
     "canvas": {
       "enabled": true,
-      "seed": 2036850606
+      "seed": 585602992
     },
     "webgl": {
       "enabled": false,

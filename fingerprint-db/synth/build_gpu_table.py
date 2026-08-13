@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 
 SRC = Path(os.path.expandvars(r"%LOCALAPPDATA%\shardx-sdk\fingerprints"))
-OUT = Path(__file__).resolve().parent / "gpu_table.json"
+OUT_DIR = Path(__file__).resolve().parent
+OUT = OUT_DIR / "gpu_table.json"   # win (默认); mac/linux 输出 gpu_table_mac.json 等
 
 # 30 主流型号 (NVIDIA 14 / AMD 9 / Intel 7)
 SELECT = [
@@ -25,8 +26,8 @@ SELECT = [
     "hd520", "hd620", "hd630", "uhd630", "uhd770", "iris-xe", "arc",
 ]
 
-def load(name: str) -> dict | None:
-    p = SRC / f"win-{name}.json"
+def load(name: str, prefix: str = "win") -> dict | None:
+    p = SRC / f"{prefix}-{name}.json"
     if not p.exists():
         return None
     return json.loads(p.read_text(encoding="utf-8"))
@@ -36,17 +37,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true",
                     help="提取全部 Windows 模板 (默认仅 30 主流型号)")
+    ap.add_argument("--platform", default="win",
+                    help="平台前缀: win | mac | linux (默认 win)")
     args = ap.parse_args()
     table = {}
+    prefix = args.platform
     if args.all:
-        targets = sorted(p.stem[4:] for p in SRC.glob("win-*.json"))
-        print(f"[all] 目标: {len(targets)} 个 Windows 模板")
+        targets = sorted(p.stem[len(prefix) + 1:] for p in SRC.glob(f"{prefix}-*.json"))
+        print(f"[all] {prefix} 目标: {len(targets)} 个模板")
     else:
-        targets = SELECT
+        targets = SELECT if prefix == "win" else []
     for name in targets:
-        d = load(name)
+        d = load(name, prefix)
         if not d:
-            print(f"[skip] {name}: 无样本")
+            print(f"[skip] {prefix}-{name}: 无样本")
             continue
         w = d.get("webgl", {})
         nav = d.get("navigator", {})
@@ -76,8 +80,9 @@ def main():
         table[name] = entry
         print(f"[ok] {name}: {w.get('renderer', '?')[:60]} | hw={entry['hw_range']} mem={entry['mem_range']}")
 
-    OUT.write_text(json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n已生成: {OUT} ({len(table)} 型号)")
+    out_path = OUT if prefix == "win" else OUT_DIR / f"gpu_table_{prefix}.json"
+    out_path.write_text(json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n已生成: {out_path} ({len(table)} 型号)")
 
 
 if __name__ == "__main__":

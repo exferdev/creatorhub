@@ -52,10 +52,24 @@ def gpu_generation(name: str) -> str:
 
 def check_renderer(prof: dict, issues: list):
     r = prof["webgl"]["renderer"]
-    if not r.startswith("ANGLE ("):
-        issues.append(f"renderer 非 ANGLE 格式: {r[:50]}")
-    if not re.search(r"0x[0-9A-Fa-f]{4,8}", r):
-        issues.append(f"renderer 缺设备 ID: {r[:50]}")
+    ua = prof["navigator"]["user_agent"]
+    # Linux 真实 renderer 为 DRM/LLVMpipe 格式 (非 ANGLE); macOS Apple 系为
+    # Metal 格式 (无 0x 设备 ID)。仅 Windows/ANGLE 场景严格要求完整格式。
+    is_win = "Windows" in ua
+    is_apple = "Apple" in r
+    is_linux = "X11; Linux" in ua
+    if is_win:
+        if not r.startswith("ANGLE ("):
+            issues.append(f"Windows renderer 非 ANGLE 格式: {r[:50]}")
+        if not re.search(r"0x[0-9A-Fa-f]{4,8}", r):
+            issues.append(f"renderer 缺设备 ID: {r[:50]}")
+    elif is_linux:
+        # Linux renderer 格式多样 (ANGLE Vulkan / LLVMpipe / DRM), 均真实, 只查乱码
+        pass
+    elif not is_apple:
+        # mac Intel/AMD 用 ANGLE; 也允许 Metal (Apple Silicon)
+        if not r.startswith("ANGLE (") and not r.startswith("Apple"):
+            issues.append(f"renderer 格式异常: {r[:50]}")
     if re.search(r"\s{2,}", r):
         issues.append(f"renderer 双空格: {r[:50]}")
 
@@ -90,10 +104,20 @@ def check_hw_mem(prof: dict, issues: list):
 def check_os_consistency(prof: dict, issues: list):
     ua = prof["navigator"]["user_agent"]
     renderer = prof["webgl"]["renderer"]
+    plat = prof["navigator"]["platform_value"]
     if "Windows" in ua and "Apple" in renderer:
         issues.append("Windows UA 配 Apple GPU")
     if "Mac OS" in ua and "NVIDIA" in renderer:
-        issues.append("macOS UA 配 NVIDIA GPU (Windows 场景不适用)")
+        issues.append("macOS UA 配 NVIDIA GPU")
+    if "X11; Linux" in ua and "Apple" in renderer:
+        issues.append("Linux UA 配 Apple GPU")
+    # platform_value 与 UA 平台一致
+    if "Windows" in ua and "Win32" not in plat:
+        issues.append(f"Windows UA 配 platform_value={plat}")
+    if "Mac OS" in ua and plat != "MacIntel":
+        issues.append(f"macOS UA 配 platform_value={plat}")
+    if "X11; Linux" in ua and "Linux" not in plat:
+        issues.append(f"Linux UA 配 platform_value={plat}")
     # 品牌 ↔ UA
     if "Edg/" in ua and prof.get("client_hints", {}).get("brand") != "Microsoft Edge":
         issues.append("Edge UA 配 Google Chrome 品牌")
@@ -112,7 +136,9 @@ def check_params_baseline(prof: dict, issues: list):
         if k in bp and k in p and p[k] != bp[k]:
             issues.append(f"{name} {k}: 合成 {p[k]} ≠ 基线 {bp[k]}")
     if prof["webgl"].get("max_texture_size") != base.get("max_texture_size"):
-        issues.append(f"{name} max_texture_size 与基线不符")
+        # 基线缺值时跳过 (真实样本可能未提供该字段)
+        if base.get("max_texture_size") is not None:
+            issues.append(f"{name} max_texture_size 与基线不符")
 
 
 def check_schema(prof: dict, issues: list):

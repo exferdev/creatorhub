@@ -12,18 +12,18 @@
       "en-US",
       "en"
     ],
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.4872.261 Safari/537.36",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.6711.602 Safari/537.36",
     "platform": "Windows",
     "platform_value": "Win32",
     "platform_version": "19.0.0",
-    "hardware_concurrency": 6,
+    "hardware_concurrency": 4,
     "device_memory": 8,
     "vendor": "Google Inc.",
     "max_touch_points": 0
   },
   "client_hints": {
     "brand": "Google Chrome",
-    "brand_version": "103",
+    "brand_version": "87",
     "platform_version": "19.0.0",
     "architecture": "x86",
     "bitness": "64",
@@ -32,27 +32,27 @@
     "grease_version": "24",
     "chrome_build": 0,
     "chrome_patch": 7827,
-    "brand_full_version": "103.0.4872.261",
-    "grease_full_version": "103.0.0.0"
+    "brand_full_version": "87.0.6711.602",
+    "grease_full_version": "87.0.0.0"
   },
   "screen": {
-    "width": 3840,
-    "height": 2160,
-    "avail_width": 3840,
-    "avail_height": 2120,
+    "width": 2560,
+    "height": 1440,
+    "avail_width": 2560,
+    "avail_height": 1400,
     "color_depth": 24,
     "pixel_depth": 24,
-    "device_pixel_ratio": 1.5,
+    "device_pixel_ratio": 1.0,
     "color_gamut": "srgb",
     "dynamic_range_high": false,
     "avail_left": 0,
     "avail_top": 0
   },
   "window": {
-    "outer_width": 3840,
-    "outer_height": 2159,
-    "inner_width": 3840,
-    "inner_height": 2024
+    "outer_width": 2560,
+    "outer_height": 1439,
+    "inner_width": 2560,
+    "inner_height": 1304
   },
   "webgl": {
     "vendor": "Google Inc. (Google)",
@@ -139,7 +139,7 @@
     }
   },
   "audio": {
-    "sample_rate": 48000,
+    "sample_rate": 44100,
     "channel_count": 2
   },
   "connection": {
@@ -211,7 +211,7 @@
   "noise": {
     "canvas": {
       "enabled": true,
-      "seed": 1812246038
+      "seed": 579159285
     },
     "webgl": {
       "enabled": false,

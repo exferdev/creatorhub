@@ -32,6 +32,21 @@ WINDOWS_VOICES = [
     {"name": "Microsoft David - English (United States)", "lang": "en-US", "local_service": True, "is_default": False},
     {"name": "Microsoft Mark - English (United States)", "lang": "en-US", "local_service": True, "is_default": False},
 ]
+# macOS 常见语音 (Apple 系统枚举)
+MAC_VOICES = [
+    {"name": "Tingting", "lang": "zh-CN", "local_service": True, "is_default": False},
+    {"name": "Sinji", "lang": "zh-HK", "local_service": True, "is_default": False},
+    {"name": "Meijia", "lang": "zh-TW", "local_service": True, "is_default": False},
+    {"name": "Samantha", "lang": "en-US", "local_service": True, "is_default": False},
+    {"name": "Alex", "lang": "en-US", "local_service": True, "is_default": False},
+    {"name": "Daniel", "lang": "en-GB", "local_service": True, "is_default": False},
+]
+# Linux 常见语音 (espeak/Google)
+LINUX_VOICES = [
+    {"name": "Google 普通话（中国大陆）", "lang": "zh-CN", "local_service": True, "is_default": False},
+    {"name": "Google US English", "lang": "en-US", "local_service": True, "is_default": False},
+    {"name": "Google UK English Female", "lang": "en-GB", "local_service": True, "is_default": False},
+]
 
 # GPU 世代 → Chrome 版本范围 (老 GPU 配老浏览器, 避免时间线矛盾)
 GENERATION_CHROME = {
@@ -42,19 +57,43 @@ GENERATION_CHROME = {
     "hd6": (80, 115), "uhd": (95, 130), "iris": (100, 130), "arc": (110, 135),
 }
 
-SCREENS = [
-    (1920, 1080, 1.0), (1920, 1080, 1.25), (1920, 1080, 1.5),
-    (2560, 1440, 1.0), (2560, 1440, 1.25), (2560, 1440, 1.5),
-    (1366, 768, 1.0), (1536, 864, 1.0), (1600, 900, 1.0),
-    (3840, 2160, 1.5), (2880, 1800, 1.0),
-]
+PLATFORM_CFG = {    "win": {
+        "voices": WINDOWS_VOICES,
+        "platform": "Windows", "platform_value": "Win32",
+        "ua_os": "Windows NT 10.0; Win64; x64",
+        "platform_version": "19.0.0", "arch": "x86", "bitness": "64",
+        "screens": [(1920, 1080, 1.0), (1920, 1080, 1.25), (1920, 1080, 1.5),
+                    (2560, 1440, 1.0), (2560, 1440, 1.25), (1366, 768, 1.0),
+                    (1536, 864, 1.0), (3840, 2160, 1.5), (2880, 1800, 1.0)],
+        "chrome": (95, 135),
+    },
+    "mac": {
+        "voices": MAC_VOICES,
+        "platform": "MacIntel", "platform_value": "MacIntel",
+        "ua_os": "Macintosh; Intel Mac OS X 10_15_7",
+        "platform_version": "15.0.0", "arch": "x86", "bitness": "64",
+        "screens": [(1440, 900, 2.0), (2560, 1600, 2.0), (1920, 1080, 1.0),
+                    (2560, 1440, 1.0), (2880, 1800, 2.0), (1512, 982, 2.0)],
+        "chrome": (95, 135),
+    },
+    "linux": {
+        "voices": LINUX_VOICES,
+        "platform": "Linux x86_64", "platform_value": "Linux x86_64",
+        "ua_os": "X11; Linux x86_64",
+        "platform_version": "6.5.0", "arch": "x86", "bitness": "64",
+        "screens": [(1920, 1080, 1.0), (1920, 1080, 1.25), (2560, 1440, 1.0),
+                    (1366, 768, 1.0), (3840, 2160, 1.5), (2560, 1080, 1.0)],
+        "chrome": (95, 135),
+    },
+}
 
 
-def gen_screen():
-    w, h, dpr = random.choice(SCREENS)
+def gen_screen(platform: str):
+    cfg = PLATFORM_CFG[platform]
+    w, h, dpr = random.choice(cfg["screens"])
     return {
         "width": w, "height": h,
-        "avail_width": w, "avail_height": h - 40,
+        "avail_width": w, "avail_height": h - (40 if platform == "win" else 24),
         "color_depth": 24, "pixel_depth": 24,
         "device_pixel_ratio": dpr,
         "color_gamut": "srgb", "dynamic_range_high": False,
@@ -102,23 +141,26 @@ def gpu_generation(name: str) -> str:
     return "gtx16"
 
 
-def gen_ua(rng: random.Random, gpu: dict, name: str) -> tuple[str, int, str, str]:
-    """UA + 品牌版本: 按 GPU 世代选 Chrome 版本, 与基线品牌保持一致。"""
+def gen_ua(rng: random.Random, gpu: dict, name: str, platform: str) -> tuple[str, int, str, str]:
+    """UA + 品牌版本: 按 GPU 世代选 Chrome 版本, 与平台/基线品牌保持一致。"""
     gen = gpu_generation(name)
-    lo, hi = GENERATION_CHROME.get(gen, (100, 130))
+    lo, hi = GENERATION_CHROME.get(gen, (95, 130))
     major = rng.randint(lo, hi)
     patch = rng.randint(0, 999)
     build = rng.randint(7000, 7999) if major >= 110 else rng.randint(4000, 6999)
-    ua = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    ua_os = PLATFORM_CFG[platform]["ua_os"]
+    ua = (f"Mozilla/5.0 ({ua_os}) AppleWebKit/537.36 "
           f"(KHTML, like Gecko) Chrome/{major}.0.{build}.{patch} Safari/537.36")
     return ua, major, f"{major}.0.{build}.{patch}", f"{major}.0.0.0"
 
 
-def gen_profile(gpu_name: str, rng: random.Random, variant: int) -> dict:
+def gen_profile(gpu_name: str, rng: random.Random, variant: int,
+                platform: str = "win") -> dict:
     gpu = TABLE[gpu_name]
+    pc = PLATFORM_CFG[platform]
     hw, mem = gen_hw_mem(gpu, rng)
-    ua, major, full_ver, grease_full = gen_ua(rng, gpu, gpu_name)
-    screen = gen_screen()
+    ua, major, full_ver, grease_full = gen_ua(rng, gpu, gpu_name, platform)
+    screen = gen_screen(platform)
     renderer = gpu["renderer"]
     m = re.search(r"0x[0-9A-Fa-f]{4,8}", renderer)
     device_id = m.group(0) if m else ""
@@ -141,15 +183,15 @@ def gen_profile(gpu_name: str, rng: random.Random, variant: int) -> dict:
             "accept_language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
             "languages": ["zh-CN", "zh", "en-US", "en"],
             "user_agent": ua,
-            "platform": "Windows", "platform_value": "Win32",
-            "platform_version": "19.0.0",
+            "platform": pc["platform"], "platform_value": pc["platform_value"],
+            "platform_version": pc["platform_version"],
             "hardware_concurrency": hw, "device_memory": mem,
             "vendor": "Google Inc.", "max_touch_points": 0,
         },
         "client_hints": {
             "brand": "Google Chrome", "brand_version": str(major),
-            "platform_version": "19.0.0", "architecture": "x86",
-            "bitness": "64", "mobile": False,
+            "platform_version": pc["platform_version"],
+            "architecture": pc["arch"], "bitness": pc["bitness"], "mobile": False,
             "grease_brand": "Not)A;Brand", "grease_version": "24",
             "chrome_build": int(gpu.get("brand_full_version", "").split(".")[1]) if "." in (gpu.get("brand_full_version") or "") else 7827,
             "chrome_patch": int(gpu.get("brand_full_version", "").split(".")[2]) if len((gpu.get("brand_full_version") or "").split(".")) > 2 else 103,
@@ -160,8 +202,7 @@ def gen_profile(gpu_name: str, rng: random.Random, variant: int) -> dict:
         "window": {
             "outer_width": screen["width"], "outer_height": screen["height"] - 1,
             "inner_width": screen["width"], "inner_height": screen["height"] - 136,
-        },
-        "webgl": {
+        },        "webgl": {
             "vendor": f"Google Inc. ({vendor})",
             "renderer": renderer,
             "vendor_masked": "WebKit",
@@ -193,7 +234,7 @@ def gen_profile(gpu_name: str, rng: random.Random, variant: int) -> dict:
                     "discharging_time": None},
         "media_devices": {"audio_input_count": 1, "audio_output_count": 1,
                           "video_input_count": 0},
-        "speech": {"voices": WINDOWS_VOICES},
+        "speech": {"voices": pc["voices"]},
         "noise": {
             "canvas": {"enabled": True, "seed": rng.randint(1, 2 ** 31)},
             "webgl": {"enabled": False, "seed": 0, "intensity": 0},
@@ -245,7 +286,15 @@ def main():
     ap.add_argument("--count", type=int, default=60, help="生成 profile 总数")
     ap.add_argument("--gpu", default=None, help="只生成指定型号")
     ap.add_argument("--variants", type=int, default=3, help="每型号变体数")
+    ap.add_argument("--platform", default="win", choices=["win", "mac", "linux"],
+                    help="平台 (win 用 gpu_table.json, mac/linux 用对应表)")
     args = ap.parse_args()
+
+    global TABLE
+    tbl_path = ROOT / "synth" / ("gpu_table.json" if args.platform == "win"
+                                 else f"gpu_table_{args.platform}.json")
+    TABLE = json.loads(tbl_path.read_text(encoding="utf-8"))
+    print(f"[synth] 平台={args.platform} 能力表={tbl_path.name} 型号={len(TABLE)}")
 
     DB.mkdir(parents=True, exist_ok=True)
     rng = random.Random(datetime.now().timestamp())
@@ -256,7 +305,7 @@ def main():
         for v in range(1, args.variants + 1):
             if args.count and count >= args.count:
                 break
-            prof = gen_profile(gpu_name, rng, v)
+            prof = gen_profile(gpu_name, rng, v, args.platform)
             path = DB / f"{prof['name']}.json"
             path.write_text(json.dumps(prof, ensure_ascii=False, indent=2), encoding="utf-8")
             count += 1
