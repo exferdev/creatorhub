@@ -205,6 +205,18 @@ class BrowserManager:
             return "chrome"
         return None
 
+    @staticmethod
+    def _rendering_mode_for(identity: Identity) -> str:
+        """按账号 seed 确定性分配渲染模式: gpu | swiftshader。
+
+        同一 GPU 下 canvas/WebGL 指纹由硬件决定, 任何浏览器 channel 都相同;
+        SwiftShader 软件渲染走完全不同的光栅化路径 → 指纹真实不同。
+        seed 固定 → 同账号每次一致。
+        """
+        import random as _rnd
+        rnd = _rnd.Random(identity.fp_seed or "0")
+        return "swiftshader" if rnd.random() < 0.5 else "gpu"
+
     def _normalize_ua(self, ua: str) -> str:
         """把账号 UA 的 Chrome/Edg 大版本对齐到真实内核版本(未探测到则原样返回)。
 
@@ -352,6 +364,11 @@ class BrowserManager:
             # 命令行参数已失效); WebRTC 约束仅在显式配置代理时加入,避免 UDP 绕过代理出口。
             kwargs["no_viewport"] = True
             native_args = []
+            # 渲染模式差异化: 同一 GPU 下 canvas/WebGL 指纹天然相同(硬件决定),
+            # 按账号 seed 分配 GPU / SwiftShader 软件渲染 → 真实不同的光栅化路径,
+            # canvas/WebGL 指纹真实不同且检测站视为正常(无GPU机器/远程桌面即软件渲染)。
+            if self._rendering_mode_for(identity) == "swiftshader":
+                native_args += ["--use-gl=swiftshader", "--enable-unsafe-swiftshader"]
             if proxy:
                 native_args.extend(_PROXY_WEBRTC_ARGS)
             kwargs["args"] = native_args
