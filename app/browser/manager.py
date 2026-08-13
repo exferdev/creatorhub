@@ -348,7 +348,12 @@ class BrowserManager:
         proxy = _parse_proxy(identity.proxy)
         kwargs: Dict[str, Any] = dict(
             headless=headless,
-            args=[f"--fingerprint={seed}"],
+            args=[
+                f"--fingerprint={seed}",
+                # 存储配额归一化为 5000MB, 呈现正常 profile (否则 BrowserScan
+                # 等检测站把默认配额读作隐身模式, 判定冒充新身份 -10%)。
+                "--fingerprint-storage-quota=5000",
+            ],
             viewport={"width": identity.viewport_w, "height": identity.viewport_h},
             locale=identity.locale or "zh-CN",
             timezone_id=identity.timezone_id or "Asia/Shanghai",
