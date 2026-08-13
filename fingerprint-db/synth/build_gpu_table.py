@@ -4,6 +4,7 @@ GPU 能力表生成器 — 从本地真实样本提取 30 主流型号的参数�
 数据来源: 本地缓存的真实设备样本 (参考参数值, GPU 能力为公开硬件规格)。
 输出: synth/gpu_table.json — 自建数据库的型号→参数映射核心。
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,6 @@ SELECT = [
     "hd520", "hd620", "hd630", "uhd630", "uhd770", "iris-xe", "arc",
 ]
 
-
 def load(name: str) -> dict | None:
     p = SRC / f"win-{name}.json"
     if not p.exists():
@@ -33,8 +33,17 @@ def load(name: str) -> dict | None:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--all", action="store_true",
+                    help="提取全部 Windows 模板 (默认仅 30 主流型号)")
+    args = ap.parse_args()
     table = {}
-    for name in SELECT:
+    if args.all:
+        targets = sorted(p.stem[4:] for p in SRC.glob("win-*.json"))
+        print(f"[all] 目标: {len(targets)} 个 Windows 模板")
+    else:
+        targets = SELECT
+    for name in targets:
         d = load(name)
         if not d:
             print(f"[skip] {name}: 无样本")

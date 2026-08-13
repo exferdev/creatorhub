@@ -1,0 +1,269 @@
+{
+  "name": "rx9060xt-v2",
+  "notes": "ANGLE (AMD, AMD Radeon RX 9060 XT (0x00007590) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "timezone": "Asia/Shanghai",
+  "icu_locale": "zh-CN",
+  "navigator": {
+    "language": "zh-CN",
+    "accept_language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "languages": [
+      "zh-CN",
+      "zh",
+      "en-US",
+      "en"
+    ],
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.6410.834 Safari/537.36",
+    "platform": "Windows",
+    "platform_value": "Win32",
+    "platform_version": "19.0.0",
+    "hardware_concurrency": 32,
+    "device_memory": 32,
+    "vendor": "Google Inc.",
+    "max_touch_points": 0
+  },
+  "client_hints": {
+    "brand": "Google Chrome",
+    "brand_version": "95",
+    "platform_version": "19.0.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "mobile": false,
+    "grease_brand": "Not)A;Brand",
+    "grease_version": "24",
+    "chrome_build": 0,
+    "chrome_patch": 7827,
+    "brand_full_version": "95.0.6410.834",
+    "grease_full_version": "95.0.0.0"
+  },
+  "screen": {
+    "width": 1920,
+    "height": 1080,
+    "avail_width": 1920,
+    "avail_height": 1040,
+    "color_depth": 24,
+    "pixel_depth": 24,
+    "device_pixel_ratio": 1.5,
+    "color_gamut": "srgb",
+    "dynamic_range_high": false,
+    "avail_left": 0,
+    "avail_top": 0
+  },
+  "window": {
+    "outer_width": 1920,
+    "outer_height": 1079,
+    "inner_width": 1920,
+    "inner_height": 944
+  },
+  "webgl": {
+    "vendor": "Google Inc. (Google)",
+    "renderer": "ANGLE (AMD, AMD Radeon RX 9060 XT (0x00007590) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "vendor_masked": "WebKit",
+    "renderer_masked": "WebKit WebGL",
+    "max_texture_size": 16384,
+    "max_vertex_attribs": 16,
+    "extensions": [
+      "EXT_clip_control",
+      "EXT_color_buffer_float",
+      "EXT_color_buffer_half_float",
+      "EXT_conservative_depth",
+      "EXT_depth_clamp",
+      "EXT_disjoint_timer_query_webgl2",
+      "EXT_float_blend",
+      "EXT_polygon_offset_clamp",
+      "EXT_render_snorm",
+      "EXT_texture_compression_bptc",
+      "EXT_texture_compression_rgtc",
+      "EXT_texture_filter_anisotropic",
+      "EXT_texture_mirror_clamp_to_edge",
+      "EXT_texture_norm16",
+      "KHR_parallel_shader_compile",
+      "NV_shader_noperspective_interpolation",
+      "OES_draw_buffers_indexed",
+      "OES_sample_variables",
+      "OES_shader_multisample_interpolation",
+      "OES_texture_float_linear",
+      "OVR_multiview2",
+      "WEBGL_blend_func_extended",
+      "WEBGL_clip_cull_distance",
+      "WEBGL_compressed_texture_s3tc",
+      "WEBGL_compressed_texture_s3tc_srgb",
+      "WEBGL_debug_renderer_info",
+      "WEBGL_debug_shaders",
+      "WEBGL_lose_context",
+      "WEBGL_multi_draw",
+      "WEBGL_polygon_mode",
+      "WEBGL_provoking_vertex",
+      "WEBGL_stencil_texturing"
+    ],
+    "params": {},
+    "shader_precision": {}
+  },
+  "webgl2": {},
+  "webgpu": {
+    "vendor": "google",
+    "architecture": "unknown",
+    "device": "0x00007590",
+    "description": "ANGLE (AMD",
+    "limits": {
+      "maxTextureDimension1D": 16384,
+      "maxTextureDimension2D": 16384,
+      "maxTextureDimension3D": 2048,
+      "maxTextureArrayLayers": 2048,
+      "maxBindGroups": 4,
+      "maxBindGroupsPlusVertexBuffers": 24,
+      "maxBindingsPerBindGroup": 1000,
+      "maxDynamicUniformBuffersPerPipelineLayout": 8,
+      "maxDynamicStorageBuffersPerPipelineLayout": 4,
+      "maxSampledTexturesPerShaderStage": 16,
+      "maxSamplersPerShaderStage": 16,
+      "maxStorageBuffersPerShaderStage": 8,
+      "maxStorageTexturesPerShaderStage": 4,
+      "maxUniformBuffersPerShaderStage": 12,
+      "maxUniformBufferBindingSize": 65536,
+      "maxStorageBufferBindingSize": 2147483647,
+      "minUniformBufferOffsetAlignment": 256,
+      "minStorageBufferOffsetAlignment": 256,
+      "maxVertexBuffers": 8,
+      "maxBufferSize": 268435456,
+      "maxVertexAttributes": 16,
+      "maxVertexBufferArrayStride": 2048,
+      "maxInterStageShaderVariables": 15,
+      "maxColorAttachments": 8,
+      "maxColorAttachmentBytesPerSample": 32,
+      "maxComputeWorkgroupStorageSize": 16384,
+      "maxComputeInvocationsPerWorkgroup": 256,
+      "maxComputeWorkgroupSizeX": 256,
+      "maxComputeWorkgroupSizeY": 256,
+      "maxComputeWorkgroupSizeZ": 64,
+      "maxComputeWorkgroupsPerDimension": 65535
+    }
+  },
+  "audio": {
+    "sample_rate": 48000,
+    "channel_count": 2
+  },
+  "connection": {
+    "effective_type": "4g",
+    "downlink_mbps": 10.0,
+    "rtt_msec": 75,
+    "save_data": false
+  },
+  "storage_estimate": {
+    "quota_gb": 10
+  },
+  "webauthn": {
+    "uvpa": true
+  },
+  "memory": {
+    "heap_size_limit": 4294967296
+  },
+  "battery": {
+    "charging": true,
+    "level": 1.0,
+    "charging_time": 0,
+    "discharging_time": null
+  },
+  "media_devices": {
+    "audio_input_count": 1,
+    "audio_output_count": 1,
+    "video_input_count": 0
+  },
+  "speech": {
+    "voices": [
+      {
+        "name": "Microsoft Huihui - Chinese (Simplified, PRC)",
+        "lang": "zh-CN",
+        "local_service": true,
+        "is_default": false
+      },
+      {
+        "name": "Microsoft Yaoyao - Chinese (Simplified, PRC)",
+        "lang": "zh-CN",
+        "local_service": true,
+        "is_default": false
+      },
+      {
+        "name": "Microsoft Kangkang - Chinese (Simplified, PRC)",
+        "lang": "zh-CN",
+        "local_service": true,
+        "is_default": false
+      },
+      {
+        "name": "Microsoft Zira - English (United States)",
+        "lang": "en-US",
+        "local_service": true,
+        "is_default": false
+      },
+      {
+        "name": "Microsoft David - English (United States)",
+        "lang": "en-US",
+        "local_service": true,
+        "is_default": false
+      },
+      {
+        "name": "Microsoft Mark - English (United States)",
+        "lang": "en-US",
+        "local_service": true,
+        "is_default": false
+      }
+    ]
+  },
+  "noise": {
+    "canvas": {
+      "enabled": true,
+      "seed": 308894411
+    },
+    "webgl": {
+      "enabled": false,
+      "seed": 0,
+      "intensity": 0
+    },
+    "audio": {
+      "enabled": false,
+      "seed": 0
+    },
+    "client_rects": {
+      "enabled": false,
+      "seed": 0,
+      "max_offset": 0
+    },
+    "sensors": {
+      "enabled": false,
+      "seed": 0
+    },
+    "fonts": {
+      "enabled": false,
+      "seed": 0
+    }
+  },
+  "tls": {
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49171,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ],
+    "signature_algorithms": [
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537
+    ],
+    "shuffle_extensions": true
+  }
+}
