@@ -350,9 +350,10 @@ class BrowserManager:
             headless=headless,
             args=[
                 f"--fingerprint={seed}",
-                # 存储配额归一化为 5000MB, 呈现正常 profile (否则 BrowserScan
-                # 等检测站把默认配额读作隐身模式, 判定冒充新身份 -10%)。
-                "--fingerprint-storage-quota=5000",
+                # 存储配额设为 30GB 呈现正常 profile。实测 BrowserScan:
+                # 5000MB 仍被判定隐身(-10%), 30000MB 通过 — 正常 Chrome 配额
+                # 通常数 GB~数十 GB, 阈值高于 README 旧示例的 5000。
+                "--fingerprint-storage-quota=30000",
             ],
             viewport={"width": identity.viewport_w, "height": identity.viewport_h},
             locale=identity.locale or "zh-CN",
