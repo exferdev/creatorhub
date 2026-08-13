@@ -365,6 +365,27 @@ class BrowserManager:
             return f"{scheme}{proxy['username']}:{proxy.get('password', '')}@{host}"
         return server
 
+    def _pick_custom_profile(self, identity: Identity) -> Any:
+        """从自建指纹库 (fingerprint-db/database) 按 fp_seed 确定性选 profile。
+
+        数据主权: 434 套跨平台合成 profile (真机基线+公开硬件规格+一致性规则),
+        ShardX 引擎格式兼容。fp_seed 固定 → 同账号每次同 profile/同指纹。
+        """
+        try:
+            db = Path(__file__).resolve().parent.parent.parent / "fingerprint-db" / "database"
+            if not db.exists():
+                return None
+            files = sorted(db.glob("*.json"))
+            if not files:
+                return None
+            idx = self._fingerprint_seed_from(identity.fp_seed) % len(files)
+            from shardx import Profile
+            prof = Profile.from_file(str(files[idx]))
+            # 合成 profile 已带确定性 canvas 噪声 (noise.canvas.enabled/seed), 直接生效
+            return prof
+        except Exception:
+            return None
+
     async def _launch_shardx(self, identity: Identity, headless: bool) -> BrowserContext:
         """ShardX 引擎级启动 (Chromium 149, 170 真机设备库)。
 
@@ -373,31 +394,37 @@ class BrowserManager:
         .shardx_id 持久化 → 同账号每次同指纹/同 profile 状态。
         """
         self._patch_pathlib_utf8()
-        from shardx import ShardX
+        from shardx import ShardX, Profile
         if self._shardx_sdk is None:
             self._shardx_sdk = ShardX()
         sdk = self._shardx_sdk
         pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
-        sid_file = pdir / ".shardx_id"
-        prof = None
-        if sid_file.exists():
-            try:
-                prof = sdk.open_profile(sid_file.read_text(encoding="utf-8").strip())
-            except Exception:
-                prof = None
-        if prof is None:
-            templates = sdk.list_profiles(platform="Windows")
-            if not templates:
-                templates = sdk.list_profiles()
-            idx = self._fingerprint_seed_from(identity.fp_seed) % len(templates)
-            prof = sdk.create_profile(templates[idx])
-            prof.set_noise("canvas")          # canvas 确定性噪声; audio/webgl 保持真实
-            sdk.save_profile(prof)
-            try:
-                sid_file.write_text(prof.id, encoding="utf-8")
-            except Exception:
-                pass
+        # 自建指纹库优先 (fingerprint-db): fp_seed 确定性选 profile (数据主权,
+        # 434 套跨平台合成库, 与 ShardX 引擎格式兼容)。失败回退 ShardX 自带库。
+        prof = self._pick_custom_profile(identity)
+        if prof is not None:
+            print(f"[browser] shardx profile: 自建库 {prof.config.get('name')}")
+        else:
+            sid_file = pdir / ".shardx_id"
+            prof = None
+            if sid_file.exists():
+                try:
+                    prof = sdk.open_profile(sid_file.read_text(encoding="utf-8").strip())
+                except Exception:
+                    prof = None
+            if prof is None:
+                templates = sdk.list_profiles(platform="Windows")
+                if not templates:
+                    templates = sdk.list_profiles()
+                idx = self._fingerprint_seed_from(identity.fp_seed) % len(templates)
+                prof = sdk.create_profile(templates[idx])
+                prof.set_noise("canvas")          # canvas 确定性噪声; audio/webgl 保持真实
+                sdk.save_profile(prof)
+                try:
+                    sid_file.write_text(prof.id, encoding="utf-8")
+                except Exception:
+                    pass
         proxy_url = self._proxy_to_url(_parse_proxy(identity.proxy))
         bsess = sdk.launch(prof, cdp=True, proxy=proxy_url, headless=headless)
         try:
