@@ -1,0 +1,246 @@
+{
+  "name": "nvidia-geforce-rtx-4070-ti-super",
+  "navigator": {
+    "language": "zh-CN",
+    "languages": [
+      "zh-CN",
+      "zh"
+    ],
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "platform": "Win32",
+    "platform_value": "Win32",
+    "hardware_concurrency": 20,
+    "device_memory": 32,
+    "vendor": "Google Inc.",
+    "max_touch_points": 0,
+    "platform_version": "19.0.0"
+  },
+  "client_hints": {
+    "brand": "Google Chrome",
+    "brand_version": "151",
+    "platform_version": "19.0.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "mobile": false,
+    "brand_full_version": "151.0.7922.108"
+  },
+  "screen": {
+    "width": 1280,
+    "height": 720,
+    "avail_width": 1280,
+    "avail_height": 720,
+    "color_depth": 24,
+    "pixel_depth": 24,
+    "device_pixel_ratio": 1,
+    "avail_left": 0,
+    "avail_top": 0
+  },
+  "window": {
+    "outer_width": 1296,
+    "outer_height": 808,
+    "inner_width": 1280,
+    "inner_height": 720
+  },
+  "webgl": {
+    "vendor": "Google Inc. (NVIDIA)",
+    "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Ti SUPER (0x00002705) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "vendor_masked": "WebKit",
+    "renderer_masked": "WebKit WebGL",
+    "max_texture_size": 16384,
+    "max_vertex_attribs": 16,
+    "extensions": [
+      "ANGLE_instanced_arrays",
+      "EXT_blend_minmax",
+      "EXT_clip_control",
+      "EXT_color_buffer_half_float",
+      "EXT_depth_clamp",
+      "EXT_disjoint_timer_query",
+      "EXT_float_blend",
+      "EXT_frag_depth",
+      "EXT_polygon_offset_clamp",
+      "EXT_shader_texture_lod",
+      "EXT_texture_compression_bptc",
+      "EXT_texture_compression_rgtc",
+      "EXT_texture_filter_anisotropic",
+      "EXT_texture_mirror_clamp_to_edge",
+      "EXT_sRGB",
+      "KHR_parallel_shader_compile",
+      "OES_element_index_uint",
+      "OES_fbo_render_mipmap",
+      "OES_standard_derivatives",
+      "OES_texture_float",
+      "OES_texture_float_linear",
+      "OES_texture_half_float",
+      "OES_texture_half_float_linear",
+      "OES_vertex_array_object",
+      "WEBGL_blend_func_extended",
+      "WEBGL_color_buffer_float",
+      "WEBGL_compressed_texture_s3tc",
+      "WEBGL_compressed_texture_s3tc_srgb",
+      "WEBGL_debug_renderer_info",
+      "WEBGL_debug_shaders",
+      "WEBGL_depth_texture",
+      "WEBGL_draw_buffers",
+      "WEBGL_lose_context",
+      "WEBGL_multi_draw",
+      "WEBGL_polygon_mode"
+    ],
+    "shader_precision": {
+      "35633_36336": [
+        127,
+        127,
+        23
+      ],
+      "35633_36337": [
+        127,
+        127,
+        23
+      ],
+      "35633_36338": [
+        127,
+        127,
+        23
+      ],
+      "35633_36339": [
+        31,
+        30,
+        0
+      ],
+      "35633_36340": [
+        31,
+        30,
+        0
+      ],
+      "35633_36341": [
+        31,
+        30,
+        0
+      ],
+      "35632_36336": [
+        127,
+        127,
+        23
+      ],
+      "35632_36337": [
+        127,
+        127,
+        23
+      ],
+      "35632_36338": [
+        127,
+        127,
+        23
+      ],
+      "35632_36339": [
+        31,
+        30,
+        0
+      ],
+      "35632_36340": [
+        31,
+        30,
+        0
+      ],
+      "35632_36341": [
+        31,
+        30,
+        0
+      ]
+    },
+    "params": {
+      "ALIASED_LINE_WIDTH_RANGE": [
+        1.0,
+        1.0
+      ],
+      "ALIASED_POINT_SIZE_RANGE": [
+        1.0,
+        1024.0
+      ],
+      "MAX_VIEWPORT_DIMS": [
+        32767,
+        32767
+      ],
+      "MAX_TEXTURE_SIZE": 16384,
+      "MAX_CUBE_MAP_TEXTURE_SIZE": 16384,
+      "MAX_RENDERBUFFER_SIZE": 16384,
+      "MAX_VERTEX_ATTRIBS": 16,
+      "MAX_VERTEX_TEXTURE_IMAGE_UNITS": 16,
+      "MAX_VERTEX_UNIFORM_VECTORS": 4095,
+      "MAX_VARYING_VECTORS": 30,
+      "MAX_FRAGMENT_UNIFORM_VECTORS": 1024,
+      "MAX_TEXTURE_IMAGE_UNITS": 16,
+      "MAX_COMBINED_TEXTURE_IMAGE_UNITS": 32,
+      "SUBPIXEL_BITS": 4,
+      "RED_BITS": 8,
+      "GREEN_BITS": 8,
+      "BLUE_BITS": 8,
+      "ALPHA_BITS": 8,
+      "DEPTH_BITS": 24,
+      "STENCIL_BITS": 0,
+      "MAX_SAMPLES": null,
+      "VERSION": "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+      "VENDOR": "WebKit",
+      "RENDERER": "WebKit WebGL",
+      "SHADING_LANGUAGE_VERSION": "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+      "MAX_TEXTURE_MAX_ANISOTROPY_EXT": null
+    }
+  },
+  "webgl2": {
+    "MAX_DRAW_BUFFERS": 8,
+    "MAX_COLOR_ATTACHMENTS": 8,
+    "MAX_VERTEX_UNIFORM_COMPONENTS": 16380,
+    "MAX_VERTEX_UNIFORM_BLOCKS": 12,
+    "MAX_FRAGMENT_UNIFORM_COMPONENTS": 4096,
+    "MAX_FRAGMENT_UNIFORM_BLOCKS": 12,
+    "MAX_UNIFORM_BUFFER_BINDINGS": 24,
+    "MAX_UNIFORM_BLOCK_SIZE": 65536,
+    "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS": 212988,
+    "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS": 200704,
+    "MAX_TEXTURE_LOD_BIAS": 2,
+    "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS": 120,
+    "MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS": 4,
+    "MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS": 4,
+    "MAX_SERVER_WAIT_TIMEOUT": 0,
+    "MAX_ELEMENT_INDEX": 4294967294,
+    "MAX_FRAGMENT_INPUT_COMPONENTS": 120,
+    "MAX_VERTEX_OUTPUT_COMPONENTS": 120,
+    "MAX_SAMPLE_MASK_WORDS": null,
+    "MAX_COLOR_TEXTURE_SAMPLES": null,
+    "MAX_DEPTH_TEXTURE_SAMPLES": null,
+    "MAX_INTEGER_SAMPLES": null,
+    "MAX_VARYING_COMPONENTS": 120,
+    "MAX_TEXTURE_IMAGE_UNITS": 16
+  },
+  "webgpu": {
+    "vendor": "nvidia",
+    "architecture": "lovelace",
+    "device": "",
+    "description": "",
+    "limits": {}
+  },
+  "audio": {
+    "sample_rate": 48000,
+    "channel_count": 2,
+    "offline_sum": 0.07153781037004592,
+    "offline_threshold": -50
+  },
+  "speech": {
+    "voices": []
+  },
+  "storage_estimate": {
+    "quota_gb": 7
+  },
+  "connection": {
+    "effective_type": "4g",
+    "downlink_mbps": 1.6,
+    "rtt_msec": 100,
+    "save_data": false
+  },
+  "webauthn": {
+    "uvpa": true
+  },
+  "memory": {
+    "heap_size_limit": 4395630592
+  },
+  "notes": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Ti SUPER (0x00002705) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+}
