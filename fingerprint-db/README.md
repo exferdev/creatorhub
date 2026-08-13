@@ -109,6 +109,16 @@ rtx4060-v1 经 ShardX 引擎:
   OS/浏览器: Windows 11 / Chrome 149 ✅
 ```
 
+### CreepJS 实测（`creepjs_test.py`）
+
+```
+rtx4060-v1 经 ShardX 引擎 (abrahamjuliot.github.io/creepjs):
+  lies (伪装检测): 0 命中 ✅ (无 lied/suspicious/bold-fail)
+  WebGL:  85370944 正常指纹 hash ✅
+  Canvas: 8cff56a0 正常 ✅
+  Audio:  37d44314 正常 ✅
+```
+
 ## 数据来源与合规
 
 - **真机采集**: 在真实系统 Chrome 运行 probe.js 采集（本机 RTX 4070 Ti SUPER 真实基线）
@@ -126,5 +136,5 @@ rtx4060-v1 经 ShardX 引擎:
 - [x] 多平台（macOS/Linux 合成基线）
 - [x] 合成 profile 的 BrowserScan 实测
 - [x] CreatorHub 集成（fp_seed 确定性选择自建库）
+- [x] 合成 profile 的 CreepJS 实测
 - [ ] 多真机采集基线扩充（更多真实样本）
-- [ ] 合成 profile 的 CreepJS 实测
