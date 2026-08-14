@@ -16,6 +16,7 @@
   - API 网关触发器: 创建后请按输出指引在控制台绑定 (或 tccli scf CreateTrigger)
 """
 import argparse
+import base64
 import io
 import json
 import os
@@ -26,15 +27,39 @@ ROOT = Path(__file__).resolve().parent.parent  # tencent/
 PROJECT = ROOT.parent                          # fingerprint-db/
 
 
+def _load_env_file() -> dict:
+    """读取 .env.local (KEY=VALUE, 值支持引号包裹), 环境变量优先。"""
+    result = {}
+    path = ROOT / ".env.local"
+    if not path.exists():
+        return result
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip()
+        if v[:1] == '"' and v[-1:] == '"':
+            v = v[1:-1]
+        elif v[:1] == "'" and v[-1:] == "'":
+            v = v[1:-1]
+        result[k.strip()] = v
+    return result
+
+
 def check_env() -> dict:
+    file_env = _load_env_file()
     env = {
-        "TENCENTCLOUD_SECRET_ID": os.environ.get("TENCENTCLOUD_SECRET_ID", ""),
-        "TENCENTCLOUD_SECRET_KEY": os.environ.get("TENCENTCLOUD_SECRET_KEY", ""),
-        "FINGERPRINT_API_KEY": os.environ.get("FINGERPRINT_API_KEY", "dev-key"),
+        "TENCENTCLOUD_SECRET_ID": os.environ.get("TENCENTCLOUD_SECRET_ID")
+                                  or file_env.get("TENCENTCLOUD_SECRET_ID", ""),
+        "TENCENTCLOUD_SECRET_KEY": os.environ.get("TENCENTCLOUD_SECRET_KEY")
+                                   or file_env.get("TENCENTCLOUD_SECRET_KEY", ""),
+        "FINGERPRINT_API_KEY": os.environ.get("FINGERPRINT_API_KEY")
+                               or file_env.get("FINGERPRINT_API_KEY", "dev-key"),
     }
     if not env["TENCENTCLOUD_SECRET_ID"] or not env["TENCENTCLOUD_SECRET_KEY"]:
         raise SystemExit("[deploy] 缺少 TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY "
-                         "(腾讯云控制台→访问管理→API密钥管理)")
+                         "(腾讯云控制台→访问管理→API密钥管理, 或填入 tencent/.env.local)")
     return env
 
 
@@ -42,10 +67,14 @@ def build_code_zip() -> bytes:
     """打包 tencent/ 为 SCF 代码包 (lib + funcs + requirements.txt)。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for base in ("lib", "funcs"):
-            for f in (ROOT / base).rglob("*"):
-                if f.is_file() and "__pycache__" not in str(f):
-                    z.write(f, f.relative_to(ROOT).as_posix())
+        # SCF Python handler 要求模块在 zip 根目录: ingest.main_handler
+        for f in (ROOT / "funcs").glob("*.py"):
+            z.write(f, f.name)
+        # lib 作为子包
+        z.writestr("lib/__init__.py", "")
+        for f in (ROOT / "lib").rglob("*"):
+            if f.is_file() and "__pycache__" not in str(f):
+                z.write(f, f.relative_to(ROOT).as_posix())
         req = ROOT / "requirements.txt"
         z.write(req, "requirements.txt")
     return buf.getvalue()
@@ -63,7 +92,7 @@ def init_cos(bucket: str, region: str, env: dict):
         client.head_bucket(Bucket=bucket)
         print(f"[COS] bucket 已存在: {bucket}")
     except Exception:
-        client.create_bucket(Bucket=bucket, BucketConfig={"BucketAZConfig": "MAZ"})
+        client.create_bucket(Bucket=bucket)
         print(f"[COS] 创建 bucket: {bucket}")
     # 2. 目录占位 (COS 无目录概念, 写一个占位文件)
     client.put_object(Bucket=bucket, Key="profiles/win/",
@@ -109,11 +138,19 @@ def deploy_functions(bucket: str, region: str, env: dict):
         "COS_SECRET_KEY": env["TENCENTCLOUD_SECRET_KEY"],
         "API_KEY": env["FINGERPRINT_API_KEY"],
     }
+    env_vars = []
+    for k, v in common_env.items():
+        vv = models.Variable()
+        vv.Key = k
+        vv.Value = v
+        env_vars.append(vv)
+    env_obj = models.Environment()
+    env_obj.Variables = env_vars
 
     for name, handler, timeout in (
-        ("ingest", "funcs.ingest.main_handler", 60),
-        ("synth", "funcs.synth.main_handler", 300),
-        ("serve", "funcs.serve.main_handler", 60),
+        ("ingest", "ingest.main_handler", 60),
+        ("synth", "synth.main_handler", 300),
+        ("serve", "serve.main_handler", 60),
     ):
         req = models.CreateFunctionRequest()
         req.FunctionName = name
@@ -121,8 +158,9 @@ def deploy_functions(bucket: str, region: str, env: dict):
         req.Runtime = "Python3.9"
         req.Timeout = timeout
         req.MemorySize = 128
-        req.Environment = {"Variables": common_env}
-        req.Code = {"ZipFile": code_zip}
+        req.Environment = env_obj
+        # SCF 的 ZipFile 是 base64 字符串, 非原始 bytes
+        req.Code = {"ZipFile": base64.b64encode(code_zip).decode()}
         try:
             resp = client.CreateFunction(req)
             print(f"[SCF] 创建 {name}: {resp.RequestId}")
@@ -132,12 +170,12 @@ def deploy_functions(bucket: str, region: str, env: dict):
                 upd = models.UpdateFunctionCodeRequest()
                 upd.FunctionName = name
                 upd.Handler = handler
-                upd.Code = {"ZipFile": code_zip}
+                upd.Code = {"ZipFile": base64.b64encode(code_zip).decode()}
                 client.UpdateFunctionCode(upd)
                 ue = models.UpdateFunctionConfigurationRequest()
                 ue.FunctionName = name
                 ue.Timeout = timeout
-                ue.Environment = {"Variables": common_env}
+                ue.Environment = env_obj
                 client.UpdateFunctionConfiguration(ue)
                 print(f"[SCF] 更新 {name}")
             else:
