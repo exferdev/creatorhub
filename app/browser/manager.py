@@ -366,20 +366,13 @@ class BrowserManager:
         return server
 
     def _pick_custom_profile(self, identity: Identity) -> Any:
-        """从自建指纹库按 fp_seed 确定性选 profile。
+        """从自建指纹库 (fingerprint-db/database) 按 fp_seed 确定性选 profile。
 
-        数据源 (优先级):
-          1. COS 远端 (fingerprint-db-1251558724 静态网站, 首次拉取缓存到本地)
-          2. 本地 fingerprint-db/database (离线兜底)
-        fp_seed 固定 → 同账号每次同 profile/同指纹。
+        数据主权: 434 套跨平台合成 profile (真机基线+公开硬件规格+一致性规则),
+        ShardX 引擎格式兼容。fp_seed 固定 → 同账号每次同 profile/同指纹。
         """
         try:
             db = Path(__file__).resolve().parent.parent.parent / "fingerprint-db" / "database"
-            # 1. 远端同步 (COS 静态网站 → 本地缓存, 幂等/低频)
-            synced = self._sync_cos_profiles(db)
-            if synced:
-                print(f"[browser] COS 指纹库同步: {synced} 套")
-            # 2. 本地库选择
             if not db.exists():
                 return None
             files = sorted(db.glob("*.json"))
@@ -388,43 +381,10 @@ class BrowserManager:
             idx = self._fingerprint_seed_from(identity.fp_seed) % len(files)
             from shardx import Profile
             prof = Profile.from_file(str(files[idx]))
+            # 合成 profile 已带确定性 canvas 噪声 (noise.canvas.enabled/seed), 直接生效
             return prof
         except Exception:
             return None
-
-    _cos_sync_mtime = 0.0   # 远端同步节流 (类级, 每进程最多每 600s 一次)
-
-    def _sync_cos_profiles(self, db: Path) -> int:
-        """从 COS 静态网站拉取 profiles/ 到本地缓存 (幂等, 按 mtime 节流)。
-
-        COS 静态网站: https://fingerprint-db-1251558724.cos-website.ap-shanghai.myqcloud.com
-        策略: profiles/* 公开读。拉取成功后本地优先 (版本一致性由 synth_timer 保证)。
-        """
-        import time as _time
-        now = _time.time()
-        if now - self._cos_sync_mtime < 600:
-            return 0
-        self._cos_sync_mtime = now
-        try:
-            import curl_cffi.requests as cr
-            base = ("https://fingerprint-db-1251558724.cos-website."
-                    "ap-shanghai.myqcloud.com/profiles")
-            # 分平台拉取 (win/mac/linux 清单, 简单方案: 尝试公共型号)
-            # 首次同步用 COS ListObjects API 更准, 这里用直链探测常见文件
-            # 生产化: 拉 meta/version.json 对比本地缓存版本
-            count = 0
-            for plat in ("win", "mac", "linux"):
-                # 用 version.json 判断是否更新 (公开读需放开 meta 或改 profiles 索引)
-                # 简化: 每平台拉一个已知 profile 探测连通性, 完整同步留给 synth_timer
-                test = f"{base}/{plat}/rtx4060-v1.json" if plat == "win" else \
-                       (f"{base}/{plat}/m1-air13-v1.json" if plat == "mac"
-                        else f"{base}/{plat}/gt1030-v1.json")
-                r = cr.get(test, timeout=8)
-                if r.status_code == 200:
-                    count += 1
-            return count if count else 0
-        except Exception:
-            return 0
 
     async def _launch_shardx(self, identity: Identity, headless: bool) -> BrowserContext:
         """ShardX 引擎级启动 (Chromium 149, 170 真机设备库)。

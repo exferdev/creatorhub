@@ -196,9 +196,6 @@ async def lifespan(app: FastAPI):
     engine.start()
     from .engine.im_receiver import ImReceiverManager
     im_receiver = ImReceiverManager(browser)
-    # 预加载 V8 签名引擎（抖音协议发布用，约 15s）
-    from .platforms.douyin.signer import ensure_ready
-    ensure_ready()
     yield
     if im_receiver:
         await im_receiver.stop_all()
