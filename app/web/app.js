@@ -2509,6 +2509,14 @@ async function loadSettings() {
       $("ai-prompt").value = s.ai_prompt || "";
       $("ai-key").placeholder = s.ai_api_key_set ? "已保存(留空=不修改)" : "API Key";
     }
+    if ($("fpdb-base-url")) {
+      $("fpdb-base-url").value = s.fingerprint_db_base_url || "";
+      $("fpdb-base-url").placeholder = s.fingerprint_db_base_url ? "" : "未配置(文件直读)";
+      $("fpdb-read-key").value = s.fingerprint_db_read_key_set ? "已配置" : "";
+      $("fpdb-read-key").placeholder = s.fingerprint_db_read_key_set ? "" : "未配置";
+      $("fpdb-dir").value = s.fingerprint_db_dir || "";
+      $("fpdb-dir").placeholder = s.fingerprint_db_dir ? "" : "—";
+    }
     csSyncAll();
   } catch (e) {}
 }

@@ -1794,6 +1794,35 @@
       </div>
     </div>
   </div>
+
+  <!-- 指纹数据源(只读, 改 config.yaml 后重启) -->
+  <div class="card">
+    <div class="card-head">
+      <span class="card-ic"><svg><use href="#i-card"/></svg></span>
+      <h2>指纹数据源 <span class="sub">fingerprint-db · 只读展示</span></h2>
+    </div>
+    <div class="form-grid download-grid">
+      <div class="form-field">
+        <label>指纹库 API 地址</label>
+        <input id="fpdb-base-url" value="" readonly placeholder="未配置(文件直读)">
+        <div class="field-help">非空时浏览器 tab 优先走 fingerprint-db HTTP API 确定性选择</div>
+      </div>
+      <div class="form-field">
+        <label>读 Token</label>
+        <input id="fpdb-read-key" value="" readonly placeholder="未配置">
+        <div class="field-help">已配置 / 未配置（不回显明文）</div>
+      </div>
+      <div class="form-field">
+        <label>文件直读路径</label>
+        <input id="fpdb-dir" value="" readonly placeholder="—">
+        <div class="field-help">API 未配置或不可达时的回退数据源</div>
+      </div>
+    </div>
+    <div class="form-note">
+      <svg aria-hidden="true"><use href="#i-info"/></svg>
+      <span>以上为只读展示，修改需编辑 <code>config.yaml</code> 的 <code>engine</code> 段后重启服务。</span>
+    </div>
+  </div>
   </section>
 
   <section data-panel="publish">
