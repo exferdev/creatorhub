@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,6 +23,7 @@ from playwright.async_api import BrowserContext, async_playwright
 from ..windowing import (CHROMIUM_WINDOW_CLASSES, bring_window_to_front,
                          capture_window_snapshot)
 from .identity import Identity, fingerprint_script
+from .fingerprint_store import FingerprintDbClient, host_platform_key
 from .cdp import (CdpLaunchError, CdpProfileConflictError, CdpProxyError,
                   CdpProxyAuthController, XhsCdpBackend)
 from .proxy import ProxyConfigError, ProxyPlan, try_proxy_plan
@@ -121,7 +124,10 @@ class BrowserManager:
     def __init__(self, default_ua: str, profiles_root: str = "./data/profiles",
                  max_live: int = 6, native_ua_callback=None,
                  xhs_browser_mode: str = "auto",
-                 xhs_cdp_idle_seconds: int = 900):
+                 xhs_cdp_idle_seconds: int = 900,
+                 fingerprint_db_dir: str = "",
+                 fingerprint_db_base_url: str = "",
+                 fingerprint_db_read_key: str = ""):
         self.default_ua = default_ua
         self.profiles_root = profiles_root
         self.max_live = max(1, max_live)
@@ -131,6 +137,10 @@ class BrowserManager:
             else "auto"
         )
         self.xhs_cdp_idle_seconds = max(0, int(xhs_cdp_idle_seconds))
+        # fingerprint-db 数据源 (API 优先, 文件回退)
+        self._fingerprint_db_dir = fingerprint_db_dir
+        self._fpdb_client = FingerprintDbClient(
+            fingerprint_db_base_url, fingerprint_db_read_key)
         self._pw = None
         self._contexts: Dict[Any, BrowserContext] = {}   # key -> 持久化 context
         self._cdp_sessions: Dict[Any, Any] = {}
@@ -365,33 +375,92 @@ class BrowserManager:
             return f"{scheme}{proxy['username']}:{proxy.get('password', '')}@{host}"
         return server
 
-    def _pick_custom_profile(self, identity: Identity) -> Any:
-        """从自建指纹库 (fingerprint-db/database) 按 fp_seed 确定性选 profile。
+    async def _pick_custom_profile(self, identity: Identity) -> Any:
+        """按 fp_seed 确定性选 fingerprint-db profile (API 优先, 文件回退)。
 
-        数据主权: 434 套跨平台合成 profile (真机基线+公开硬件规格+一致性规则),
-        ShardX 引擎格式兼容。fp_seed 固定 → 同账号每次同 profile/同指纹。
+        数据主权: 独立项目 fingerprint-db (434 套跨平台合成 profile, 真机基线+
+        公开硬件规格+一致性规则), ShardX 引擎格式兼容。fp_seed 固定 →
+        同账号每次同 profile/同指纹。
+
+        平台过滤: ShardX 引擎是宿主 OS 的二进制 (Windows 上无法真正伪装成
+        Linux/macOS 的字体/语音/TLS 栈)。若 fp_seed 命中 Linux/Mac profile 会造成
+        OS 级不一致。因此只选与宿主 OS 同平台的 profile, 避免跨平台盲选。
+
+        数据源优先级:
+          1. fingerprint-db HTTP API (fingerprint_db_base_url 非空) — 走
+             /profiles/list + 确定性选择 + /profiles/{name}
+          2. 文件直读 (fingerprint_db_dir/database/*.json) — API 未配或失败时回退
         """
+        from shardx import Profile
+
+        # 1) API 优先
+        if self._fpdb_client.enabled:
+            data = await self._fpdb_client.pick(
+                identity.fp_seed, host_platform_key())
+            if data is not None:
+                return Profile(dict(data))
+
+        # 2) 文件回退
         try:
-            db = Path(__file__).resolve().parent.parent.parent / "fingerprint-db" / "database"
+            db = Path(self._fingerprint_db_dir) / "database"
             if not db.exists():
                 return None
             files = sorted(db.glob("*.json"))
             if not files:
                 return None
+            # 宿主 OS 平台过滤 (ShardX 引擎随宿主系统, 只能稳定伪装同平台指纹)
+            if sys.platform.startswith("win"):
+                host_ua = "Windows"
+            elif sys.platform == "darwin":
+                host_ua = "Mac OS"
+            else:
+                host_ua = "Linux"
+            matched = []
+            for f in files:
+                try:
+                    j = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                ua = (j.get("navigator") or {}).get("user_agent", "")
+                if host_ua in ua:
+                    matched.append(f)
+            if matched:
+                files = matched
             idx = self._fingerprint_seed_from(identity.fp_seed) % len(files)
-            from shardx import Profile
             prof = Profile.from_file(str(files[idx]))
-            # 合成 profile 已带确定性 canvas 噪声 (noise.canvas.enabled/seed), 直接生效
             return prof
         except Exception:
             return None
 
-    async def _launch_shardx(self, identity: Identity, headless: bool) -> BrowserContext:
+    async def _load_named_profile(self, name: str) -> Any:
+        """按 name 直接加载 fingerprint-db profile (API 优先, 文件回退)。"""
+        from shardx import Profile
+
+        if self._fpdb_client.enabled:
+            try:
+                data = await self._fpdb_client.load_profile(name)
+                return Profile(dict(data))
+            except Exception:
+                pass
+        try:
+            path = Path(self._fingerprint_db_dir) / "database" / f"{name}.json"
+            if path.exists():
+                return Profile.from_file(str(path))
+        except Exception:
+            pass
+        return None
+
+    async def _launch_shardx(self, identity: Identity, headless: bool,
+                             fingerprint_name: str = "") -> BrowserContext:
         """ShardX 引擎级启动 (Chromium 149, 170 真机设备库)。
 
         真机 GPU/硬件/UA 模板内部一致 → BrowserScan WebGL/Audio/隐身 全过 (实测)。
-        canvas 确定性 per-profile 噪声差异化且无痕; fp_seed 确定性选模板 +
-        .shardx_id 持久化 → 同账号每次同指纹/同 profile 状态。
+        自建指纹库 (fingerprint-db) 首次由 fp_seed 确定性选定后固化为按账号唯一的
+        ShardX 持久化 profile (.fpdb_id 记 id), 后续 open_profile 复用 → 同账号每次
+        同指纹, 且对库演进 (增删/重生成) 免疫; 失败回退 ShardX 自带库 (.shardx_id)。
+
+        fingerprint_name 非空时, 跳过 seed 确定性选择, 直接加载指定 fingerprint-db
+        profile (独立 profile 用)。
         """
         self._patch_pathlib_utf8()
         from shardx import ShardX, Profile
@@ -400,12 +469,43 @@ class BrowserManager:
         sdk = self._shardx_sdk
         pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
-        # 自建指纹库优先 (fingerprint-db): fp_seed 确定性选 profile (数据主权,
-        # 434 套跨平台合成库, 与 ShardX 引擎格式兼容)。失败回退 ShardX 自带库。
-        prof = self._pick_custom_profile(identity)
-        if prof is not None:
-            print(f"[browser] shardx profile: 自建库 {prof.config.get('name')}")
+        # 自建指纹库优先 (fingerprint-db): 用 ShardX 持久化 profile 固化"账号→指纹"映射。
+        # 首次由 fp_seed 确定性选一个 fingerprint-db profile, 保存为按账号唯一的 ShardX
+        # 持久化 profile 并记下其 id; 后续 open_profile 直接复用冻结副本。这样映射对库演进
+        # (增删/重生成 profile) 免疫 — 修复 fp_seed % len(files) 漂移, 保证同账号同指纹。
+        fp_id_file = pdir / ".fpdb_id"
+        prof = None
+        if fp_id_file.exists():
+            fid = fp_id_file.read_text(encoding="utf-8").strip()
+            if fid:
+                try:
+                    prof = sdk.open_profile(fid)
+                except Exception:
+                    prof = None
+        if prof is None:
+            picked = None
+            if fingerprint_name:
+                picked = await self._load_named_profile(fingerprint_name)
+            else:
+                picked = await self._pick_custom_profile(identity)
+            if picked is not None:
+                fid = "fpdb-" + uuid.uuid4().hex
+                prof = Profile(dict(picked.config), id=fid)
+                try:
+                    sdk.save_profile(prof)
+                except Exception:
+                    pass
+                try:
+                    fp_id_file.write_text(fid, encoding="utf-8")
+                except Exception:
+                    pass
+                print(f"[browser] shardx profile: 自建库 {picked.config.get('name')} (已固化 {fid})")
+            else:
+                prof = None
         else:
+            print(f"[browser] shardx profile: 自建库持久化 {prof.id}")
+        if prof is None:
+            # 回退 ShardX 自带库 (原有 .shardx_id 逻辑)
             sid_file = pdir / ".shardx_id"
             prof = None
             if sid_file.exists():
@@ -820,6 +920,38 @@ class BrowserManager:
         await asyncio.to_thread(bring_window_to_front, snapshot,
                                 CHROMIUM_WINDOW_CLASSES, "", 1.5)
         return ctx
+
+    # ── 独立 profile (ShardX Launcher 式, 与登录账号解耦) ──
+    async def launch_profile(self, *, name: str, fingerprint_name: str,
+                             fp_seed: str, proxy: str, profile_dir: str,
+                             headless: bool = False) -> BrowserContext:
+        """启动一个独立 profile 并返回其 context (ctx._shardx_bsess.cdp_url 可用)。
+
+        不绑定账号登录态, 纯指纹+代理+持久化目录。指纹来源:
+          fingerprint_name 非空 → 固定加载该 fingerprint-db profile;
+          空 → 按 fp_seed 确定性选择 (同 profile_dir 每次同指纹)。
+        """
+        pdir = Path(profile_dir) if profile_dir else (
+            Path(self.profiles_root) / "profile_" + uuid.uuid4().hex)
+        pdir.mkdir(parents=True, exist_ok=True)
+        identity = Identity(
+            account_id=None, profile_dir=str(pdir),
+            identity_mode="native", proxy=proxy or "",
+            fp_seed=fp_seed or uuid.uuid4().hex)
+        ctx = await self._launch_shardx(
+            identity, headless=headless, fingerprint_name=fingerprint_name)
+        return ctx
+
+    async def stop_profile(self, ctx: BrowserContext) -> None:
+        """关闭独立 profile 的浏览器进程。"""
+        if ctx is None:
+            return
+        with suppress(Exception):
+            await ctx.close()
+        bsess = getattr(ctx, "_shardx_bsess", None)
+        if bsess is not None:
+            with suppress(Exception):
+                bsess.stop()
 
 
 # 各平台 Cookie 顶域(子域如 creator./edith. 都吃顶域 cookie,一个就够)

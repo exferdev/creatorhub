@@ -448,6 +448,23 @@ class AccountActionTask(SQLModel, table=True):
     done_at: Optional[datetime] = None
 
 
+class BrowserProfile(SQLModel, table=True):
+    """独立浏览器 profile (ShardX Launcher 式, 与登录账号解耦)。
+
+    一套独立的指纹 + 代理 + 持久化 user-data-dir, 可脱离账号创建/管理/启动。
+    fingerprint_name 非空 = 固定 fingerprint-db profile; 空 = 按 fp_seed 确定性选。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""                          # 展示名
+    fingerprint_name: str = ""              # fingerprint-db profile 名(空=按 fp_seed 选)
+    fp_seed: str = ""                       # 指纹种子(确定性选择用)
+    proxy: str = ""                         # 代理 http://user:pass@host:port / socks5://...
+    folder: str = Field(default="", index=True)  # 分组标签
+    note: str = ""                          # 备注
+    profile_dir: str = ""                   # 持久化 user-data-dir
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ShareDownloadRecord(SQLModel, table=True):
     """分享链接下载历史。只读作品信息不会写入，实际下载成功或失败都会记录。"""
     id: Optional[int] = Field(default=None, primary_key=True)

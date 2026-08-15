@@ -42,6 +42,11 @@ class EngineConfig:
     )
     # ── 多账号风控隔离 ──
     profiles_dir: str = "./data/profiles"   # 每账号持久化浏览器 profile 根目录
+    fingerprint_db_dir: str = "E:/fingerprint-db"  # 独立指纹库项目根目录(已拆分,默认本机路径,可改服务器/共享盘)
+    # fingerprint-db HTTP API (ShardX Launcher 数据通道)。base_url 非空时优先走 API
+    # 确定性选择, 失败回退 fingerprint_db_dir 文件直读。
+    fingerprint_db_base_url: str = ""       # 例: https://127.0.0.1:8100 (空=直读文件)
+    fingerprint_db_read_key: str = ""       # API 读 token (服务未配鉴权则留空)
     max_live_contexts: int = 6              # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存)
     # 小红书浏览器:默认优先连接 CreatorHub 管理的每账号系统 Chrome CDP。
     xhs_browser_mode: str = "auto"          # auto | cdp | playwright

@@ -71,7 +71,8 @@ from .models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                      NotificationChannel, ProxyPool, PublishTask,
                      AccountWork, FollowEdge, DmConversation, DmMessage,
                      AccountActionTask, AccountStatSnapshot,
-                     ShareDownloadRecord, AccountRiskState, RiskEvent)
+                     ShareDownloadRecord, AccountRiskState, RiskEvent,
+                     BrowserProfile)
 from .notifier import CHANNEL_TYPES, send_one
 from .profiles import (ensure_identity, migrate_identities, assign_proxy_from_pool,
                        release_proxy_reservation, reserve_proxy_from_pool,
@@ -91,6 +92,8 @@ im_receiver = None      # ImReceiverManager(私信实时接收)
 login_tasks: Dict[str, dict] = {}
 # 用户手动打开的账号浏览器窗口(account_id -> BrowserContext),留引用防 GC、便于复用/清理
 open_browsers: Dict[int, Any] = {}
+# 独立 profile 运行中的浏览器(profile_id -> BrowserContext),留引用防 GC
+profile_browsers: Dict[int, Any] = {}
 _file_manager_lock = threading.Lock()
 _share_download_sem = asyncio.Semaphore(2)
 
@@ -183,7 +186,10 @@ async def lifespan(app: FastAPI):
         cfg.engine.user_agent, cfg.engine.profiles_dir,
         cfg.engine.max_live_contexts, native_ua_callback=_persist_native_ua,
         xhs_browser_mode=cfg.engine.xhs_browser_mode,
-        xhs_cdp_idle_seconds=cfg.engine.xhs_cdp_idle_seconds)
+        xhs_cdp_idle_seconds=cfg.engine.xhs_cdp_idle_seconds,
+        fingerprint_db_dir=cfg.engine.fingerprint_db_dir,
+        fingerprint_db_base_url=cfg.engine.fingerprint_db_base_url,
+        fingerprint_db_read_key=cfg.engine.fingerprint_db_read_key)
     await browser.start()
     engine = MonitorEngine(cfg, browser)
     startup_now = datetime.utcnow()
@@ -6259,6 +6265,121 @@ async def test_channel(cid: int):
     ok, detail = await send_one(ch_type, cfg, "CreatorHub · 测试通知",
                                 "这是一条测试消息,收到说明渠道配置正常 ✓")
     return {"ok": ok, "detail": detail}
+
+
+# ─────────── 独立 profile (ShardX Launcher 式) ───────────
+class ProfileIn(BaseModel):
+    name: str = ""
+    fingerprint_name: str = ""
+    fp_seed: str = ""
+    proxy: str = ""
+    folder: str = ""
+    note: str = ""
+
+
+def _profile_dict(p: BrowserProfile) -> dict:
+    return {
+        "id": p.id, "name": p.name,
+        "fingerprint_name": p.fingerprint_name, "fp_seed": p.fp_seed,
+        "proxy": _mask_proxy(p.proxy), "folder": p.folder, "note": p.note,
+        "profile_dir": p.profile_dir,
+        "running": p.id in profile_browsers,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@app.get("/api/browser-profiles")
+async def list_browser_profiles():
+    with get_session() as s:
+        rows = s.exec(select(BrowserProfile).order_by(BrowserProfile.id.desc())).all()
+        return [_profile_dict(p) for p in rows]
+
+
+@app.post("/api/browser-profiles")
+async def create_browser_profile(body: ProfileIn):
+    fp_seed = body.fp_seed or uuid.uuid4().hex
+    pdir = str(Path(cfg.engine.profiles_dir) / ("prof_" + uuid.uuid4().hex))
+    with get_session() as s:
+        prof = BrowserProfile(
+            name=body.name or f"profile-{uuid.uuid4().hex[:6]}",
+            fingerprint_name=body.fingerprint_name,
+            fp_seed=fp_seed,
+            proxy=body.proxy, folder=body.folder, note=body.note,
+            profile_dir=pdir)
+        s.add(prof); s.commit(); s.refresh(prof)
+        return _profile_dict(prof)
+
+
+@app.get("/api/browser-profiles/{profile_id}")
+async def get_browser_profile(profile_id: int):
+    with get_session() as s:
+        p = s.get(BrowserProfile, profile_id)
+        if not p:
+            raise HTTPException(404, "profile 不存在")
+        return _profile_dict(p)
+
+
+@app.patch("/api/browser-profiles/{profile_id}")
+async def edit_browser_profile(profile_id: int, body: ProfileIn):
+    with get_session() as s:
+        p = s.get(BrowserProfile, profile_id)
+        if not p:
+            raise HTTPException(404, "profile 不存在")
+        for k in ("name", "fingerprint_name", "fp_seed", "proxy", "folder", "note"):
+            v = getattr(body, k)
+            if v:
+                setattr(p, k, v)
+        s.add(p); s.commit(); s.refresh(p)
+        return _profile_dict(p)
+
+
+@app.delete("/api/browser-profiles/{profile_id}")
+async def delete_browser_profile(profile_id: int):
+    import shutil
+    # 先停运行中的实例
+    old = profile_browsers.pop(profile_id, None)
+    if old is not None and browser is not None:
+        await browser.stop_profile(old)
+    with get_session() as s:
+        p = s.get(BrowserProfile, profile_id)
+        if not p:
+            raise HTTPException(404, "profile 不存在")
+        pdir = p.profile_dir
+        s.delete(p); s.commit()
+    if pdir:
+        shutil.rmtree(pdir, ignore_errors=True)
+    return {"ok": True}
+
+
+@app.post("/api/browser-profiles/{profile_id}/start")
+async def start_browser_profile(profile_id: int, headless: bool = False):
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    with get_session() as s:
+        p = s.get(BrowserProfile, profile_id)
+        if not p:
+            raise HTTPException(404, "profile 不存在")
+        name, fingerprint_name = p.name, p.fingerprint_name
+        fp_seed, proxy, pdir = p.fp_seed, p.proxy, p.profile_dir
+    # 已运行则先停旧的(同一 profile 不能并存)
+    old = profile_browsers.pop(profile_id, None)
+    if old is not None:
+        await browser.stop_profile(old)
+    ctx = await browser.launch_profile(
+        name=name, fingerprint_name=fingerprint_name, fp_seed=fp_seed,
+        proxy=proxy, profile_dir=pdir, headless=headless)
+    profile_browsers[profile_id] = ctx
+    cdp_url = getattr(getattr(ctx, "_shardx_bsess", None), "cdp_url", None)
+    return {"ok": True, "profile_id": profile_id, "headless": headless,
+            "cdp_url": cdp_url}
+
+
+@app.post("/api/browser-profiles/{profile_id}/stop")
+async def stop_browser_profile(profile_id: int):
+    old = profile_browsers.pop(profile_id, None)
+    if old is not None and browser is not None:
+        await browser.stop_profile(old)
+    return {"ok": True, "stopped": old is not None}
 
 
 # ─────────── 前端 ───────────
