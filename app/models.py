@@ -31,6 +31,8 @@ class DouyinAccount(SQLModel, table=True):
     timezone_id: str = "Asia/Shanghai"
     locale: str = "zh-CN"
     fp_seed: str = ""             # 指纹种子(canvas/webgl/navigator 据此确定性生成,保证每次一致)
+    browser_profile_id: Optional[int] = Field(default=None, index=True)  # 反向关联独立 BrowserProfile
+    shardx_id: str = ""           # 绑定的 ShardX profile id(fpdb-xxx);非空则 open_profile 复用,跳过 fp_seed 随机
     geo_lat: float = 0.0          # geolocation 伪造纬度(代理体检时按出口 IP 归属地写入;0=按种子派生兜底)
     geo_lon: float = 0.0          # geolocation 伪造经度
     proxy_status: str = "unknown"  # unknown | ok | bad
@@ -462,6 +464,7 @@ class BrowserProfile(SQLModel, table=True):
     folder: str = Field(default="", index=True)  # 分组标签
     note: str = ""                          # 备注
     profile_dir: str = ""                   # 持久化 user-data-dir
+    shardx_id: str = ""                     # 启动后固化的 ShardX profile id(fpdb-xxx)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

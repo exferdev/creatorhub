@@ -2471,6 +2471,10 @@ def _settings_dict() -> dict:
         "ai_temperature": get_setting("ai_temperature", "0.9"),
         # 不回传明文 key,只告知是否已配置
         "ai_api_key_set": bool(get_setting("ai_api_key", "")),
+        # fingerprint-db 数据源 (只读, 改 config.yaml 后重启)
+        "fingerprint_db_base_url": cfg.engine.fingerprint_db_base_url,
+        "fingerprint_db_read_key_set": bool(cfg.engine.fingerprint_db_read_key),
+        "fingerprint_db_dir": cfg.engine.fingerprint_db_dir,
     }
 
 
@@ -6283,12 +6287,19 @@ class CookieImportIn(BaseModel):
 
 
 def _profile_dict(p: BrowserProfile) -> dict:
+    accounts = []
+    with get_session() as s:
+        accs = s.exec(select(DouyinAccount).where(
+            DouyinAccount.browser_profile_id == p.id)).all()
+        accounts = [{"id": a.id, "platform": a.platform,
+                     "nickname": a.nickname} for a in accs]
     return {
         "id": p.id, "name": p.name,
         "fingerprint_name": p.fingerprint_name, "fp_seed": p.fp_seed,
         "proxy": _mask_proxy(p.proxy), "folder": p.folder, "note": p.note,
-        "profile_dir": p.profile_dir,
+        "profile_dir": p.profile_dir, "shardx_id": p.shardx_id,
         "running": p.id in profile_browsers,
+        "accounts": accounts,
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
@@ -6313,6 +6324,12 @@ async def create_browser_profile(body: ProfileIn):
             profile_dir=pdir)
         s.add(prof); s.commit(); s.refresh(prof)
         return _profile_dict(prof)
+
+
+@app.get("/api/browser-profiles/reuse-check")
+async def reuse_check(fingerprint_name: str):
+    """复用检测: 返回相同 fingerprint_name 的已有 profile。"""
+    return {"ok": True, "candidates": _reuse_candidates(fingerprint_name)}
 
 
 @app.get("/api/browser-profiles/{profile_id}")
@@ -6374,9 +6391,20 @@ async def start_browser_profile(profile_id: int, headless: bool = False):
         name=name, fingerprint_name=fingerprint_name, fp_seed=fp_seed,
         proxy=proxy, profile_dir=pdir, headless=headless)
     profile_browsers[profile_id] = ctx
+    # 固化后回填 shardx_id 到 DB (首次启动固化, 后续复用)
+    sid = getattr(ctx, "_shardx_id", "")
+    if sid:
+        try:
+            with get_session() as s:
+                p2 = s.get(BrowserProfile, profile_id)
+                if p2 and not p2.shardx_id:
+                    p2.shardx_id = sid
+                    s.add(p2); s.commit()
+        except Exception:
+            pass
     cdp_url = getattr(getattr(ctx, "_shardx_bsess", None), "cdp_url", None)
     return {"ok": True, "profile_id": profile_id, "headless": headless,
-            "cdp_url": cdp_url}
+            "cdp_url": cdp_url, "shardx_id": sid}
 
 
 @app.post("/api/browser-profiles/{profile_id}/stop")
@@ -6385,6 +6413,105 @@ async def stop_browser_profile(profile_id: int):
     if old is not None and browser is not None:
         await browser.stop_profile(old)
     return {"ok": True, "stopped": old is not None}
+
+
+# ─────────── 账号 ↔ 独立 profile 关联 (ShardID) ───────────
+class BindProfileIn(BaseModel):
+    profile_id: int
+
+
+def _reuse_candidates(fingerprint_name: str, exclude_id: int | None = None) -> list[dict]:
+    """相同 fingerprint_name 的已有 profile 列表 (复用检测)。"""
+    with get_session() as s:
+        q = select(BrowserProfile).where(
+            BrowserProfile.fingerprint_name == fingerprint_name)
+        if exclude_id is not None:
+            q = q.where(BrowserProfile.id != exclude_id)
+        rows = s.exec(q).all()
+        return [{"id": p.id, "name": p.name, "shardx_id": p.shardx_id}
+                for p in rows]
+
+
+@app.post("/api/accounts/{account_id}/create-profile")
+async def create_profile_from_account(account_id: int, body: ProfileIn | None = None):
+    """反向生成: 从账号生成独立 profile, 含复用检测。
+
+    - 复用检测命中(相同 fingerprint_name 已有 profile) → 返回 reuse=true + candidates
+    - 否则创建新 profile 并绑定账号 (写 browser_profile_id + shardx_id, 清 fp_seed)
+    """
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if not acc:
+            raise HTTPException(404, "账号不存在")
+        fingerprint_name = (body.fingerprint_name if body else "") or ""
+        fp_seed = acc.fp_seed
+        proxy = acc.proxy
+        # 若账号已绑定 profile, 直接返回 (避免重复创建)
+        if acc.browser_profile_id:
+            return {"ok": True, "reuse": True,
+                    "profile_id": acc.browser_profile_id,
+                    "candidates": []}
+    # 复用检测
+    if fingerprint_name:
+        cands = _reuse_candidates(fingerprint_name)
+        if cands:
+            return {"ok": True, "reuse": True, "candidates": cands}
+    # 创建新 profile 并绑定
+    pdir = str(Path(cfg.engine.profiles_dir) / ("prof_" + uuid.uuid4().hex))
+    with get_session() as s:
+        prof = BrowserProfile(
+            name=(body.name if body else "") or f"profile-{acc.nickname or account_id}",
+            fingerprint_name=fingerprint_name,
+            fp_seed=fp_seed or uuid.uuid4().hex,
+            proxy=proxy or (body.proxy if body else ""),
+            profile_dir=pdir)
+        s.add(prof); s.commit(); s.refresh(prof)
+        pid = prof.id
+        acc2 = s.get(DouyinAccount, account_id)
+        acc2.browser_profile_id = pid
+        acc2.fp_seed = ""          # 明确: 改由 profile 接管
+        s.add(acc2); s.commit()
+    return {"ok": True, "reuse": False, "profile_id": pid}
+
+
+@app.post("/api/accounts/{account_id}/bind-profile")
+async def bind_account_profile(account_id: int, body: BindProfileIn):
+    """账号绑定已有 profile (复用路径)。写 browser_profile_id + shardx_id, 清 fp_seed。"""
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if not acc:
+            raise HTTPException(404, "账号不存在")
+        prof = s.get(BrowserProfile, body.profile_id)
+        if not prof:
+            raise HTTPException(404, "profile 不存在")
+        pid = prof.id
+        sid = prof.shardx_id or ""
+        acc.browser_profile_id = pid
+        acc.shardx_id = sid
+        acc.fp_seed = ""
+        s.add(acc); s.commit()
+    return {"ok": True, "account_id": account_id, "profile_id": pid}
+
+
+@app.post("/api/accounts/{account_id}/unbind-profile")
+async def unbind_account_profile(account_id: int):
+    """解绑: 清 browser_profile_id + shardx_id, 恢复 fp_seed 回退。"""
+    from .profiles import seed_from_id
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if not acc:
+            raise HTTPException(404, "账号不存在")
+        acc.browser_profile_id = None
+        acc.shardx_id = ""
+        acc.fp_seed = seed_from_id(account_id)
+        s.add(acc); s.commit()
+    return {"ok": True}
+
+
+@app.post("/api/browser-profiles/{profile_id}/bind-account")
+async def bind_profile_account(profile_id: int, account_id: int):
+    """profile 侧绑定账号 (等价 bind-account-profile, 方向相反)。"""
+    return await bind_account_profile(account_id, BindProfileIn(profile_id=profile_id))
 
 
 # ─────────── 独立 profile cookie 导入导出 (Playwright storage_state, 不碰 SQLite 解密) ───────────

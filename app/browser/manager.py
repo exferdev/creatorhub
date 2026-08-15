@@ -475,13 +475,22 @@ class BrowserManager:
         # (增删/重生成 profile) 免疫 — 修复 fp_seed % len(files) 漂移, 保证同账号同指纹。
         fp_id_file = pdir / ".fpdb_id"
         prof = None
-        if fp_id_file.exists():
+        # 0) 账号绑定独立 profile 时: 优先 open_profile(shardx_id) 复用该指纹, 跳过 fp_seed 随机
+        if identity.shardx_id:
+            try:
+                prof = sdk.open_profile(identity.shardx_id)
+                print(f"[browser] shardx profile: 绑定复用 {identity.shardx_id}")
+            except Exception:
+                prof = None
+        # 1) 自建指纹库固化 (.fpdb_id) — 账号首次 fp_seed 选型后的冻结副本
+        if prof is None and fp_id_file.exists():
             fid = fp_id_file.read_text(encoding="utf-8").strip()
             if fid:
                 try:
                     prof = sdk.open_profile(fid)
                 except Exception:
                     prof = None
+        # 2) 确定性选择 (fingerprint-db API 或文件)
         if prof is None:
             picked = None
             if fingerprint_name:
@@ -535,6 +544,7 @@ class BrowserManager:
                 bsess.stop()
             raise
         ctx._shardx_bsess = bsess  # type: ignore[attr-defined]  # 关闭时杀进程
+        ctx._shardx_id = getattr(prof, "id", "")  # type: ignore[attr-defined]  # 固化后回填 shardx_id
         # probe 实际 UA 回写 (真机模板生成, 同账号每次一致)
         probe_page = None
         try:

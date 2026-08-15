@@ -70,6 +70,8 @@ class Identity:
     timezone_id: str = DEFAULT_TZ
     locale: str = DEFAULT_LOCALE
     fp_seed: str = ""
+    # 绑定的 ShardX profile id(fpdb-xxx);非空则 launch 时 open_profile 复用,跳过 fp_seed 随机
+    shardx_id: str = ""
     # geolocation 伪造坐标(与代理 IP 归属地/时区对齐)。0 表示未设定,由 seed 派生兜底。
     geo_lat: float = 0.0
     geo_lon: float = 0.0
@@ -111,6 +113,7 @@ class Identity:
             timezone_id=acc.timezone_id or DEFAULT_TZ,
             locale=acc.locale or DEFAULT_LOCALE,
             fp_seed=acc.fp_seed or seed_from_id(acc.id),
+            shardx_id=getattr(acc, "shardx_id", "") or "",
             geo_lat=getattr(acc, "geo_lat", 0.0) or 0.0,
             geo_lon=getattr(acc, "geo_lon", 0.0) or 0.0,
             bridge_states=bridge,
