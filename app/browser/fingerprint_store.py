@@ -91,6 +91,24 @@ class FingerprintDbClient:
         except Exception:
             return None
 
+    async def randomize(self, name: str) -> Optional[dict]:
+        """加载指定 fingerprint 并随机化硬件/平台版本 (不持久化)。
+
+        复刻 ShardX Launcher /fingerprint/new 语义: 基于一个库 profile,
+        重新随机 hardware_concurrency/device_memory/platform_version,
+        返回新的 config dict。改 GPU 后重随机配套硬件用。
+        """
+        cfg = await self.load_profile(name)
+        if cfg is None:
+            return None
+        try:
+            from shardx import randomize_hardware, randomize_platform_version
+            randomize_hardware(cfg)
+            randomize_platform_version(cfg)
+        except Exception:
+            pass
+        return cfg
+
 
 def _seed_from(fp_seed: str) -> int:
     """fp_seed(hex) → 确定性整数种子 (复刻 Launcher/CreatorHub _fingerprint_seed_from)。"""

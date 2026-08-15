@@ -34,6 +34,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
                       fetch_dm_history)
+from .browser.fingerprint_store import host_platform_key
 from .platforms.douyin import (
     DouyinClient,
     cookie_from_state as douyin_cookie_from_state,
@@ -6380,6 +6381,42 @@ async def stop_browser_profile(profile_id: int):
     if old is not None and browser is not None:
         await browser.stop_profile(old)
     return {"ok": True, "stopped": old is not None}
+
+
+# ─────────── fingerprint-db 指纹浏览/随机化 (ShardX Launcher 式) ───────────
+@app.get("/api/fingerprints/list")
+async def list_fingerprints(platform: str | None = None):
+    """列 fingerprint-db profile 元数据 (有序, 供前端展示/选择)。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    try:
+        profiles = await browser._fpdb_client.list_profiles(
+            platform or host_platform_key())
+    except Exception:
+        raise HTTPException(502, "fingerprint-db API 不可达")
+    return {"ok": True, "count": len(profiles), "profiles": profiles}
+
+
+@app.get("/api/fingerprints/{name}")
+async def get_fingerprint(name: str):
+    """取单个 fingerprint 完整 JSON。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    cfg = await browser._load_named_profile(name)
+    if cfg is None:
+        raise HTTPException(404, f"fingerprint {name!r} not found")
+    return cfg.config
+
+
+@app.post("/api/fingerprints/{name}/randomize")
+async def randomize_fingerprint(name: str):
+    """基于指定 fingerprint 随机化硬件/平台版本, 返回新 config (不持久化)。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    cfg = await browser._fpdb_client.randomize(name)
+    if cfg is None:
+        raise HTTPException(404, f"fingerprint {name!r} not found")
+    return cfg
 
 
 # ─────────── 前端 ───────────
