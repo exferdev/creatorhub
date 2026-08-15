@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -22,6 +24,37 @@ def host_platform_key() -> str:
     if sys.platform == "darwin":
         return "mac"
     return "linux"
+
+
+def list_profiles_local(db_dir: str, platform: str | None = None) -> list[dict]:
+    """文件直读: 扫描 <db_dir>/database/*.json 返回有序元数据列表 (API 回退用)。"""
+    db = Path(db_dir) / "database"
+    if not db.exists():
+        return []
+    key = (platform or "").strip().lower()
+    alias = {"win": "windows", "mac": "macintel", "linux": "linux"}.get(key, key)
+    out = []
+    for f in sorted(db.glob("*.json")):
+        try:
+            cfg = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        nav = cfg.get("navigator", {})
+        plat = nav.get("platform", "")
+        if alias and alias not in plat.lower():
+            continue
+        ua = nav.get("user_agent", "")
+        chrome_major = ""
+        if "Chrome/" in ua:
+            chrome_major = ua.split("Chrome/", 1)[1].split(".")[0]
+        out.append({
+            "name": f.stem,
+            "platform": plat,
+            "gpu": f.stem.rsplit("-v", 1)[0],
+            "chrome_major": int(chrome_major) if chrome_major.isdigit() else 0,
+            "renderer": (cfg.get("webgl", {}) or {}).get("renderer", ""),
+        })
+    return out
 
 
 class FingerprintDbClient:

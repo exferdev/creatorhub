@@ -1332,6 +1332,7 @@
     <button class="navitem notsh-only" data-tab="autocomment" onclick="switchTab('autocomment', true)"><svg><use href="#i-msg"/></svg><span class="nav-label">自动评论</span><span class="nav-badge" id="tb-ac">0</span></button>
     <button class="navitem" data-tab="share-download" onclick="switchTab('share-download', true)"><svg><use href="#i-download"/></svg><span class="nav-label">链接下载</span></button>
     <button class="navitem" data-tab="notifications" onclick="switchTab('notifications', true)"><svg><use href="#i-bell"/></svg><span class="nav-label">通知</span></button>
+    <button class="navitem" data-tab="browser" onclick="switchTab('browser', true)"><svg><use href="#i-card"/></svg><span class="nav-label">浏览器</span></button>
     <button class="navitem" data-tab="settings" onclick="switchTab('settings', true)"><svg><use href="#i-settings"/></svg><span class="nav-label">设置</span></button>
   </nav>
 </aside>
@@ -1649,6 +1650,66 @@
           </select>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section data-panel="browser">
+    <div class="tabbar" role="tablist" aria-label="浏览器">
+      <button class="tab active" data-browsertab="fingerprints" onclick="switchBrowserTab('fingerprints')"><svg><use href="#i-target"/></svg>指纹库</button>
+      <button class="tab" data-browsertab="profiles" onclick="switchBrowserTab('profiles')"><svg><use href="#i-user"/></svg>Profiles</button>
+      <button class="tab" data-browsertab="proxies" onclick="switchBrowserTab('proxies')"><svg><use href="#i-shield"/></svg>代理</button>
+    </div>
+
+    <div class="card" id="browser-fingerprint-panel">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-target"/></svg></span>
+        <h2>指纹库 <span class="sub">fingerprint-db · 合成设备指纹</span></h2>
+      </div>
+      <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+        <select id="fpdb-platform" onchange="refreshFingerprints()">
+          <option value="">宿主平台</option>
+          <option value="win">Windows</option>
+          <option value="mac">macOS</option>
+          <option value="linux">Linux</option>
+        </select>
+        <input id="fpdb-search" placeholder="搜索型号 / GPU" oninput="renderFingerprintTable()">
+        <span class="actions-spacer"></span>
+        <span class="status-text" id="fpdb-status" role="status" aria-live="polite"></span>
+        <button class="ghost" onclick="refreshFingerprints()"><svg><use href="#i-bolt"/></svg>刷新</button>
+      </div>
+      <div class="table-wrap"><table id="fpdb-table" aria-label="指纹库列表">
+        <thead><tr><th>名称</th><th>平台</th><th>GPU</th><th>Chrome</th><th>渲染器</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <div class="card" id="browser-profile-panel" style="display:none">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-user"/></svg></span>
+        <h2>独立 Profiles <span class="sub">ShardX Launcher 式 · 与账号解耦</span></h2>
+      </div>
+      <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+        <button onclick="createBrowserProfile()"><svg><use href="#i-plus"/></svg>新建 Profile</button>
+        <span class="actions-spacer"></span>
+        <span class="status-text" id="bp-status" role="status" aria-live="polite"></span>
+        <button class="ghost" onclick="refreshBrowserProfiles()"><svg><use href="#i-bolt"/></svg>刷新</button>
+      </div>
+      <div class="table-wrap"><table id="bp-table" aria-label="独立 profile 列表">
+        <thead><tr><th>名称</th><th>指纹</th><th>ShardID</th><th>代理</th><th>关联账号</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <div class="card" id="browser-proxy-panel" style="display:none">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-shield"/></svg></span>
+        <h2>代理池 <span class="sub">复用账号代理池 · 关联到 Profile</span></h2>
+      </div>
+      <p class="mut" style="font-size:12px;margin:-4px 0 12px">代理数据与「账号」页共用同一份代理池。在此查看并关联到独立 Profile。</p>
+      <div class="table-wrap"><table id="bp-proxy-table" aria-label="代理列表">
+        <thead><tr><th>备注</th><th>地址</th><th>状态</th><th>出口</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
     </div>
   </section>
 

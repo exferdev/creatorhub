@@ -34,7 +34,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
                       fetch_dm_history)
-from .browser.fingerprint_store import host_platform_key
+from .browser.fingerprint_store import host_platform_key, list_profiles_local
 from .platforms.douyin import (
     DouyinClient,
     cookie_from_state as douyin_cookie_from_state,
@@ -6549,14 +6549,18 @@ async def export_profile_cookies(profile_id: int):
 # ─────────── fingerprint-db 指纹浏览/随机化 (ShardX Launcher 式) ───────────
 @app.get("/api/fingerprints/list")
 async def list_fingerprints(platform: str | None = None):
-    """列 fingerprint-db profile 元数据 (有序, 供前端展示/选择)。"""
+    """列 fingerprint-db profile 元数据 (有序, 供前端展示/选择)。API 优先, 文件回退。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
-    try:
-        profiles = await browser._fpdb_client.list_profiles(
-            platform or host_platform_key())
-    except Exception:
-        raise HTTPException(502, "fingerprint-db API 不可达")
+    key = platform or host_platform_key()
+    profiles = None
+    if browser._fpdb_client.enabled:
+        try:
+            profiles = await browser._fpdb_client.list_profiles(key)
+        except Exception:
+            profiles = None
+    if profiles is None:
+        profiles = list_profiles_local(browser._fingerprint_db_dir, key)
     return {"ok": True, "count": len(profiles), "profiles": profiles}
 
 
@@ -6576,9 +6580,16 @@ async def randomize_fingerprint(name: str):
     """基于指定 fingerprint 随机化硬件/平台版本, 返回新 config (不持久化)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
-    cfg = await browser._fpdb_client.randomize(name)
-    if cfg is None:
+    prof = await browser._load_named_profile(name)
+    if prof is None:
         raise HTTPException(404, f"fingerprint {name!r} not found")
+    cfg = dict(prof.config)
+    try:
+        from shardx import randomize_hardware, randomize_platform_version
+        randomize_hardware(cfg)
+        randomize_platform_version(cfg)
+    except Exception:
+        pass
     return cfg
 
 

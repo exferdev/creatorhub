@@ -254,6 +254,51 @@ function uiPrompt({ title, hint, value, placeholder, multiline, rows }) {
   });
 }
 
+// 通用模态:自定义 body + 底部 actions 按钮数组。
+// actions: [{label, primary?, danger?, onClick?}]。onClick 返回 Promise 时不自动关闭;
+// 未提供 onClick 的按钮点击即关闭。body 是 HTML 字符串。
+function uiModal({ title = "", hint = "", body = "", wide = false, actions = [] } = {}) {
+  return new Promise(res => {
+    _uiResolve = res;
+    _uiCancelVal = null;
+    _uiGetVal = null;
+    $("ui-title").textContent = title || "";
+    $("ui-hint").textContent = hint || "";
+    $("ui-body").innerHTML = body || "";
+    const modal = $("uimodal");
+    const footer = modal.querySelector(".rp-box > .row");
+    // 动态渲染底部按钮(替换默认的 取消+确定)
+    footer.innerHTML = "";
+    const btns = (actions.length ? actions : [{ label: "确定" }]);
+    btns.forEach(a => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.style.cssText = "flex:0 0 auto";
+      b.className = a.danger ? "danger" : (a.primary ? "" : "ghost");
+      b.innerHTML = (a.danger ? ic("i-trash") : (a.primary ? ic("i-check") : "")) + `<span>${esc(a.label)}</span>`;
+      b.addEventListener("click", () => {
+        if (typeof a.onClick === "function") {
+          const r = a.onClick();
+          if (r && typeof r.then === "function") return;  // 异步:由调用方自行关闭
+        }
+        _uiClose(a.value);
+      });
+      footer.appendChild(b);
+    });
+    // 始终保留一个隐式取消(点遮罩/ESC)
+    _uiCancelVal = null;
+    modal.querySelector(".rp-box").style.width = wide ? "min(94vw,680px)" : "min(94vw,480px)";
+    modal.style.display = "flex";
+    modalOpened(modal);
+    document.addEventListener("keydown", _uiKey);
+    setTimeout(() => {
+      const el = [...$("ui-body").querySelectorAll("input,textarea,select,button")]
+        .find(node => node.offsetParent !== null && !node.classList.contains("cs-native"));
+      if (el) el.focus();
+    }, 30);
+  });
+}
+
 // ─── 自定义下拉:渐进增强原生 <select>(美化展开列表)───
 function enhanceSelect(sel) {
   if (sel.dataset.cs) return;
@@ -771,6 +816,9 @@ const PAGE_META = {
   notifications: {
     title: "通知渠道", desc: "配置 Bark、钉钉或 Telegram，及时接收任务提醒。"
   },
+  browser: {
+    title: "浏览器", desc: "管理指纹库、独立 Profile 与代理绑定（ShardX 引擎）。"
+  },
   settings: {
     title: "系统设置", desc: "调整下载偏好与 AI 文案服务配置。"
   },
@@ -952,6 +1000,11 @@ function switchTab(name, pushHistory = false) {
   if (name === "share-download") {
     loadShareAccounts();
     refreshShareHistory();
+  }
+  if (name === "browser") {
+    refreshFingerprints();
+    refreshBrowserProfiles();
+    refreshBrowserProxies();
   }
 }
 
@@ -5063,7 +5116,7 @@ $("danmaku-watch-table").innerHTML = skeleton(8);
 $("danmaku-table").innerHTML = skeleton(6);
 
 // restore last-selected section (default: 总览);旧版四个独立页已并入「账号管理」
-const VALID_TABS = ["overview", "accounts", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "notifications", "settings"];
+const VALID_TABS = ["overview", "accounts", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "notifications", "browser", "settings"];
 const LEGACY_HUB_TABS = ["myworks", "following", "fans", "dm"];
 switchTab((() => {
   try {
@@ -5084,6 +5137,297 @@ onTypeChange(); bindPubFilePicker(); onPubType(); onPubMethodChange(); populateW
 enhanceAllSelects();   // 把所有原生 <select> 升级为美化下拉
 enhanceAllMetaControls(); // 分组/标签：当前平台词库下拉，可搜索并新增
 enhanceAllDateTime();  // 把 datetime-local 升级为自定义日期选择器
+
+// ─── 浏览器 tab (ShardX Launcher 式: 指纹库 / Profiles / 代理) ───
+let BROWSER_TAB = "fingerprints";
+let FP_FILTER = { platform: "", search: "", data: [] };
+let BP_LIST = [];
+function switchBrowserTab(name) {
+  BROWSER_TAB = name;
+  document.querySelectorAll("[data-browsertab]").forEach(t => t.classList.toggle("active", t.dataset.browsertab === name));
+  $("browser-fingerprint-panel").style.display = name === "fingerprints" ? "" : "none";
+  $("browser-profile-panel").style.display = name === "profiles" ? "" : "none";
+  $("browser-proxy-panel").style.display = name === "proxies" ? "" : "none";
+  if (name === "fingerprints") refreshFingerprints();
+  if (name === "profiles") refreshBrowserProfiles();
+  if (name === "proxies") refreshBrowserProxies();
+}
+
+async function refreshFingerprints() {
+  const sel = $("fpdb-platform");
+  FP_FILTER.platform = sel ? sel.value : "";
+  const status = $("fpdb-status");
+  const tbody = $("fpdb-table").querySelector("tbody");
+  tbody.innerHTML = skeleton(6, 4);
+  try {
+    const q = FP_FILTER.platform ? `?platform=${encodeURIComponent(FP_FILTER.platform)}` : "";
+    const r = await api(`/api/fingerprints/list${q}`);
+    FP_FILTER.data = (r.profiles || []);
+    if (status) status.textContent = `共 ${FP_FILTER.data.length} 个指纹`;
+    renderFingerprintTable();
+  } catch (e) {
+    FP_FILTER.data = [];
+    if (status) status.textContent = "指纹库不可达";
+    tbody.innerHTML = empty(6, "指纹库不可达", "i-inbox", "请确认 fingerprint-db API 已启动(设置 → 指纹数据源)");
+  }
+}
+
+function renderFingerprintTable() {
+  const tbody = $("fpdb-table").querySelector("tbody");
+  const kw = ($("fpdb-search")?.value || "").trim().toLowerCase();
+  let rows = FP_FILTER.data;
+  if (kw) rows = rows.filter(p => (p.name + " " + p.gpu + " " + (p.renderer || "")).toLowerCase().includes(kw));
+  if (!rows.length) { tbody.innerHTML = empty(6, "无匹配指纹", "i-inbox"); return; }
+  tbody.innerHTML = rows.map(p => {
+    const plat = p.platform === "Windows" ? "Windows" : p.platform === "MacIntel" ? "macOS" : p.platform || "—";
+    return `<tr>
+      <td class="num">${esc(p.name)}</td>
+      <td>${esc(plat)}</td>
+      <td>${esc(p.gpu)}</td>
+      <td>${p.chrome_major ? "Chrome " + esc(String(p.chrome_major)) : "—"}</td>
+      <td class="mut" title="${esc(p.renderer || "")}">${esc(p.renderer || "—")}</td>
+      <td class="acttd">
+        <button class="ghost sm" onclick="viewFingerprint('${esc(p.name)}')">详情</button>
+        <button class="ghost sm" onclick="randomizeFingerprint('${esc(p.name)}')">随机化</button>
+        <button class="ghost sm" onclick="createProfileFromFp('${esc(p.name)}')">创建 Profile</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function viewFingerprint(name) {
+  try {
+    const cfg = await api(`/api/fingerprints/${encodeURIComponent(name)}`);
+    const nav = cfg.navigator || {};
+    uiModal({
+      title: `指纹详情 · ${name}`,
+      body: `<div class="stack" style="gap:8px">
+        <div style="display:flex;gap:8px;align-items:baseline"><span>UA</span><code>${esc(nav.user_agent || "")}</code></div>
+        <div style="display:flex;gap:8px;align-items:baseline"><span>平台</span><code>${esc(nav.platform || "")}</code></div>
+        <div style="display:flex;gap:8px;align-items:baseline"><span>硬件</span><code>${esc(String(nav.hardware_concurrency || "—"))} 核 / ${esc(String(nav.device_memory || "—"))} GB</code></div>
+        <div style="display:flex;gap:8px;align-items:baseline"><span>WebGL</span><code>${esc((cfg.webgl || {}).renderer || "—")}</code></div>
+      </div>`,
+      actions: [{ label: "关闭" }],
+    });
+  } catch (e) { toast(`查看指纹失败: ${e.message}`, "err"); }
+}
+
+async function randomizeFingerprint(name) {
+  try {
+    const cfg = await api(`/api/fingerprints/${encodeURIComponent(name)}/randomize`, { method: "POST" });
+    const nav = cfg.navigator || {};
+    uiModal({
+      title: `随机化结果 · ${name}`,
+      body: `<div class="stack" style="gap:8px">
+        <div style="display:flex;gap:8px;align-items:baseline"><span>硬件并发</span><code>${esc(String(nav.hardware_concurrency || "—"))}</code></div>
+        <div style="display:flex;gap:8px;align-items:baseline"><span>内存</span><code>${esc(String(nav.device_memory || "—"))} GB</code></div>
+        <div style="display:flex;gap:8px;align-items:baseline"><span>平台版本</span><code>${esc(nav.platform_version || "—")}</code></div>
+      </div>
+      <p class="mut" style="margin-top:10px">已按宿主 CPU 范围随机化硬件与平台版本（不持久化，仅预览）。</p>`,
+      actions: [{ label: "关闭" }],
+    });
+  } catch (e) { toast(`随机化失败: ${e.message}`, "err"); }
+}
+
+async function createProfileFromFp(fingerprint_name) {
+  try {
+    const r = await api("/api/browser-profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: fingerprint_name, fingerprint_name }),
+    });
+    toast(`已创建 Profile #${r.id}`, "ok");
+    switchBrowserTab("profiles");
+    refreshBrowserProfiles();
+  } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
+}
+
+async function refreshBrowserProfiles() {
+  const tbody = $("bp-table").querySelector("tbody");
+  tbody.innerHTML = skeleton(7, 3);
+  try {
+    BP_LIST = await api("/api/browser-profiles");
+    renderBrowserProfiles();
+  } catch (e) {
+    BP_LIST = [];
+    tbody.innerHTML = empty(7, "加载失败", "i-inbox", e.message);
+  }
+}
+
+function renderBrowserProfiles() {
+  const tbody = $("bp-table").querySelector("tbody");
+  if (!BP_LIST.length) { tbody.innerHTML = empty(7, "暂无独立 Profile", "i-inbox", "点「新建 Profile」或从指纹库创建"); return; }
+  tbody.innerHTML = BP_LIST.map(p => {
+    const accts = (p.accounts || []).map(a => `${a.platform}:${a.nickname}`).join(", ") || "—";
+    const status = p.running ? '<span class="pill ok">运行中</span>' : '<span class="pill">已停止</span>';
+    return `<tr>
+      <td>${esc(p.name)}</td>
+      <td class="num">${esc(p.fingerprint_name || "按 fp_seed")}</td>
+      <td class="num mut">${esc(p.shardx_id || "—")}</td>
+      <td class="num mut">${esc(p.proxy ? "(已配)" : "—")}</td>
+      <td class="mut" title="${esc(accts)}">${esc(accts)}</td>
+      <td>${status}</td>
+      <td class="acttd">
+        ${p.running
+          ? `<button class="ghost sm" onclick="stopBrowserProfile(${p.id})">停止</button>`
+          : `<button class="ghost sm" onclick="startBrowserProfile(${p.id})">启动</button>`}
+        <button class="ghost sm" onclick="bindProfileToAccount(${p.id})">绑定账号</button>
+        <button class="ghost sm" onclick="editBrowserProfile(${p.id})">编辑</button>
+        <button class="ghost sm danger" onclick="deleteBrowserProfile(${p.id})">删除</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function createBrowserProfile() {
+  uiModal({
+    title: "新建独立 Profile",
+    body: `<div class="stack">
+      <div class="form-field"><label>名称</label><input id="bp-in-name" placeholder="例如 主号-抖音"></div>
+      <div class="form-field"><label>指纹名称(留空按 fp_seed 选)</label><input id="bp-in-fp" placeholder="例如 rtx4060-v1"></div>
+      <div class="form-field"><label>fp_seed(留空自动)</label><input id="bp-in-seed" placeholder="hex 种子"></div>
+      <div class="form-field"><label>代理(留空不用)</label><input id="bp-in-proxy" placeholder="socks5://user:pass@host:port"></div>
+    </div>`,
+    actions: [
+      { label: "取消" },
+      { label: "创建", primary: true, onClick: async () => {
+        const body = {
+          name: $("bp-in-name").value.trim(),
+          fingerprint_name: $("bp-in-fp").value.trim(),
+          fp_seed: $("bp-in-seed").value.trim(),
+          proxy: $("bp-in-proxy").value.trim(),
+        };
+        try {
+          await api("/api/browser-profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+          toast("已创建", "ok"); refreshBrowserProfiles();
+        } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
+
+async function startBrowserProfile(id) {
+  const r = await withBusy(null, "启动中…", async () => {
+    try { return await api(`/api/browser-profiles/${id}/start?headless=false`, { method: "POST" }); }
+    catch (e) { toast(`启动失败: ${e.message}`, "err"); return null; }
+  });
+  if (r && r.cdp_url) {
+    toast(`已启动, CDP: ${r.cdp_url}`, "ok", 8000);
+  }
+  refreshBrowserProfiles();
+}
+
+async function stopBrowserProfile(id) {
+  await withBusy(null, "停止中…", async () => {
+    try { await api(`/api/browser-profiles/${id}/stop`, { method: "POST" }); }
+    catch (e) { toast(`停止失败: ${e.message}`, "err"); }
+  });
+  refreshBrowserProfiles();
+}
+
+async function bindProfileToAccount(profile_id) {
+  let accounts = [];
+  try { accounts = await api(`/api/accounts?platform=${encodeURIComponent(PLATFORM)}`); } catch (e) {}
+  const accs = Array.isArray(accounts) ? accounts : (accounts.accounts || []);
+  if (!accs.length) { toast("当前平台无账号", "info"); return; }
+  uiModal({
+    title: "绑定账号到 Profile",
+    body: `<div class="stack">
+      <div class="form-field"><label>选择账号</label><select id="bp-bind-acc">${accs.map(a => `<option value="${a.id}">${esc(a.nickname || a.id)} (${esc(a.platform)})</option>`).join("")}</select></div>
+      <p class="mut">绑定后账号将复用该 Profile 的指纹，并清空其 fp_seed。</p>
+    </div>`,
+    actions: [
+      { label: "取消" },
+      { label: "绑定", primary: true, onClick: async () => {
+        const account_id = $("bp-bind-acc").value;
+        try {
+          await api(`/api/browser-profiles/${profile_id}/bind-account?account_id=${account_id}`, { method: "POST" });
+          toast("已绑定", "ok"); refreshBrowserProfiles(); refreshAccounts();
+        } catch (e) { toast(`绑定失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
+
+async function editBrowserProfile(id) {
+  const p = BP_LIST.find(x => x.id === id);
+  if (!p) return;
+  uiModal({
+    title: `编辑 Profile #${id}`,
+    body: `<div class="stack">
+      <div class="form-field"><label>名称</label><input id="bp-edit-name" value="${esc(p.name)}"></div>
+      <div class="form-field"><label>指纹名称</label><input id="bp-edit-fp" value="${esc(p.fingerprint_name)}"></div>
+      <div class="form-field"><label>代理</label><input id="bp-edit-proxy" value="${esc(p.proxy)}"></div>
+      <div class="form-field"><label>备注</label><input id="bp-edit-note" value="${esc(p.note)}"></div>
+    </div>`,
+    actions: [
+      { label: "取消" },
+      { label: "保存", primary: true, onClick: async () => {
+        try {
+          await api(`/api/browser-profiles/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            name: $("bp-edit-name").value.trim(), fingerprint_name: $("bp-edit-fp").value.trim(),
+            proxy: $("bp-edit-proxy").value.trim(), note: $("bp-edit-note").value.trim(),
+          }) });
+          toast("已保存", "ok"); refreshBrowserProfiles();
+        } catch (e) { toast(`保存失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
+
+async function deleteBrowserProfile(id) {
+  uiModal({
+    title: "删除 Profile",
+    body: `<p>确认删除 Profile #${id}？其持久化目录与登录态将一并清除，关联账号会恢复 fp_seed 回退。</p>`,
+    actions: [
+      { label: "取消" },
+      { label: "删除", danger: true, onClick: async () => {
+        try { await api(`/api/browser-profiles/${id}`, { method: "DELETE" }); toast("已删除", "ok"); refreshBrowserProfiles(); }
+        catch (e) { toast(`删除失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
+
+async function refreshBrowserProxies() {
+  const tbody = $("bp-proxy-table").querySelector("tbody");
+  tbody.innerHTML = skeleton(5, 3);
+  try {
+    const list = await api("/api/proxies");
+    const rows = Array.isArray(list) ? list : (list.proxies || []);
+    if (!rows.length) { tbody.innerHTML = empty(5, "代理池为空", "i-inbox", "去「账号」页添加代理"); return; }
+    tbody.innerHTML = rows.map(p => `<tr>
+      <td>${esc(p.label || "—")}</td>
+      <td class="num mut">${esc(p.masked || p.url || "—")}</td>
+      <td>${esc(p.status || "unknown")}</td>
+      <td class="mut">${esc([p.country, p.region, p.city].filter(Boolean).join(" ") || "—")}</td>
+      <td class="acttd"><button class="ghost sm" onclick="bindProxyToProfile('${esc(p.url || "")}')">关联 Profile</button></td>
+    </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = empty(5, "加载失败", "i-inbox", e.message);
+  }
+}
+
+async function bindProxyToProfile(proxy_url) {
+  if (!BP_LIST.length) { try { BP_LIST = await api("/api/browser-profiles"); } catch (e) {} }
+  if (!BP_LIST.length) { toast("暂无 Profile", "info"); return; }
+  uiModal({
+    title: "关联代理到 Profile",
+    body: `<div class="stack">
+      <div class="form-field"><label>选择 Profile</label><select id="bp-bind-prof">${BP_LIST.map(p => `<option value="${p.id}">${esc(p.name)} (#${p.id})</option>`).join("")}</select></div>
+    </div>`,
+    actions: [
+      { label: "取消" },
+      { label: "关联", primary: true, onClick: async () => {
+        const id = $("bp-bind-prof").value;
+        try {
+          await api(`/api/browser-profiles/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: proxy_url }) });
+          toast("已关联", "ok"); refreshBrowserProfiles();
+        } catch (e) { toast(`关联失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
 
 // shell 交互：浏览器前进/后退、平台键盘切换、长页面返回顶部。
 window.addEventListener("hashchange", () => {
