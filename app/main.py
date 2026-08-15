@@ -6278,6 +6278,10 @@ class ProfileIn(BaseModel):
     note: str = ""
 
 
+class CookieImportIn(BaseModel):
+    cookies: list[dict] = []
+
+
 def _profile_dict(p: BrowserProfile) -> dict:
     return {
         "id": p.id, "name": p.name,
@@ -6381,6 +6385,38 @@ async def stop_browser_profile(profile_id: int):
     if old is not None and browser is not None:
         await browser.stop_profile(old)
     return {"ok": True, "stopped": old is not None}
+
+
+# ─────────── 独立 profile cookie 导入导出 (Playwright storage_state, 不碰 SQLite 解密) ───────────
+@app.post("/api/browser-profiles/{profile_id}/cookies/import")
+async def import_profile_cookies(profile_id: int, body: CookieImportIn):
+    """导入 Cookie 数组到运行中的独立 profile (需先 start)。"""
+    ctx = profile_browsers.get(profile_id)
+    if ctx is None:
+        raise HTTPException(409, "profile 未运行, 请先 start")
+    from .browser.manager import _sanitize_cookies
+    cookies = _sanitize_cookies(body.cookies)
+    if not cookies:
+        raise HTTPException(400, "无有效 Cookie")
+    try:
+        await ctx.add_cookies(cookies)
+    except Exception as e:
+        raise HTTPException(400, f"注入 Cookie 失败: {e!r}")
+    return {"ok": True, "imported": len(cookies)}
+
+
+@app.get("/api/browser-profiles/{profile_id}/cookies/export")
+async def export_profile_cookies(profile_id: int):
+    """导出运行中独立 profile 的 Cookie 数组 (storage_state)。"""
+    ctx = profile_browsers.get(profile_id)
+    if ctx is None:
+        raise HTTPException(409, "profile 未运行, 请先 start")
+    try:
+        state = await ctx.storage_state()
+        cookies = state.get("cookies") or []
+    except Exception as e:
+        raise HTTPException(400, f"导出 Cookie 失败: {e!r}")
+    return {"ok": True, "cookies": cookies}
 
 
 # ─────────── fingerprint-db 指纹浏览/随机化 (ShardX Launcher 式) ───────────
