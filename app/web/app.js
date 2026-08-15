@@ -1597,6 +1597,7 @@ async function refreshAccounts() {
           : `<button class="ghost sm" onclick="relogin(${a.id})" title="${isXhs ? "重登可升级创作平台授权(发布需要)" : "重新扫码登录"}">重新登录</button>`}
         <button class="ghost sm" onclick="refreshProfile(${a.id})">刷新资料</button>
         <button class="ghost sm" onclick="openAccountHub(${a.id})" title="查看该账号的作品 / 关注 / 粉丝 / 私信">数据</button>
+        <button class="ghost sm" onclick="createProfileFromAccount(${a.id})" title="为该账号生成独立 Profile(绑定指纹)">创建Profile</button>
         <button class="ghost sm" onclick="openAccountBrowser(${a.id})" title="用该账号登录态弹出真实浏览器窗口,手动收发私信 / 维护 / 抓接口(关窗即保存)">打开浏览器</button>
         <button class="ghost sm" onclick="setProxy(${a.id})" title="设置/分配该账号专属代理(防多账号关联)">代理</button>
         ${a.has_proxy ? `<button class="ghost sm" onclick="testProxy(${a.id})" title="经该代理实连一次,验证可用">测代理</button>` : ""}
@@ -5242,6 +5243,49 @@ async function createProfileFromFp(fingerprint_name) {
   } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
 }
 
+async function createProfileFromAccount(account_id) {
+  const r = await withBusy(evtBtn(), "生成中", async () => {
+    try {
+      return await api(`/api/accounts/${account_id}/create-profile`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    } catch (e) { toast(`生成失败: ${e.message}`, "err"); return null; }
+  });
+  if (!r) return;
+  if (r.reuse) {
+    // 复用提示: 命中已有 profile
+    const cands = r.candidates || [];
+    if (r.profile_id && !cands.length) {
+      // 账号已绑定 profile
+      toast(`该账号已绑定 Profile #${r.profile_id}`, "info");
+      switchBrowserTab("profiles"); refreshBrowserProfiles();
+      return;
+    }
+    if (cands.length) {
+      uiModal({
+        title: "检测到相同指纹的 Profile",
+        hint: "已存在相同指纹的 Profile，是否复用？",
+        body: `<div class="stack">${cands.map(c => `<button class="ghost" style="justify-content:flex-start" onclick="reuseProfileForAccount(${account_id}, ${c.id})">#${c.id} ${esc(c.name)} ${c.shardx_id ? "· " + esc(c.shardx_id) : ""}</button>`).join("")}</div>`,
+        actions: [{ label: "取消" }],
+      });
+      return;
+    }
+    toast("检测到相同 profile", "info");
+    return;
+  }
+  toast(`已为账号生成 Profile #${r.profile_id}`, "ok");
+  switchBrowserTab("profiles"); refreshBrowserProfiles(); refreshAccounts();
+}
+
+async function reuseProfileForAccount(account_id, profile_id) {
+  try {
+    await api(`/api/accounts/${account_id}/bind-profile`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id }),
+    });
+    toast("已复用绑定", "ok");
+    refreshBrowserProfiles(); refreshAccounts();
+  } catch (e) { toast(`绑定失败: ${e.message}`, "err"); }
+}
+
 async function refreshBrowserProfiles() {
   const tbody = $("bp-table").querySelector("tbody");
   tbody.innerHTML = skeleton(7, 3);
@@ -5271,6 +5315,8 @@ function renderBrowserProfiles() {
         ${p.running
           ? `<button class="ghost sm" onclick="stopBrowserProfile(${p.id})">停止</button>`
           : `<button class="ghost sm" onclick="startBrowserProfile(${p.id})">启动</button>`}
+        <button class="ghost sm" onclick="importProfileCookies(${p.id})">Cookie导入</button>
+        ${p.running ? `<button class="ghost sm" onclick="exportProfileCookies(${p.id})">Cookie导出</button>` : ""}
         <button class="ghost sm" onclick="bindProfileToAccount(${p.id})">绑定账号</button>
         <button class="ghost sm" onclick="editBrowserProfile(${p.id})">编辑</button>
         <button class="ghost sm danger" onclick="deleteBrowserProfile(${p.id})">删除</button>
@@ -5387,6 +5433,53 @@ async function deleteBrowserProfile(id) {
       } },
     ],
   });
+}
+
+function importProfileCookies(id) {
+  uiModal({
+    title: `Cookie 导入 · Profile #${id}`,
+    hint: "粘贴 Cookie 数组 JSON, 例如 [{\"name\":\"a\",\"value\":\"b\",\"domain\":\".example.com\"}]",
+    body: `<textarea id="bp-cookie-in" rows="8" placeholder='[{"name":"sessionid","value":"...","domain":".douyin.com"}]'></textarea>`,
+    wide: true,
+    actions: [
+      { label: "取消" },
+      { label: "导入", primary: true, onClick: async () => {
+        let cookies = [];
+        try { cookies = JSON.parse($("bp-cookie-in").value.trim()); } catch (e) {
+          toast("JSON 格式错误", "err"); return;
+        }
+        if (!Array.isArray(cookies) || !cookies.length) { toast("Cookie 数组为空", "err"); return; }
+        try {
+          await api(`/api/browser-profiles/${id}/cookies/import`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cookies }),
+          });
+          toast("已导入", "ok");
+        } catch (e) { toast(`导入失败: ${e.message}`, "err"); }
+      } },
+    ],
+  });
+}
+
+async function exportProfileCookies(id) {
+  try {
+    const r = await api(`/api/browser-profiles/${id}/cookies/export`);
+    const cookies = r.cookies || [];
+    const text = JSON.stringify(cookies, null, 2);
+    uiModal({
+      title: `Cookie 导出 · Profile #${id}`,
+      hint: `共 ${cookies.length} 条 Cookie`,
+      body: `<textarea rows="12" style="width:100%">${esc(text)}</textarea>`,
+      wide: true,
+      actions: [
+        { label: "关闭" },
+        { label: "复制", primary: true, onClick: async () => {
+          try { await navigator.clipboard.writeText(text); toast("已复制到剪贴板", "ok"); }
+          catch (e) { toast("复制失败，请手动选择复制", "err"); }
+        } },
+      ],
+    });
+  } catch (e) { toast(`导出失败: ${e.message}`, "err"); }
 }
 
 async function refreshBrowserProxies() {
