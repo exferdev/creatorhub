@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -375,65 +377,31 @@ class BrowserManager:
             return f"{scheme}{proxy['username']}:{proxy.get('password', '')}@{host}"
         return server
 
-    async def _pick_custom_profile(self, identity: Identity) -> Any:
-        """按 fp_seed 确定性选 fingerprint-db profile (API 优先, 文件回退)。
+    async def _pick_custom_profile(self, identity: Identity,
+                                   platform: str = "") -> Any:
+        """按 fp_seed 确定性选 fingerprint-db profile (仅走 HTTP API)。
 
         数据主权: 独立项目 fingerprint-db (434 套跨平台合成 profile, 真机基线+
         公开硬件规格+一致性规则), ShardX 引擎格式兼容。fp_seed 固定 →
         同账号每次同 profile/同指纹。
 
-        平台过滤: ShardX 引擎是宿主 OS 的二进制 (Windows 上无法真正伪装成
-        Linux/macOS 的字体/语音/TLS 栈)。若 fp_seed 命中 Linux/Mac profile 会造成
-        OS 级不一致。因此只选与宿主 OS 同平台的 profile, 避免跨平台盲选。
+        平台过滤: platform 非空则按指定平台 (mac/win/linux) 选; 空则按宿主 OS。
+        独立 profile 可指定 os 覆盖; 账号路径默认宿主 OS。
 
-        数据源优先级:
-          1. fingerprint-db HTTP API (fingerprint_db_base_url 非空) — 走
-             /profiles/list + 确定性选择 + /profiles/{name}
-          2. 文件直读 (fingerprint_db_dir/database/*.json) — API 未配或失败时回退
+        数据源: fingerprint-db HTTP API (fingerprint_db_base_url 非空)。
+        本地不再存指纹库, API 未配置或不可达时返回 None (回退 ShardX 自带库)。
         """
         from shardx import Profile
 
-        # 1) API 优先
         if self._fpdb_client.enabled:
-            data = await self._fpdb_client.pick(
-                identity.fp_seed, host_platform_key())
+            key = platform or host_platform_key()
+            data = await self._fpdb_client.pick(identity.fp_seed, key)
             if data is not None:
                 return Profile(dict(data))
-
-        # 2) 文件回退
-        try:
-            db = Path(self._fingerprint_db_dir) / "database"
-            if not db.exists():
-                return None
-            files = sorted(db.glob("*.json"))
-            if not files:
-                return None
-            # 宿主 OS 平台过滤 (ShardX 引擎随宿主系统, 只能稳定伪装同平台指纹)
-            if sys.platform.startswith("win"):
-                host_ua = "Windows"
-            elif sys.platform == "darwin":
-                host_ua = "Mac OS"
-            else:
-                host_ua = "Linux"
-            matched = []
-            for f in files:
-                try:
-                    j = json.loads(f.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                ua = (j.get("navigator") or {}).get("user_agent", "")
-                if host_ua in ua:
-                    matched.append(f)
-            if matched:
-                files = matched
-            idx = self._fingerprint_seed_from(identity.fp_seed) % len(files)
-            prof = Profile.from_file(str(files[idx]))
-            return prof
-        except Exception:
-            return None
+        return None
 
     async def _load_named_profile(self, name: str) -> Any:
-        """按 name 直接加载 fingerprint-db profile (API 优先, 文件回退)。"""
+        """按 name 直接加载 fingerprint-db profile (仅走 HTTP API)。"""
         from shardx import Profile
 
         if self._fpdb_client.enabled:
@@ -442,16 +410,86 @@ class BrowserManager:
                 return Profile(dict(data))
             except Exception:
                 pass
-        try:
-            path = Path(self._fingerprint_db_dir) / "database" / f"{name}.json"
-            if path.exists():
-                return Profile.from_file(str(path))
-        except Exception:
-            pass
         return None
 
+    @staticmethod
+    def _apply_profile_overrides(prof: Any, ua_override: str,
+                                 cpu_cores: int, memory_gb: int,
+                                 timezone: str, language: str,
+                                 overrides: dict | None) -> Any:
+        """把标量覆盖 + overrides JSON 应用到 profile config (返回新 Profile)。
+
+        对标 ShardX Launcher 的可覆盖字段:
+          - navigator.user_agent / hardware_concurrency / device_memory / language
+          - timezone ("auto" 哨兵由 SDK resolve_auto_fields 处理)
+          - noise (6 向量) → set_noise
+          - geolocation / media_devices / network.blocked_ports / navigator.do_not_track
+        """
+        ov = dict(overrides or {})
+        nav = {}
+        if ua_override:
+            nav["user_agent"] = ua_override
+        if cpu_cores:
+            nav["hardware_concurrency"] = int(cpu_cores)
+        if memory_gb:
+            nav["device_memory"] = int(memory_gb)
+        if language:
+            nav["language"] = language
+        # overrides.navigator 合并进 navigator (如 do_not_track)
+        if isinstance(ov.get("navigator"), dict):
+            nav.update(ov["navigator"])
+
+        kw: dict = {}
+        if nav:
+            kw["navigator"] = nav
+        if timezone:
+            kw["timezone"] = timezone
+        for k in ("geolocation", "media_devices", "network"):
+            if isinstance(ov.get(k), dict):
+                kw[k] = ov[k]
+        if kw:
+            prof = prof.with_override(**kw)
+
+        # noise: 6 向量三态映射 (real=关, auto/noise=开)。默认全开 Auto noise。
+        noise = ov.get("noise")
+        if noise is None:
+            noise = {"canvas": "auto", "webgl": "auto", "audio": "auto",
+                     "client_rects": "auto", "sensors": "auto", "fonts": "noise"}
+        vectors = [v for v in ("canvas", "webgl", "audio",
+                               "client_rects", "sensors", "fonts")
+                   if (noise.get(v) in ("auto", "noise", True))]
+        prof.set_noise(*vectors)
+        return prof
+
+    def _align_engine_version(self, prof: Any) -> Any:
+        """把 profile 的 UA/UA-CH 版本号对齐到 ShardX 引擎真实版本(149)。
+
+        fingerprint-db 合成 profile 的 UA 版本号随机散布(Chrome 80~140 共 57 种),
+        与引擎二进制(Chromium 149)不一致。SDK 的 Browser.launch 内部会调用
+        apply_engine_version 归一,但那只改内存里的 config,固化到磁盘的副本仍是
+        脏版本。这里在固化前显式对齐,保证固化副本 + 运行时 UA 都统一为引擎版本,
+        协议直发的签名 UA 与实际请求头 UA 因此一致。
+        """
+        try:
+            from shardx.runtime import apply_engine_version
+            runtime = self._shardx_sdk.runtime
+            apply_engine_version(
+                prof.config,
+                runtime.chromium_version,
+                runtime.grease_brand,
+                runtime.grease_version,
+            )
+        except Exception:
+            pass
+        return prof
+
     async def _launch_shardx(self, identity: Identity, headless: bool,
-                             fingerprint_name: str = "") -> BrowserContext:
+                             fingerprint_name: str = "",
+                             os: str = "", ua_override: str = "",
+                             cpu_cores: int = 0, memory_gb: int = 0,
+                             timezone: str = "", language: str = "",
+                             webrtc_mode: str = "auto",
+                             overrides: dict | None = None) -> BrowserContext:
         """ShardX 引擎级启动 (Chromium 149, 170 真机设备库)。
 
         真机 GPU/硬件/UA 模板内部一致 → BrowserScan WebGL/Audio/隐身 全过 (实测)。
@@ -461,6 +499,10 @@ class BrowserManager:
 
         fingerprint_name 非空时, 跳过 seed 确定性选择, 直接加载指定 fingerprint-db
         profile (独立 profile 用)。
+
+        覆盖参数 (独立 profile 用, 账号路径默认空=不覆盖):
+          os / ua_override / cpu_cores / memory_gb / timezone / language
+          / webrtc_mode / overrides(noise/geolocation/media_devices/network/navigator)
         """
         self._patch_pathlib_utf8()
         from shardx import ShardX, Profile
@@ -496,10 +538,12 @@ class BrowserManager:
             if fingerprint_name:
                 picked = await self._load_named_profile(fingerprint_name)
             else:
-                picked = await self._pick_custom_profile(identity)
+                picked = await self._pick_custom_profile(identity, platform=os)
             if picked is not None:
                 fid = "fpdb-" + uuid.uuid4().hex
                 prof = Profile(dict(picked.config), id=fid)
+                # 固化前对齐 UA 版本号到引擎 149,保证冻结副本干净
+                self._align_engine_version(prof)
                 try:
                     sdk.save_profile(prof)
                 except Exception:
@@ -529,13 +573,22 @@ class BrowserManager:
                 idx = self._fingerprint_seed_from(identity.fp_seed) % len(templates)
                 prof = sdk.create_profile(templates[idx])
                 prof.set_noise("canvas")          # canvas 确定性噪声; audio/webgl 保持真实
+                self._align_engine_version(prof)
                 sdk.save_profile(prof)
                 try:
                     sid_file.write_text(prof.id, encoding="utf-8")
                 except Exception:
                     pass
+        # 3) 应用覆盖 + noise (独立 profile; 账号路径参数为空则跳过)
+        if prof is not None:
+            # 对齐 UA 版本到引擎(覆盖 open_profile 读出的历史脏副本)
+            self._align_engine_version(prof)
+            prof = self._apply_profile_overrides(
+                prof, ua_override, cpu_cores, memory_gb, timezone, language,
+                overrides)
         proxy_url = self._proxy_to_url(_parse_proxy(identity.proxy))
-        bsess = sdk.launch(prof, cdp=True, proxy=proxy_url, headless=headless)
+        bsess = sdk.launch(prof, cdp=True, proxy=proxy_url, headless=headless,
+                           webrtc=webrtc_mode)
         try:
             browser = await self._pw.chromium.connect_over_cdp(bsess.cdp_url)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
@@ -619,7 +672,13 @@ class BrowserManager:
         # 隐身全过, 实测)。抖音账号优先, 失败回退 CloakBrowser → 系统 Chrome。
         if identity.platform == "douyin":
             try:
-                return await self._launch_shardx(identity, headless)
+                return await self._launch_shardx(
+                    identity, headless,
+                    fingerprint_name=identity.fingerprint_name,
+                    os=identity.os, ua_override=identity.ua_override,
+                    cpu_cores=identity.cpu_cores, memory_gb=identity.memory_gb,
+                    timezone=identity.tz_override, language=identity.language_override,
+                    webrtc_mode=identity.webrtc_mode, overrides=identity.overrides)
             except Exception as e:
                 print(f"[browser] shardx launch failed -> cloak fallback: {e!r}")
             try:
@@ -780,8 +839,7 @@ class BrowserManager:
                 await ctx.close()
             bsess = getattr(ctx, "_shardx_bsess", None)
             if bsess is not None:
-                with suppress(Exception):
-                    bsess.stop()
+                self._kill_shardx_engine(bsess)
 
     async def context_for(self, identity: Identity) -> BrowserContext:
         """取(或惰性创建)账号专属常驻 context。"""
@@ -934,12 +992,19 @@ class BrowserManager:
     # ── 独立 profile (ShardX Launcher 式, 与登录账号解耦) ──
     async def launch_profile(self, *, name: str, fingerprint_name: str,
                              fp_seed: str, proxy: str, profile_dir: str,
-                             headless: bool = False) -> BrowserContext:
+                             headless: bool = False, os: str = "",
+                             ua_override: str = "", cpu_cores: int = 0,
+                             memory_gb: int = 0, timezone: str = "",
+                             language: str = "", webrtc_mode: str = "auto",
+                             overrides: dict | None = None) -> BrowserContext:
         """启动一个独立 profile 并返回其 context (ctx._shardx_bsess.cdp_url 可用)。
 
         不绑定账号登录态, 纯指纹+代理+持久化目录。指纹来源:
           fingerprint_name 非空 → 固定加载该 fingerprint-db profile;
           空 → 按 fp_seed 确定性选择 (同 profile_dir 每次同指纹)。
+
+        覆盖参数对标 ShardX Launcher (os/ua/cpu/memory/timezone/language/
+        webrtc/overrides), 详见 _launch_shardx。
         """
         pdir = Path(profile_dir) if profile_dir else (
             Path(self.profiles_root) / "profile_" + uuid.uuid4().hex)
@@ -949,19 +1014,63 @@ class BrowserManager:
             identity_mode="native", proxy=proxy or "",
             fp_seed=fp_seed or uuid.uuid4().hex)
         ctx = await self._launch_shardx(
-            identity, headless=headless, fingerprint_name=fingerprint_name)
+            identity, headless=headless, fingerprint_name=fingerprint_name,
+            os=os, ua_override=ua_override, cpu_cores=cpu_cores,
+            memory_gb=memory_gb, timezone=timezone, language=language,
+            webrtc_mode=webrtc_mode, overrides=overrides)
         return ctx
 
+    @staticmethod
+    def _kill_shardx_engine(bsess: Any) -> None:
+        """彻底杀掉 shardx 引擎进程树(含渲染/GPU 子进程),释放 profile 目录锁。
+
+        SDK 的 BrowserSession.stop() 只 terminate 主进程;Windows 上 Chromium
+        子进程残留会继续占用 user_data_dir 锁,导致二次 launch 读不到 CDP 端点。
+        这里用 taskkill /T /F 杀整棵进程树(项目 cdp.py 同款做法)。
+        """
+        pid = getattr(bsess, "pid", None)
+        if pid is None:
+            try:
+                bsess.stop()
+            except Exception:
+                pass
+            return
+        if os.name == "nt":
+            with suppress(Exception):
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(int(pid)), "/T", "/F"],
+                    capture_output=True, timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        # 兜底:taskkill 失败/非 Windows 时退回 SDK 的 stop()
+        try:
+            bsess.stop()
+        except Exception:
+            pass
+
     async def stop_profile(self, ctx: BrowserContext) -> None:
-        """关闭独立 profile 的浏览器进程。"""
+        """关闭独立 profile 的浏览器进程(杀引擎进程树)。"""
         if ctx is None:
             return
         with suppress(Exception):
             await ctx.close()
         bsess = getattr(ctx, "_shardx_bsess", None)
         if bsess is not None:
-            with suppress(Exception):
-                bsess.stop()
+            self._kill_shardx_engine(bsess)
+
+    async def close_login_ctx(self, ctx: BrowserContext) -> None:
+        """登录流程关闭点:关 context + 杀 shardx 引擎进程树,释放 profile 目录锁。
+
+        登录成功后抓资料/后续操作会再次启动同一 profile 目录的浏览器,
+        必须彻底释放目录锁,否则二次 launch 读不到 CDP 端点。
+        """
+        if ctx is None:
+            return
+        with suppress(Exception):
+            await ctx.close()
+        bsess = getattr(ctx, "_shardx_bsess", None)
+        if bsess is not None:
+            self._kill_shardx_engine(bsess)
 
 
 # 各平台 Cookie 顶域(子域如 creator./edith. 都吃顶域 cookie,一个就够)

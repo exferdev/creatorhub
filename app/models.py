@@ -465,6 +465,15 @@ class BrowserProfile(SQLModel, table=True):
     note: str = ""                          # 备注
     profile_dir: str = ""                   # 持久化 user-data-dir
     shardx_id: str = ""                     # 启动后固化的 ShardX profile id(fpdb-xxx)
+    # ── ShardX Launcher 对标覆盖字段 ──
+    os: str = ""                            # 平台 mac/win/linux(空=宿主 OS);决定 fingerprint 筛选平台
+    ua_override: str = ""                   # UA 覆盖(空=用 fingerprint 自带)
+    cpu_cores: int = 0                      # CPU 覆盖(0=用 fingerprint 自带)
+    memory_gb: int = 0                      # 内存覆盖(0=用 fingerprint 自带)
+    timezone: str = ""                      # 时区(""=自带, "auto"=按代理 geo)
+    language: str = ""                      # 语言(""=自带, "auto"=按代理 geo)
+    webrtc_mode: str = "auto"               # auto/block/tcp_only
+    overrides: str = "{}"                   # JSON: noise/geolocation/media_devices/network/navigator
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

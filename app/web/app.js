@@ -1002,7 +1002,6 @@ function switchTab(name, pushHistory = false) {
     refreshShareHistory();
   }
   if (name === "browser") {
-    refreshFingerprints();
     refreshBrowserProfiles();
     refreshBrowserProxies();
   }
@@ -1010,43 +1009,56 @@ function switchTab(name, pushHistory = false) {
 
 // ─── 扫码登录(真实浏览器窗口) ───
 let qrTimer = null;
-// 登录前选代理:返回 "" (不用) | "auto" | 具体url | null(取消)
-async function choosePreLoginProxy() {
-  let opts = [];
-  try { opts = await api("/api/proxies/options"); } catch (e) { }
-  const options = [
-    { value: "auto", label: opts.length ? "自动分配（占用最少）" : "自动分配（池为空时不用代理）" },
-    ...opts.map(p => ({ value: p.url, label: `${p.label} · ${p.status} · 占用${p.used_by} · ${p.masked}${p.enabled ? "" : " · 已停用"}` })),
-    { value: "__custom__", label: "✎ 手动输入指定代理…" },
-    { value: "", label: "不用代理（使用本机网络）" },
+// 登录前选 Profile:返回 profile_id (复用) 或触发新建后返回新 id;null=取消
+async function chooseLoginProfile() {
+  let profiles = [];
+  try { profiles = await api("/api/browser-profiles"); } catch (e) { }
+  const opts = [
+    { value: "__new__", label: "＋ 新建独立 Profile（选平台/GPU/代理/指纹）" },
+    ...profiles.map(p => ({
+      value: "p:" + p.id,
+      label: `复用 · #${p.id} ${p.name}${p.fingerprint_name ? " · " + p.fingerprint_name : ""}${p.running ? " · 运行中" : ""}${p.accounts && p.accounts.length ? " · 已绑" + p.accounts.length + "号" : ""}`,
+    })),
   ];
+  if (!profiles.length) {
+    // 无已有 Profile:直接新建
+    return { profile_id: await createProfileForLogin(), proxy: "" };
+  }
   const v = await uiSelect({
-    title: "选择本次登录使用的代理",
-    hint: "整个登录/扫码过程都走它,从一开始就绑定这条 IP(最稳)。",
-    options, value: "auto",
+    title: "选择登录使用的 Profile",
+    hint: "新建独立 Profile,或复用已有 Profile 的指纹/代理/登录态。",
+    options: opts, value: "__new__",
   });
   if (v === null) return null;
-  if (v === "__custom__") {
-    const url = await uiPrompt({
-      title: "手动输入指定代理",
-      hint: "http://user:pass@host:port 或 socks5://host:port;裸 ip:port 默认 HTTP",
-      placeholder: "http://user:pass@host:port" });
-    if (url === null || !url.trim()) return null;
-    return url.trim();
+  if (v === "__new__") {
+    return { profile_id: await createProfileForLogin(), proxy: "" };
   }
-  return v;
+  const pid = parseInt(v.slice(2), 10);
+  return { profile_id: pid, proxy: "" };
 }
-function loginStartUrl(path, proxy) {
-  return path + "?proxy=" + encodeURIComponent(proxy);
+
+// 弹出新建 Profile 表单并等待创建完成,返回新 profile id (取消返回 null)
+function createProfileForLogin() {
+  return new Promise(res => {
+    BP_RESOLVE_PROFILE = res;
+    createBrowserProfile();
+    // 若用户取消(表单未创建), 兜底: 30s 超时 resolve null
+    setTimeout(() => { if (BP_RESOLVE_PROFILE) { BP_RESOLVE_PROFILE(null); BP_RESOLVE_PROFILE = null; } }, 30000);
+  });
+}
+function loginStartUrl(path, profileId) {
+  let q = "";
+  if (profileId) q += (q ? "&" : "?") + "profile_id=" + encodeURIComponent(profileId);
+  return path + q;
 }
 async function startLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开浏览器窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/browser/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/browser/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>浏览器窗口已打开</b>，请在该窗口点击「登录」并使用抖音 App 扫码。<br>完成后这里会自动刷新。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("登录启动失败:" + e.message, "err"); }
@@ -1104,13 +1116,13 @@ function pollLogin(tid) {
 
 // ─── 创作者登录(自有账号评论模式用) ───
 async function startCreatorLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开创作中心窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/creator/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/creator/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>创作中心窗口已打开</b>，请在该窗口扫码登录抖音账号。<br>此登录态也可用于公开抓取。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("创作者登录启动失败:" + e.message, "err"); }
@@ -1118,13 +1130,13 @@ async function startCreatorLogin() {
 
 // ─── 小红书扫码登录 ───
 async function startXhsLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开小红书窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/xhs/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/xhs/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>小红书官网首页已打开</b>，请在窗口中点击「登录」并使用小红书 App 扫码。<br>主站登录成功后会保存读取登录态并自动关闭窗口。<br>如需发布，请随后单独点击「创作者登录」。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("小红书登录启动失败:" + e.message, "err"); }
@@ -1132,13 +1144,13 @@ async function startXhsLogin() {
 
 // ─── 小红书创作者登录(发布用) ───
 async function startXhsCreatorLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开小红书创作平台窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/xhs-creator/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/xhs-creator/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>小红书创作平台窗口已打开</b>，请扫码登录，此登录态用于发布。<br>登录成功后请稍等片刻再关闭窗口。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("创作者登录启动失败:" + e.message, "err"); }
@@ -1146,13 +1158,13 @@ async function startXhsCreatorLogin() {
 
 // ─── 快手扫码登录 ───
 async function startKsLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开快手窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/kuaishou/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/kuaishou/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>快手窗口已打开</b>，请在该窗口点击「登录」并使用快手 App 扫码。<br>完成后这里会自动刷新。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("快手登录启动失败:" + e.message, "err"); }
@@ -1160,13 +1172,13 @@ async function startKsLogin() {
 
 // ─── 快手创作者登录(发布用) ───
 async function startKsCreatorLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开快手创作平台窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/kuaishou-creator/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/kuaishou-creator/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>快手创作平台窗口已打开</b>，请扫码登录，此登录态用于发布。<br>登录成功后请稍等片刻再关闭窗口。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("创作者登录启动失败:" + e.message, "err"); }
@@ -1174,13 +1186,13 @@ async function startKsCreatorLogin() {
 
 // ─── 视频号扫码登录(读取/发布共用,微信扫码) ───
 async function startChannelsLogin() {
-  const proxy = await choosePreLoginProxy();
-  if (proxy === null) return;
+  const choice = await chooseLoginProfile();
+  if (choice === null) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开视频号助手窗口…";
   try {
-    const res = await api(loginStartUrl("/api/login/shipinhao/start", proxy), { method: "POST" });
+    const res = await api(loginStartUrl("/api/login/shipinhao/start", choice.profile_id), { method: "POST" });
     $("qrstatus").innerHTML = `${ic("i-eye")} <b>视频号助手窗口已打开</b>，请使用微信扫码登录，读取和发布共用此登录态。<br>登录成功后请稍等片刻再关闭窗口。`;
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("视频号登录启动失败:" + e.message, "err"); }
@@ -5148,107 +5160,15 @@ enhanceAllMetaControls(); // 分组/标签：当前平台词库下拉，可搜�
 enhanceAllDateTime();  // 把 datetime-local 升级为自定义日期选择器
 
 // ─── 浏览器 tab (ShardX Launcher 式: 指纹库 / Profiles / 代理) ───
-let BROWSER_TAB = "fingerprints";
-let FP_FILTER = { platform: "", search: "", data: [] };
+let BROWSER_TAB = "profiles";
 let BP_LIST = [];
 function switchBrowserTab(name) {
   BROWSER_TAB = name;
   document.querySelectorAll("[data-browsertab]").forEach(t => t.classList.toggle("active", t.dataset.browsertab === name));
-  $("browser-fingerprint-panel").style.display = name === "fingerprints" ? "" : "none";
   $("browser-profile-panel").style.display = name === "profiles" ? "" : "none";
   $("browser-proxy-panel").style.display = name === "proxies" ? "" : "none";
-  if (name === "fingerprints") refreshFingerprints();
   if (name === "profiles") refreshBrowserProfiles();
   if (name === "proxies") refreshBrowserProxies();
-}
-
-async function refreshFingerprints() {
-  const sel = $("fpdb-platform");
-  FP_FILTER.platform = sel ? sel.value : "";
-  const status = $("fpdb-status");
-  const tbody = $("fpdb-table").querySelector("tbody");
-  tbody.innerHTML = skeleton(6, 4);
-  try {
-    const q = FP_FILTER.platform ? `?platform=${encodeURIComponent(FP_FILTER.platform)}` : "";
-    const r = await api(`/api/fingerprints/list${q}`);
-    FP_FILTER.data = (r.profiles || []);
-    if (status) status.textContent = `共 ${FP_FILTER.data.length} 个指纹`;
-    renderFingerprintTable();
-  } catch (e) {
-    FP_FILTER.data = [];
-    if (status) status.textContent = "指纹库不可达";
-    tbody.innerHTML = empty(6, "指纹库不可达", "i-inbox", "请确认 fingerprint-db API 已启动(设置 → 指纹数据源)");
-  }
-}
-
-function renderFingerprintTable() {
-  const tbody = $("fpdb-table").querySelector("tbody");
-  const kw = ($("fpdb-search")?.value || "").trim().toLowerCase();
-  let rows = FP_FILTER.data;
-  if (kw) rows = rows.filter(p => (p.name + " " + p.gpu + " " + (p.renderer || "")).toLowerCase().includes(kw));
-  if (!rows.length) { tbody.innerHTML = empty(6, "无匹配指纹", "i-inbox"); return; }
-  tbody.innerHTML = rows.map(p => {
-    const plat = p.platform === "Windows" ? "Windows" : p.platform === "MacIntel" ? "macOS" : p.platform || "—";
-    return `<tr>
-      <td class="num">${esc(p.name)}</td>
-      <td>${esc(plat)}</td>
-      <td>${esc(p.gpu)}</td>
-      <td>${p.chrome_major ? "Chrome " + esc(String(p.chrome_major)) : "—"}</td>
-      <td class="mut" title="${esc(p.renderer || "")}">${esc(p.renderer || "—")}</td>
-      <td class="acttd">
-        <button class="ghost sm" onclick="viewFingerprint('${esc(p.name)}')">详情</button>
-        <button class="ghost sm" onclick="randomizeFingerprint('${esc(p.name)}')">随机化</button>
-        <button class="ghost sm" onclick="createProfileFromFp('${esc(p.name)}')">创建 Profile</button>
-      </td>
-    </tr>`;
-  }).join("");
-}
-
-async function viewFingerprint(name) {
-  try {
-    const cfg = await api(`/api/fingerprints/${encodeURIComponent(name)}`);
-    const nav = cfg.navigator || {};
-    uiModal({
-      title: `指纹详情 · ${name}`,
-      body: `<div class="stack" style="gap:8px">
-        <div style="display:flex;gap:8px;align-items:baseline"><span>UA</span><code>${esc(nav.user_agent || "")}</code></div>
-        <div style="display:flex;gap:8px;align-items:baseline"><span>平台</span><code>${esc(nav.platform || "")}</code></div>
-        <div style="display:flex;gap:8px;align-items:baseline"><span>硬件</span><code>${esc(String(nav.hardware_concurrency || "—"))} 核 / ${esc(String(nav.device_memory || "—"))} GB</code></div>
-        <div style="display:flex;gap:8px;align-items:baseline"><span>WebGL</span><code>${esc((cfg.webgl || {}).renderer || "—")}</code></div>
-      </div>`,
-      actions: [{ label: "关闭" }],
-    });
-  } catch (e) { toast(`查看指纹失败: ${e.message}`, "err"); }
-}
-
-async function randomizeFingerprint(name) {
-  try {
-    const cfg = await api(`/api/fingerprints/${encodeURIComponent(name)}/randomize`, { method: "POST" });
-    const nav = cfg.navigator || {};
-    uiModal({
-      title: `随机化结果 · ${name}`,
-      body: `<div class="stack" style="gap:8px">
-        <div style="display:flex;gap:8px;align-items:baseline"><span>硬件并发</span><code>${esc(String(nav.hardware_concurrency || "—"))}</code></div>
-        <div style="display:flex;gap:8px;align-items:baseline"><span>内存</span><code>${esc(String(nav.device_memory || "—"))} GB</code></div>
-        <div style="display:flex;gap:8px;align-items:baseline"><span>平台版本</span><code>${esc(nav.platform_version || "—")}</code></div>
-      </div>
-      <p class="mut" style="margin-top:10px">已按宿主 CPU 范围随机化硬件与平台版本（不持久化，仅预览）。</p>`,
-      actions: [{ label: "关闭" }],
-    });
-  } catch (e) { toast(`随机化失败: ${e.message}`, "err"); }
-}
-
-async function createProfileFromFp(fingerprint_name) {
-  try {
-    const r = await api("/api/browser-profiles", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: fingerprint_name, fingerprint_name }),
-    });
-    toast(`已创建 Profile #${r.id}`, "ok");
-    switchBrowserTab("profiles");
-    refreshBrowserProfiles();
-  } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
 }
 
 async function createProfileFromAccount(account_id) {
@@ -5333,31 +5253,128 @@ function renderBrowserProfiles() {
   }).join("");
 }
 
+const NOISE_VECTORS = ["canvas", "webgl", "audio", "client_rects", "sensors", "fonts"];
+const DEFAULT_PORTS = [3389, 5900, 5901, 5800, 7070, 6568, 5938, 1080, 8080, 3128, 3030];
+// 宿主平台 key (win/mac/linux), 用于默认选中
+function hostOsKey() {
+  const ua = navigator.userAgent;
+  if (/Windows/i.test(ua)) return "win";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "mac";
+  return "linux";
+}
+// 新建表单的临时选中 fingerprint (随机 GPU 结果)
+let BP_DRAFT_FP = null;
+// createBrowserProfile 创建成功后回调 (返回新 profile id 给登录流程)
+let BP_RESOLVE_PROFILE = null;
+
 function createBrowserProfile() {
+  BP_DRAFT_FP = null;
+  const os = hostOsKey();
+  const noiseRows = NOISE_VECTORS.map(v =>
+    `<div class="form-field"><label>Noise · ${esc(v)}</label>
+      <select id="bp-noise-${esc(v)}">
+        <option value="auto" selected>Auto noise</option>
+        <option value="real">Real</option>
+      </select></div>`).join("");
   uiModal({
     title: "新建独立 Profile",
+    hint: "对标 ShardX Launcher 的指纹参数",
+    wide: true,
     body: `<div class="stack">
-      <div class="form-field"><label>名称</label><input id="bp-in-name" placeholder="例如 主号-抖音"></div>
-      <div class="form-field"><label>指纹名称(留空按 fp_seed 选)</label><input id="bp-in-fp" placeholder="例如 rtx4060-v1"></div>
-      <div class="form-field"><label>fp_seed(留空自动)</label><input id="bp-in-seed" placeholder="hex 种子"></div>
-      <div class="form-field"><label>代理(留空不用)</label><input id="bp-in-proxy" placeholder="socks5://user:pass@host:port"></div>
+      <div class="form-grid">
+        <div class="form-field"><label>名称</label><input id="bp-in-name" placeholder="例如 主号-抖音"></div>
+        <div class="form-field"><label>平台 (决定指纹筛选)</label><select id="bp-in-os">
+          <option value="win"${os === "win" ? " selected" : ""}>Windows</option>
+          <option value="mac"${os === "mac" ? " selected" : ""}>macOS</option>
+          <option value="linux"${os === "linux" ? " selected" : ""}>Linux</option>
+        </select></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label>GPU / 设备</label>
+          <div class="row" style="gap:6px">
+            <input id="bp-in-fp" placeholder="随机或填 fingerprint 名(如 rtx4060-v1)" readonly style="flex:1">
+            <button type="button" class="ghost" onclick="bpRandomGpu()">随机</button>
+          </div>
+        </div>
+        <div class="form-field"><label>fp_seed(留空自动)</label><input id="bp-in-seed" placeholder="hex 种子"></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label>CPU cores (0=随 GPU)</label><input id="bp-in-cpu" type="number" min="0" placeholder="0" value="0"></div>
+        <div class="form-field"><label>Memory GB (0=随 GPU)</label><input id="bp-in-mem" type="number" min="0" placeholder="0" value="0"></div>
+      </div>
+      <div class="form-field"><label>User-Agent 覆盖(留空用指纹自带)</label><input id="bp-in-ua" placeholder="Mozilla/5.0 ..."></div>
+      <div class="form-grid">
+        <div class="form-field"><label>代理(留空不用)</label><input id="bp-in-proxy" placeholder="socks5://user:pass@host:port"></div>
+        <div class="form-field"><label>时区(空=自带, auto=按代理 geo)</label><input id="bp-in-tz" placeholder="Asia/Shanghai 或 auto"></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-field"><label>语言(空=自带, auto=按代理 geo)</label><input id="bp-in-lang" placeholder="zh-CN 或 auto"></div>
+        <div class="form-field"><label>WebRTC</label><select id="bp-in-webrtc">
+          <option value="auto" selected>Auto</option>
+          <option value="tcp_only">TCP only</option>
+          <option value="block">Block</option>
+        </select></div>
+      </div>
+      <div class="form-grid">${noiseRows}</div>
+      <div class="form-field"><label>屏蔽端口(逗号分隔)</label><input id="bp-in-ports" value="${DEFAULT_PORTS.join(",")}"></div>
     </div>`,
     actions: [
       { label: "取消" },
       { label: "创建", primary: true, onClick: async () => {
+        const noise = {};
+        NOISE_VECTORS.forEach(v => { noise[v] = $("bp-noise-" + v).value; });
+        const ports = ($("bp-in-ports").value || "").split(",")
+          .map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
         const body = {
           name: $("bp-in-name").value.trim(),
           fingerprint_name: $("bp-in-fp").value.trim(),
           fp_seed: $("bp-in-seed").value.trim(),
           proxy: $("bp-in-proxy").value.trim(),
+          os: $("bp-in-os").value,
+          ua_override: $("bp-in-ua").value.trim(),
+          cpu_cores: parseInt($("bp-in-cpu").value, 10) || 0,
+          memory_gb: parseInt($("bp-in-mem").value, 10) || 0,
+          timezone: $("bp-in-tz").value.trim(),
+          language: $("bp-in-lang").value.trim(),
+          webrtc_mode: $("bp-in-webrtc").value,
+          overrides: {
+            noise, geolocation: { mode: "auto" },
+            media_devices: { mic: 1, speakers: 1, webcam: 1 },
+            network: { blocked_ports: ports },
+            navigator: { do_not_track: false },
+          },
         };
         try {
-          await api("/api/browser-profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+          const r = await api("/api/browser-profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
           toast("已创建", "ok"); refreshBrowserProfiles();
+          _uiClose(null);
+          if (BP_RESOLVE_PROFILE) { BP_RESOLVE_PROFILE(r.id); BP_RESOLVE_PROFILE = null; }
         } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
       } },
     ],
   });
+}
+
+async function bpRandomGpu() {
+  const os = $("bp-in-os").value;
+  const fpInput = $("bp-in-fp");
+  fpInput.value = "随机中…";
+  try {
+    const cfg = await api(`/api/fingerprints/random?platform=${encodeURIComponent(os)}`);
+    BP_DRAFT_FP = cfg;
+    const nav = cfg.navigator || {};
+    fpInput.value = cfg.name || "";
+    // CPU/Memory 联动填充 (取 fingerprint 自带值)
+    $("bp-in-cpu").value = nav.hardware_concurrency || 0;
+    $("bp-in-mem").value = nav.device_memory || 0;
+    if (!($("bp-in-ua").value || "").trim()) {
+      $("bp-in-ua").value = nav.user_agent || "";
+    }
+    toast(`已随机选中 ${cfg.name || "?"}`, "ok");
+  } catch (e) {
+    fpInput.value = "";
+    toast(`随机失败: ${e.message}`, "err");
+  }
 }
 
 async function startBrowserProfile(id) {
@@ -5397,6 +5414,7 @@ async function bindProfileToAccount(profile_id) {
         try {
           await api(`/api/browser-profiles/${profile_id}/bind-account?account_id=${account_id}`, { method: "POST" });
           toast("已绑定", "ok"); refreshBrowserProfiles(); refreshAccounts();
+          _uiClose(null);
         } catch (e) { toast(`绑定失败: ${e.message}`, "err"); }
       } },
     ],
@@ -5422,7 +5440,7 @@ async function editBrowserProfile(id) {
             name: $("bp-edit-name").value.trim(), fingerprint_name: $("bp-edit-fp").value.trim(),
             proxy: $("bp-edit-proxy").value.trim(), note: $("bp-edit-note").value.trim(),
           }) });
-          toast("已保存", "ok"); refreshBrowserProfiles();
+          toast("已保存", "ok"); refreshBrowserProfiles(); _uiClose(null);
         } catch (e) { toast(`保存失败: ${e.message}`, "err"); }
       } },
     ],
@@ -5436,7 +5454,7 @@ async function deleteBrowserProfile(id) {
     actions: [
       { label: "取消" },
       { label: "删除", danger: true, onClick: async () => {
-        try { await api(`/api/browser-profiles/${id}`, { method: "DELETE" }); toast("已删除", "ok"); refreshBrowserProfiles(); }
+        try { await api(`/api/browser-profiles/${id}`, { method: "DELETE" }); toast("已删除", "ok"); refreshBrowserProfiles(); _uiClose(null); }
         catch (e) { toast(`删除失败: ${e.message}`, "err"); }
       } },
     ],
@@ -5462,7 +5480,7 @@ function importProfileCookies(id) {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ cookies }),
           });
-          toast("已导入", "ok");
+          toast("已导入", "ok"); _uiClose(null);
         } catch (e) { toast(`导入失败: ${e.message}`, "err"); }
       } },
     ],
@@ -5523,7 +5541,7 @@ async function bindProxyToProfile(proxy_url) {
         const id = $("bp-bind-prof").value;
         try {
           await api(`/api/browser-profiles/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxy: proxy_url }) });
-          toast("已关联", "ok"); refreshBrowserProfiles();
+          toast("已关联", "ok"); refreshBrowserProfiles(); _uiClose(null);
         } catch (e) { toast(`关联失败: ${e.message}`, "err"); }
       } },
     ],

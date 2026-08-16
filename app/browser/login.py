@@ -101,7 +101,7 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
             except Exception:
                 pass
         try:
-            await ctx.close()
+            await mgr.close_login_ctx(ctx)
         except Exception:
             pass
 
@@ -345,7 +345,7 @@ async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
             except Exception:
                 pass
         try:
-            await ctx.close()
+            await mgr.close_login_ctx(ctx)
         except Exception:
             pass
     return logged, state_json, nickname
@@ -407,7 +407,7 @@ async def interactive_ks_creator_login(mgr: BrowserManager, identity: Identity,
             except Exception:
                 pass
         try:
-            await ctx.close()
+            await mgr.close_login_ctx(ctx)
         except Exception:
             pass
     return logged, state_json, nickname
@@ -537,7 +537,7 @@ async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
                 state_json = json.dumps(await ctx.storage_state())
     finally:
         try:
-            await ctx.close()
+            await mgr.close_login_ctx(ctx)
         except Exception:
             pass
     return logged, state_json, nickname

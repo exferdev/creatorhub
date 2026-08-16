@@ -34,7 +34,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
                       fetch_dm_history)
-from .browser.fingerprint_store import host_platform_key, list_profiles_local
+from .browser.fingerprint_store import host_platform_key
 from .platforms.douyin import (
     DouyinClient,
     cookie_from_state as douyin_cookie_from_state,
@@ -405,19 +405,26 @@ async def _enrich_account_profile(account_id: int, state: str, *,
             acc.status = "active"
             s.add(acc); s.commit()
             return _done("ok")
-        if (err == "logged_out" or
-                getattr(err, "category", None) == RiskCategory.AUTH.value):
+        if err == "logged_out":
+            # 登录态有效性以 cookie 探活(check_cookie_health)为准,不以此处浏览器
+            # 抓资料为准。此处 logged_out 多因抓资料复用浏览器时 fallback 到无登录
+            # 态的后端所致,属「资料抓取失败」而非「登录失效」,降级为 error。
+            # 不把账号 status 写成 invalid,避免登录成功的账号被误判失效。
+            return _done("error", err or "logged_out")
+        if getattr(err, "category", None) == RiskCategory.AUTH.value:
             acc.status = "invalid"
             s.add(acc); s.commit()
-            return _done("invalid", err or "logged_out")
+            return _done("invalid", str(err))
     return _done("error", err or "error")
 
 
 async def _run_login(task_id: str, creator: bool = False, account_id: int | None = None,
-                     platform: str = "douyin", proxy_choice: str = "auto"):
+                     platform: str = "douyin", proxy_choice: str = "auto",
+                     profile_id: int | None = None):
     """扫码登录。多账号隔离模型:一账号=一持久 profile。
     - 传 account_id:登录进该账号自己的 profile(重新登录/补创作者登录)。
-    - 不传:用「临时 profile」登录,**只有登录成功才建账号**;关窗/超时/取消都不留残号。"""
+    - 传 profile_id:用独立 Profile 登录(共享其 profile_dir + 指纹 + 代理),成功后账号绑定该 Profile。
+    - 都不传:用「临时 profile」登录,**只有登录成功才建账号**;关窗/超时/取消都不留残号。"""
     import os
     import shutil
     from .browser import Identity, generate_identity_fields
@@ -427,6 +434,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
     proxy_reservation_key = ""
     new_fields = None
     login_environment = {}
+    bind_profile = None           # 登录成功后要绑定的独立 Profile 对象
     nm = ("小红书账号" if platform == "xhs"
           else "快手账号" if platform == "kuaishou"
           else "视频号账号" if platform == "shipinhao"
@@ -443,6 +451,34 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 s.add(acc); s.commit(); s.refresh(acc)
                 identity = browser.identity_for(acc)
                 acc_id = acc.id
+        elif profile_id:
+            # 用独立 Profile 登录:共享其 profile_dir + 指纹 + 代理,成功后账号绑定该 Profile。
+            with get_session() as s:
+                prof = s.get(BrowserProfile, profile_id)
+                if not prof:
+                    login_tasks[task_id] = {"status": "error", "error": "Profile 不存在"}
+                    return
+                bind_profile = prof
+                fp_seed = prof.fp_seed or uuid.uuid4().hex
+                overrides = _parse_overrides(prof.overrides) or None
+            acc_id = None
+            new_fields = None
+            # 共享 Profile 的持久化目录(登录态直接落盘到 Profile 目录)
+            tmp_profile = bind_profile.profile_dir or os.path.join(
+                cfg.engine.profiles_dir, "prof_" + uuid.uuid4().hex)
+            identity = Identity(
+                account_id=None, profile_dir=tmp_profile, identity_mode="native",
+                platform=platform,
+                proxy=bind_profile.proxy or "",
+                fp_seed=fp_seed,
+                fingerprint_name=bind_profile.fingerprint_name,
+                os=bind_profile.os,
+                ua_override=bind_profile.ua_override,
+                cpu_cores=bind_profile.cpu_cores, memory_gb=bind_profile.memory_gb,
+                tz_override=bind_profile.timezone,
+                language_override=bind_profile.language,
+                webrtc_mode=bind_profile.webrtc_mode or "auto",
+                overrides=overrides)
         else:
             acc_id = None
             new_fields = generate_identity_fields()
@@ -529,7 +565,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                         await browser.close_context(identity.key)
                     except Exception:
                         pass
-                    shutil.rmtree(tmp_profile, ignore_errors=True)
+                    if bind_profile is None:
+                        shutil.rmtree(tmp_profile, ignore_errors=True)
                 login_tasks[task_id] = {"status": "error",
                                         "error": f"登录态无效: {msg} — 请关闭窗口后重试，或重新扫码"}
                 return
@@ -539,15 +576,29 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 if account_id:
                     acc = s.get(DouyinAccount, acc_id)
                 else:
-                    acc = DouyinAccount(
-                        platform=platform, nickname=nickname or nm, status="active",
-                        profile_dir=tmp_profile, proxy=identity.proxy,
-                        identity_mode="native", ua=identity.ua or "",
-                        viewport_w=new_fields["viewport_w"],
-                        viewport_h=new_fields["viewport_h"],
-                        timezone_id=new_fields["timezone_id"], locale=new_fields["locale"],
-                        fp_seed=new_fields["fp_seed"])
+                    if bind_profile is not None:
+                        # 用独立 Profile 登录:账号共享 Profile 目录,并反向绑定
+                        acc = DouyinAccount(
+                            platform=platform, nickname=nickname or nm, status="active",
+                            profile_dir=bind_profile.profile_dir or tmp_profile,
+                            proxy=bind_profile.proxy or "",
+                            identity_mode="native", ua=identity.ua or "",
+                            fp_seed=bind_profile.fp_seed or "",
+                            browser_profile_id=bind_profile.id,
+                            shardx_id=bind_profile.shardx_id or "")
+                    else:
+                        acc = DouyinAccount(
+                            platform=platform, nickname=nickname or nm, status="active",
+                            profile_dir=tmp_profile, proxy=identity.proxy,
+                            identity_mode="native", ua=identity.ua or "",
+                            viewport_w=new_fields["viewport_w"],
+                            viewport_h=new_fields["viewport_h"],
+                            timezone_id=new_fields["timezone_id"], locale=new_fields["locale"],
+                            fp_seed=new_fields["fp_seed"])
                     s.add(acc); s.commit(); s.refresh(acc); acc_id = acc.id
+                    # 绑定后清 fp_seed 由 profile 接管 (已有 fp_seed 的绑定场景)
+                    if bind_profile is not None and bind_profile.fp_seed:
+                        acc.fp_seed = ""
                 if creator:
                     acc.creator_storage_state = state_json
                     if not is_xhs or not acc.storage_state:
@@ -565,6 +616,29 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 acc.cookie_status = "valid"
                 acc.last_health_check = datetime.utcnow()
                 s.add(acc); s.commit()
+
+            # 用独立 Profile 登录成功:回填固化的 shardx_id 到 Profile (首次固化,后续复用)
+            if bind_profile is not None:
+                sid = getattr(identity, "shardx_id", "") or ""
+                if not sid:
+                    try:
+                        fp_id_file = Path(bind_profile.profile_dir or tmp_profile) / ".fpdb_id"
+                        if fp_id_file.exists():
+                            sid = fp_id_file.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        sid = ""
+                if sid:
+                    with get_session() as s:
+                        p = s.get(BrowserProfile, bind_profile.id)
+                        if p and not p.shardx_id:
+                            p.shardx_id = sid
+                            s.add(p); s.commit()
+                    # 同步到刚建的账号
+                    with get_session() as s:
+                        a = s.get(DouyinAccount, acc_id)
+                        if a and not a.shardx_id:
+                            a.shardx_id = sid
+                            s.add(a); s.commit()
 
             # 登录态已经持久化且账号已经落库：立即通知前端把账号显示出来。
             # 完整资料抓取可能还需数秒，不能让它阻塞“扫码成功”的交互反馈。
@@ -599,7 +673,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                     await browser.close_context(identity.key)
                 except Exception:
                     pass
-                shutil.rmtree(tmp_profile, ignore_errors=True)
+                if bind_profile is None:
+                    shutil.rmtree(tmp_profile, ignore_errors=True)
             login_tasks[task_id] = {
                 "status": "expired",
                 "environment": login_environment,
@@ -611,7 +686,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 await browser.close_context(identity.key)
             except Exception:
                 pass
-            shutil.rmtree(tmp_profile, ignore_errors=True)
+            if bind_profile is None:
+                shutil.rmtree(tmp_profile, ignore_errors=True)
         login_tasks[task_id] = {
             "status": "error",
             "error": f"{type(e).__name__}: {e}",
@@ -623,85 +699,90 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
 
 
 @app.post("/api/login/browser/start")
-async def login_browser_start(proxy: str = "auto"):
+async def login_browser_start(proxy: str = "auto", profile_id: int | None = None):
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, proxy_choice=proxy, profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开浏览器窗口,请在其中点击“登录”并用抖音 App 扫码"}
 
 
 @app.post("/api/login/creator/start")
-async def login_creator_start(proxy: str = "auto"):
+async def login_creator_start(proxy: str = "auto", profile_id: int | None = None):
     """创作中心登录(用于自有账号评论模式;其登录态同样可用于公开抓取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, creator=True, proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, creator=True, proxy_choice=proxy,
+                                   profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开创作中心窗口,请在其中扫码登录你的抖音号"}
 
 
 @app.post("/api/login/xhs/start")
-async def login_xhs_start(proxy: str = "auto"):
+async def login_xhs_start(proxy: str = "auto", profile_id: int | None = None):
     """小红书扫码登录(用于监控/读取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, platform="xhs", proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, platform="xhs", proxy_choice=proxy,
+                                   profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开小红书官网首页,请在窗口中点击登录并用小红书 App 扫码"}
 
 
 @app.post("/api/login/xhs-creator/start")
-async def login_xhs_creator_start(proxy: str = "auto"):
+async def login_xhs_creator_start(proxy: str = "auto", profile_id: int | None = None):
     """小红书「创作服务平台」登录(用于发布/已发布列表)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, creator=True, platform="xhs", proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, creator=True, platform="xhs",
+                                   proxy_choice=proxy, profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开小红书创作平台窗口,请扫码登录(发布用)"}
 
 
 @app.post("/api/login/kuaishou/start")
-async def login_ks_start(proxy: str = "auto"):
+async def login_ks_start(proxy: str = "auto", profile_id: int | None = None):
     """快手扫码登录(用于监控/读取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, platform="kuaishou", proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, platform="kuaishou", proxy_choice=proxy,
+                                   profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开快手窗口,请在其中用快手 App 扫码登录"}
 
 
 @app.post("/api/login/kuaishou-creator/start")
-async def login_ks_creator_start(proxy: str = "auto"):
+async def login_ks_creator_start(proxy: str = "auto", profile_id: int | None = None):
     """快手「创作者服务平台」登录(用于发布)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
     asyncio.create_task(_run_login(task_id, creator=True, platform="kuaishou",
-                                   proxy_choice=proxy))
+                                   proxy_choice=proxy, profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开快手创作平台窗口,请扫码登录(发布用)"}
 
 
 @app.post("/api/login/shipinhao/start")
-async def login_channels_start(proxy: str = "auto"):
+async def login_channels_start(proxy: str = "auto", profile_id: int | None = None):
     """视频号扫码登录(读取/发布共用,微信扫码)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
-    asyncio.create_task(_run_login(task_id, platform="shipinhao", proxy_choice=proxy))
+    asyncio.create_task(_run_login(task_id, platform="shipinhao", proxy_choice=proxy,
+                                   profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开视频号助手窗口,请用微信扫码登录"}
 
@@ -6280,10 +6361,30 @@ class ProfileIn(BaseModel):
     proxy: str = ""
     folder: str = ""
     note: str = ""
+    # ShardX Launcher 对标覆盖字段
+    os: str = ""
+    ua_override: str = ""
+    cpu_cores: int = 0
+    memory_gb: int = 0
+    timezone: str = ""
+    language: str = ""
+    webrtc_mode: str = "auto"
+    overrides: dict | None = None
 
 
 class CookieImportIn(BaseModel):
     cookies: list[dict] = []
+
+
+def _parse_overrides(raw: str) -> dict:
+    """解析 overrides JSON 列(容错: 空/非法返回空 dict)。"""
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
 
 
 def _profile_dict(p: BrowserProfile) -> dict:
@@ -6298,6 +6399,11 @@ def _profile_dict(p: BrowserProfile) -> dict:
         "fingerprint_name": p.fingerprint_name, "fp_seed": p.fp_seed,
         "proxy": _mask_proxy(p.proxy), "folder": p.folder, "note": p.note,
         "profile_dir": p.profile_dir, "shardx_id": p.shardx_id,
+        "os": p.os, "ua_override": p.ua_override,
+        "cpu_cores": p.cpu_cores, "memory_gb": p.memory_gb,
+        "timezone": p.timezone, "language": p.language,
+        "webrtc_mode": p.webrtc_mode,
+        "overrides": _parse_overrides(p.overrides),
         "running": p.id in profile_browsers,
         "accounts": accounts,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -6321,7 +6427,12 @@ async def create_browser_profile(body: ProfileIn):
             fingerprint_name=body.fingerprint_name,
             fp_seed=fp_seed,
             proxy=body.proxy, folder=body.folder, note=body.note,
-            profile_dir=pdir)
+            profile_dir=pdir,
+            os=body.os, ua_override=body.ua_override,
+            cpu_cores=body.cpu_cores, memory_gb=body.memory_gb,
+            timezone=body.timezone, language=body.language,
+            webrtc_mode=body.webrtc_mode or "auto",
+            overrides=json.dumps(body.overrides or {}, ensure_ascii=False))
         s.add(prof); s.commit(); s.refresh(prof)
         return _profile_dict(prof)
 
@@ -6347,10 +6458,17 @@ async def edit_browser_profile(profile_id: int, body: ProfileIn):
         p = s.get(BrowserProfile, profile_id)
         if not p:
             raise HTTPException(404, "profile 不存在")
-        for k in ("name", "fingerprint_name", "fp_seed", "proxy", "folder", "note"):
+        for k in ("name", "fingerprint_name", "fp_seed", "proxy", "folder", "note",
+                  "os", "ua_override", "timezone", "language", "webrtc_mode"):
             v = getattr(body, k)
             if v:
                 setattr(p, k, v)
+        if body.cpu_cores:
+            p.cpu_cores = body.cpu_cores
+        if body.memory_gb:
+            p.memory_gb = body.memory_gb
+        if body.overrides is not None:
+            p.overrides = json.dumps(body.overrides, ensure_ascii=False)
         s.add(p); s.commit(); s.refresh(p)
         return _profile_dict(p)
 
@@ -6383,13 +6501,21 @@ async def start_browser_profile(profile_id: int, headless: bool = False):
             raise HTTPException(404, "profile 不存在")
         name, fingerprint_name = p.name, p.fingerprint_name
         fp_seed, proxy, pdir = p.fp_seed, p.proxy, p.profile_dir
+        os_, ua_override = p.os, p.ua_override
+        cpu_cores, memory_gb = p.cpu_cores, p.memory_gb
+        timezone, language = p.timezone, p.language
+        webrtc_mode = p.webrtc_mode or "auto"
+        overrides = _parse_overrides(p.overrides)
     # 已运行则先停旧的(同一 profile 不能并存)
     old = profile_browsers.pop(profile_id, None)
     if old is not None:
         await browser.stop_profile(old)
     ctx = await browser.launch_profile(
         name=name, fingerprint_name=fingerprint_name, fp_seed=fp_seed,
-        proxy=proxy, profile_dir=pdir, headless=headless)
+        proxy=proxy, profile_dir=pdir, headless=headless,
+        os=os_, ua_override=ua_override, cpu_cores=cpu_cores,
+        memory_gb=memory_gb, timezone=timezone, language=language,
+        webrtc_mode=webrtc_mode, overrides=overrides)
     profile_browsers[profile_id] = ctx
     # 固化后回填 shardx_id 到 DB (首次启动固化, 后续复用)
     sid = getattr(ctx, "_shardx_id", "")
@@ -6549,19 +6675,30 @@ async def export_profile_cookies(profile_id: int):
 # ─────────── fingerprint-db 指纹浏览/随机化 (ShardX Launcher 式) ───────────
 @app.get("/api/fingerprints/list")
 async def list_fingerprints(platform: str | None = None):
-    """列 fingerprint-db profile 元数据 (有序, 供前端展示/选择)。API 优先, 文件回退。"""
+    """列 fingerprint-db profile 元数据 (有序, 供前端展示/选择)。仅走 HTTP API。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     key = platform or host_platform_key()
-    profiles = None
-    if browser._fpdb_client.enabled:
-        try:
-            profiles = await browser._fpdb_client.list_profiles(key)
-        except Exception:
-            profiles = None
-    if profiles is None:
-        profiles = list_profiles_local(browser._fingerprint_db_dir, key)
+    try:
+        profiles = await browser._fpdb_client.list_profiles(key)
+    except Exception:
+        raise HTTPException(502, "fingerprint-db API 不可达")
     return {"ok": True, "count": len(profiles), "profiles": profiles}
+
+
+@app.get("/api/fingerprints/random")
+async def random_fingerprint(platform: str | None = None):
+    """按平台随机取一个 fingerprint 的完整 config (GPU 随机选择用)。仅走 HTTP API。"""
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    key = platform or host_platform_key()
+    try:
+        data = await browser._fpdb_client.pick(uuid.uuid4().hex, key)
+    except Exception:
+        raise HTTPException(502, "fingerprint-db API 不可达")
+    if data is None:
+        raise HTTPException(404, "该平台无可用 fingerprint")
+    return data
 
 
 @app.get("/api/fingerprints/{name}")

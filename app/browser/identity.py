@@ -72,6 +72,16 @@ class Identity:
     fp_seed: str = ""
     # 绑定的 ShardX profile id(fpdb-xxx);非空则 launch 时 open_profile 复用,跳过 fp_seed 随机
     shardx_id: str = ""
+    # ── 独立 Profile 指纹覆盖 (ShardX Launcher 式, douyin/shardx 引擎生效) ──
+    fingerprint_name: str = ""     # 非空则加载指定 fingerprint-db profile(跳过 seed 选型)
+    os: str = ""                   # 平台 mac/win/linux(空=宿主);决定 fingerprint 筛选
+    ua_override: str = ""          # UA 覆盖(空=用 fingerprint 自带)
+    cpu_cores: int = 0             # CPU 覆盖(0=自带)
+    memory_gb: int = 0             # 内存覆盖(0=自带)
+    tz_override: str = ""          # 时区覆盖(""=自带, "auto"=按代理 geo)
+    language_override: str = ""    # 语言覆盖(""=自带, "auto"=按代理 geo)
+    webrtc_mode: str = "auto"      # auto/block/tcp_only
+    overrides: dict = None         # noise/geolocation/media_devices/network/navigator
     # geolocation 伪造坐标(与代理 IP 归属地/时区对齐)。0 表示未设定,由 seed 派生兜底。
     geo_lat: float = 0.0
     geo_lon: float = 0.0
