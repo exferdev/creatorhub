@@ -193,6 +193,8 @@ async def lifespan(app: FastAPI):
         fingerprint_db_read_key=cfg.engine.fingerprint_db_read_key)
     await browser.start()
     engine = MonitorEngine(cfg, browser)
+    # 首次启动:自动采集本机真机指纹并上传 fingerprint-db(仅一次,后续不自动)
+    asyncio.create_task(_collect_true_device_once())
     startup_now = datetime.utcnow()
     pruned_risk_events = engine._prune_risk_events_if_due(startup_now)
     if pruned_risk_events:
@@ -214,6 +216,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CreatorHub", lifespan=lifespan)
 WEB_DIR = Path(__file__).parent / "web"
+
+
+async def _collect_true_device_once():
+    """首次启动:采集本机真机指纹并上传 fingerprint-db,仅执行一次。
+
+    用 AppSetting('fp_collected') 标记; 采集成功并上传后置 '1', 之后不再自动采集。
+    失败(采集异常/上传失败/脏样本拒收)不标记, 下次启动重试。
+    """
+    from .settings import get_setting, set_setting
+    from .browser.fingerprint_store import FingerprintDbClient
+    try:
+        if get_setting("fp_collected") == "1":
+            return
+        client = FingerprintDbClient(
+            cfg.engine.fingerprint_db_base_url,
+            cfg.engine.fingerprint_db_read_key,
+            cfg.engine.fingerprint_db_write_key)
+        if not client.write_enabled:
+            print("[startup] fingerprint-db 写 token 未配置, 跳过真机指纹采集上传")
+            return
+        from .browser.true_device_collect import collect_true_device
+        data = await collect_true_device()
+        name = data.get("name") or "device"
+        resp = await client.submit_raw(name, data)
+        set_setting("fp_collected", "1")
+        print(f"[startup] 真机指纹已采集并上传 fingerprint-db: {name} "
+              f"(GPU: {data.get('webgl', {}).get('renderer', '?')[:60]})")
+    except Exception as e:
+        print(f"[startup] 真机指纹采集/上传失败(不影响启动, 下次重试): {type(e).__name__}: {e}")
 
 
 # ─────────── 扫码登录(真实浏览器) ───────────

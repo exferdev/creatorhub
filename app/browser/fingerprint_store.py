@@ -61,19 +61,27 @@ class FingerprintDbClient:
     """fingerprint-db 只读 API 客户端。"""
 
     def __init__(self, base_url: str, read_key: str = "",
-                 timeout: float = 15.0):
+                 write_key: str = "", timeout: float = 15.0):
         self._base_url = (base_url or "").rstrip("/")
         self._read_key = read_key
+        self._write_key = write_key
         self._timeout = timeout
 
     @property
     def enabled(self) -> bool:
         return bool(self._base_url)
 
+    @property
+    def write_enabled(self) -> bool:
+        return bool(self._base_url) and bool(self._write_key)
+
     def _headers(self) -> dict:
         if self._read_key:
             return {"Authorization": f"Bearer {self._read_key}"}
         return {}
+
+    def _write_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._write_key}"}
 
     async def list_profiles(self, platform: str) -> list[dict]:
         """返回**有序** profile 元数据列表 (name/platform/gpu/chrome_major/renderer)。"""
@@ -141,6 +149,23 @@ class FingerprintDbClient:
         except Exception:
             pass
         return cfg
+
+    async def submit_raw(self, name: str, data: dict) -> dict:
+        """提交真机采集样本到 fingerprint-db (POST /api/v1/collect/raw)。
+
+        需写 token (fingerprint_db_write_key)。指纹库侧做脏样本拒收,
+        通过后存 database/real/<name>.json。返回 fingerprint-db 响应 dict。
+        """
+        if not self.write_enabled:
+            raise RuntimeError("fingerprint-db 写 token 未配置 (fingerprint_db_write_key 为空)")
+        async with httpx.AsyncClient(base_url=self._base_url,
+                                     headers=self._write_headers(),
+                                     timeout=self._timeout,
+                                     trust_env=False) as cli:
+            r = await cli.post("/api/v1/collect/raw",
+                               json={"name": name, "data": data})
+            r.raise_for_status()
+            return r.json()
 
 
 def _seed_from(fp_seed: str) -> int:
