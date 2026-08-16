@@ -258,15 +258,18 @@ function uiPrompt({ title, hint, value, placeholder, multiline, rows }) {
 // actions: [{label, primary?, danger?, onClick?}]。onClick 返回 Promise 时不自动关闭;
 // 未提供 onClick 的按钮点击即关闭。body 是 HTML 字符串。
 function uiModal({ title = "", hint = "", body = "", wide = false, actions = [] } = {}) {
+  const modal = $("uimodal");
+  const footer = modal.querySelector(".rp-box > .row");
+  // 保存默认「取消+确定」按钮,关闭时恢复 —— 否则 uiSelect/uiPrompt 等后续
+  // 用 _uiOpen 时 #ui-ok 已被清空,导致下拉/输入模态无法显示。
+  const defaultFooter = footer.innerHTML;
   return new Promise(res => {
-    _uiResolve = res;
+    _uiResolve = (val) => { footer.innerHTML = defaultFooter; res(val); };
     _uiCancelVal = null;
     _uiGetVal = null;
     $("ui-title").textContent = title || "";
     $("ui-hint").textContent = hint || "";
     $("ui-body").innerHTML = body || "";
-    const modal = $("uimodal");
-    const footer = modal.querySelector(".rp-box > .row");
     // 动态渲染底部按钮(替换默认的 取消+确定)
     footer.innerHTML = "";
     const btns = (actions.length ? actions : [{ label: "确定" }]);
@@ -1037,14 +1040,10 @@ async function chooseLoginProfile() {
   return { profile_id: pid, proxy: "" };
 }
 
-// 弹出新建 Profile 表单并等待创建完成,返回新 profile id (取消返回 null)
-function createProfileForLogin() {
-  return new Promise(res => {
-    BP_RESOLVE_PROFILE = res;
-    createBrowserProfile();
-    // 若用户取消(表单未创建), 兜底: 30s 超时 resolve null
-    setTimeout(() => { if (BP_RESOLVE_PROFILE) { BP_RESOLVE_PROFILE(null); BP_RESOLVE_PROFILE = null; } }, 30000);
-  });
+// 弹出新建 Profile 表单并等待结果:创建成功返回 profile id,取消/关闭返回 null
+async function createProfileForLogin() {
+  const id = await createBrowserProfile();
+  return id || null;
 }
 function loginStartUrl(path, profileId) {
   let q = "";
@@ -1053,7 +1052,7 @@ function loginStartUrl(path, profileId) {
 }
 async function startLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开浏览器窗口…";
@@ -1117,7 +1116,7 @@ function pollLogin(tid) {
 // ─── 创作者登录(自有账号评论模式用) ───
 async function startCreatorLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开创作中心窗口…";
@@ -1131,7 +1130,7 @@ async function startCreatorLogin() {
 // ─── 小红书扫码登录 ───
 async function startXhsLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开小红书窗口…";
@@ -1145,7 +1144,7 @@ async function startXhsLogin() {
 // ─── 小红书创作者登录(发布用) ───
 async function startXhsCreatorLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开小红书创作平台窗口…";
@@ -1159,7 +1158,7 @@ async function startXhsCreatorLogin() {
 // ─── 快手扫码登录 ───
 async function startKsLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开快手窗口…";
@@ -1173,7 +1172,7 @@ async function startKsLogin() {
 // ─── 快手创作者登录(发布用) ───
 async function startKsCreatorLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开快手创作平台窗口…";
@@ -1187,7 +1186,7 @@ async function startKsCreatorLogin() {
 // ─── 视频号扫码登录(读取/发布共用,微信扫码) ───
 async function startChannelsLogin() {
   const choice = await chooseLoginProfile();
-  if (choice === null) return;
+  if (!choice || !choice.profile_id) return;
   $("cookiebox").style.display = "none";
   $("qrbox").style.display = "block";
   $("qrstatus").textContent = "正在打开视频号助手窗口…";
@@ -5154,7 +5153,7 @@ switchHubTab(HUB_TAB);   // 恢复上次停留的子标签(我的作品/关注/�
 PLATFORM = (() => { try { const p = localStorage.getItem("dym-pf"); return ["xhs", "douyin", "kuaishou", "shipinhao"].includes(p) ? p : "douyin"; } catch (e) { return "douyin"; } })();
 applyPlatformUI();
 
-onTypeChange(); bindPubFilePicker(); onPubType(); onPubMethodChange(); populateWatchAccount(); applyDanmakuForm(); onAcMode(); loadSettings(); refreshAccounts(); refreshProxies(); refreshChannels(); loop();
+onTypeChange(); bindPubFilePicker(); onPubType(); onPubMethodChange(); populateWatchAccount(); applyDanmakuForm(); onAcMode(); loadSettings(); refreshAccounts(); refreshProxies(); refreshChannels(); refreshBrowserProfiles(); loop();
 enhanceAllSelects();   // 把所有原生 <select> 升级为美化下拉
 enhanceAllMetaControls(); // 分组/标签：当前平台词库下拉，可搜索并新增
 enhanceAllDateTime();  // 把 datetime-local 升级为自定义日期选择器
@@ -5227,6 +5226,7 @@ async function refreshBrowserProfiles() {
 }
 
 function renderBrowserProfiles() {
+  if ($("tb-bp")) $("tb-bp").textContent = BP_LIST.length;
   const tbody = $("bp-table").querySelector("tbody");
   if (!BP_LIST.length) { tbody.innerHTML = empty(7, "暂无独立 Profile", "i-inbox", "点「新建 Profile」或从指纹库创建"); return; }
   tbody.innerHTML = BP_LIST.map(p => {
@@ -5264,8 +5264,6 @@ function hostOsKey() {
 }
 // 新建表单的临时选中 fingerprint (随机 GPU 结果)
 let BP_DRAFT_FP = null;
-// createBrowserProfile 创建成功后回调 (返回新 profile id 给登录流程)
-let BP_RESOLVE_PROFILE = null;
 
 function createBrowserProfile() {
   BP_DRAFT_FP = null;
@@ -5276,7 +5274,8 @@ function createBrowserProfile() {
         <option value="auto" selected>Auto noise</option>
         <option value="real">Real</option>
       </select></div>`).join("");
-  uiModal({
+  // 返回 Promise<profile_id|null>:创建成功 resolve id,取消/ESC/遮罩 resolve null
+  const p = uiModal({
     title: "新建独立 Profile",
     hint: "对标 ShardX Launcher 的指纹参数",
     wide: true,
@@ -5347,12 +5346,14 @@ function createBrowserProfile() {
         try {
           const r = await api("/api/browser-profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
           toast("已创建", "ok"); refreshBrowserProfiles();
-          _uiClose(null);
-          if (BP_RESOLVE_PROFILE) { BP_RESOLVE_PROFILE(r.id); BP_RESOLVE_PROFILE = null; }
+          _uiClose(r.id);   // 用新 profile id 作为模态 resolve 值
         } catch (e) { toast(`创建失败: ${e.message}`, "err"); }
       } },
     ],
   });
+  // 表单打开后默认随机加载一个 GPU (按默认平台), 用户仍可点「随机」换一个
+  setTimeout(() => { if (document.getElementById("bp-in-fp")) bpRandomGpu(); }, 80);
+  return p;
 }
 
 async function bpRandomGpu() {

@@ -6420,11 +6420,23 @@ async def list_browser_profiles():
 @app.post("/api/browser-profiles")
 async def create_browser_profile(body: ProfileIn):
     fp_seed = body.fp_seed or uuid.uuid4().hex
+    fingerprint_name = body.fingerprint_name or ""
+    # 未指定 GPU 时,按 fp_seed 预解析指纹,让列表直接显示将选中的 GPU 型号
+    # (与启动时 _pick_custom_profile 用同一 fp_seed → 同一确定性选择,结果一致)
+    if not fingerprint_name and browser is not None:
+        try:
+            key = body.os or host_platform_key()
+            data = await browser._fpdb_client.pick(fp_seed, key)
+            if data and data.get("name"):
+                fingerprint_name = data["name"]
+        except Exception as e:
+            print(f"[create-profile] 预解析指纹失败: {type(e).__name__}: {e}")
+            fingerprint_name = ""
     pdir = str(Path(cfg.engine.profiles_dir) / ("prof_" + uuid.uuid4().hex))
     with get_session() as s:
         prof = BrowserProfile(
             name=body.name or f"profile-{uuid.uuid4().hex[:6]}",
-            fingerprint_name=body.fingerprint_name,
+            fingerprint_name=fingerprint_name,
             fp_seed=fp_seed,
             proxy=body.proxy, folder=body.folder, note=body.note,
             profile_dir=pdir,
