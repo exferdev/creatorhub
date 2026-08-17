@@ -618,73 +618,18 @@ class BrowserManager:
                     pass
         return ctx
 
-    async def _launch_cloak(self, identity: Identity, headless: bool) -> BrowserContext:
-        """CloakBrowser 引擎级启动 (v146 免费, 无并发限制)。
-
-        C++ 源码 58 补丁: canvas(toDataURL层seed噪声)/GPU/audio/字体/屏幕/硬件 按
-        --fingerprint=seed 差异化且无痕 (getImageData 真实, 函数 native)。
-        fp_seed 确定性映射 → 同账号每次同指纹 (返回访问者一致)。
-        """
-        from cloakbrowser import launch_persistent_context_async
-        pdir = Path(identity.profile_dir)
-        pdir.mkdir(parents=True, exist_ok=True)
-        seed = self._fingerprint_seed_from(identity.fp_seed)
-        proxy = _parse_proxy(identity.proxy)
-        kwargs: Dict[str, Any] = dict(
-            headless=headless,
-            args=[
-                f"--fingerprint={seed}",
-                # 存储配额设为 30GB 呈现正常 profile。实测 BrowserScan:
-                # 5000MB 仍被判定隐身(-10%), 30000MB 通过 — 正常 Chrome 配额
-                # 通常数 GB~数十 GB, 阈值高于 README 旧示例的 5000。
-                "--fingerprint-storage-quota=30000",
-            ],
-            viewport={"width": identity.viewport_w, "height": identity.viewport_h},
-            locale=identity.locale or "zh-CN",
-            timezone_id=identity.timezone_id or "Asia/Shanghai",
-        )
-        if proxy:
-            kwargs["proxy"] = proxy
-        ctx = await launch_persistent_context_async(str(pdir), **kwargs)
-        # probe 实际 UA 回写 (CloakBrowser 引擎层按 seed 生成, 同账号每次一致)
-        probe_page = None
-        try:
-            pages = list(ctx.pages)
-            probe_page = pages[0] if pages else await ctx.new_page()
-            actual_ua = await probe_page.evaluate("navigator.userAgent")
-            if actual_ua:
-                identity.ua = str(actual_ua)
-                if identity.account_id is not None and self._native_ua_callback:
-                    self._native_ua_callback(identity.account_id, identity.ua)
-        except Exception:
-            pass
-        finally:
-            if probe_page is not None and probe_page not in list(ctx.pages):
-                try:
-                    await probe_page.close()
-                except Exception:
-                    pass
-        return ctx
-
     async def _launch_persistent(self, identity: Identity, headless: bool = True
                                  ) -> BrowserContext:
         # ShardX 引擎级方案 (Chromium 149, 170 真机设备库; BrowserScan WebGL/Audio/
-        # 隐身全过, 实测)。抖音账号优先, 失败回退 CloakBrowser → 系统 Chrome。
+        # 隐身全过, 实测)。抖音账号必须走 ShardX 引擎, 启动失败直接抛错, 无回退。
         if identity.platform == "douyin":
-            try:
-                return await self._launch_shardx(
-                    identity, headless,
-                    fingerprint_name=identity.fingerprint_name,
-                    os=identity.os, ua_override=identity.ua_override,
-                    cpu_cores=identity.cpu_cores, memory_gb=identity.memory_gb,
-                    timezone=identity.tz_override, language=identity.language_override,
-                    webrtc_mode=identity.webrtc_mode, overrides=identity.overrides)
-            except Exception as e:
-                print(f"[browser] shardx launch failed -> cloak fallback: {e!r}")
-            try:
-                return await self._launch_cloak(identity, headless)
-            except Exception as e:
-                print(f"[browser] cloakbrowser launch failed -> fallback: {e!r}")
+            return await self._launch_shardx(
+                identity, headless,
+                fingerprint_name=identity.fingerprint_name,
+                os=identity.os, ua_override=identity.ua_override,
+                cpu_cores=identity.cpu_cores, memory_gb=identity.memory_gb,
+                timezone=identity.tz_override, language=identity.language_override,
+                webrtc_mode=identity.webrtc_mode, overrides=identity.overrides)
         pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
         was_empty = not any(pdir.iterdir())

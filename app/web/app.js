@@ -5255,6 +5255,23 @@ function renderBrowserProfiles() {
 
 const NOISE_VECTORS = ["canvas", "webgl", "audio", "client_rects", "sensors", "fonts"];
 const DEFAULT_PORTS = [3389, 5900, 5901, 5800, 7070, 6568, 5938, 1080, 8080, 3128, 3030];
+const CPU_OPTIONS = [2, 4, 6, 8, 10, 12, 14, 16, 20, 24];
+const MEM_OPTIONS = [4, 8, 16, 32, 64];
+// 回填下拉框: 优先用 fingerprint 自带值; 若不在预设选项里, 动态追加该选项后选中。
+// (不用就近映射, 保证不丢失/篡改真实指纹值)
+function setSelectExact(selId, v, opts) {
+  const sel = $(selId);
+  if (!sel) return;
+  const n = Number(v);
+  if (!n || n <= 0) { sel.value = "0"; return; }
+  if (opts.includes(n)) { sel.value = String(n); return; }
+  // 自带值不在预设选项里 → 追加选项, 保留真实值
+  const opt = document.createElement("option");
+  opt.value = String(n);
+  opt.textContent = String(n);
+  sel.appendChild(opt);
+  sel.value = String(n);
+}
 // 宿主平台 key (win/mac/linux), 用于默认选中
 function hostOsKey() {
   const ua = navigator.userAgent;
@@ -5298,8 +5315,18 @@ function createBrowserProfile() {
         <div class="form-field"><label>fp_seed(留空自动)</label><input id="bp-in-seed" placeholder="hex 种子"></div>
       </div>
       <div class="form-grid">
-        <div class="form-field"><label>CPU cores (0=随 GPU)</label><input id="bp-in-cpu" type="number" min="0" placeholder="0" value="0"></div>
-        <div class="form-field"><label>Memory GB (0=随 GPU)</label><input id="bp-in-mem" type="number" min="0" placeholder="0" value="0"></div>
+        <div class="form-field"><label>CPU cores</label><select id="bp-in-cpu">
+          <option value="0" selected>随 GPU</option>
+          <option value="2">2</option><option value="4">4</option><option value="6">6</option>
+          <option value="8">8</option><option value="10">10</option><option value="12">12</option>
+          <option value="14">14</option><option value="16">16</option><option value="20">20</option>
+          <option value="24">24</option>
+        </select></div>
+        <div class="form-field"><label>Memory GB</label><select id="bp-in-mem">
+          <option value="0" selected>随 GPU</option>
+          <option value="4">4</option><option value="8">8</option><option value="16">16</option>
+          <option value="32">32</option><option value="64">64</option>
+        </select></div>
       </div>
       <div class="form-field"><label>User-Agent 覆盖(留空用指纹自带)</label><input id="bp-in-ua" placeholder="Mozilla/5.0 ..."></div>
       <div class="form-grid">
@@ -5365,9 +5392,9 @@ async function bpRandomGpu() {
     BP_DRAFT_FP = cfg;
     const nav = cfg.navigator || {};
     fpInput.value = cfg.name || "";
-    // CPU/Memory 联动填充 (取 fingerprint 自带值)
-    $("bp-in-cpu").value = nav.hardware_concurrency || 0;
-    $("bp-in-mem").value = nav.device_memory || 0;
+    // CPU/Memory 联动填充: 优先用 fingerprint 自带值(不在预设选项则追加选项)
+    setSelectExact("bp-in-cpu", nav.hardware_concurrency, CPU_OPTIONS);
+    setSelectExact("bp-in-mem", nav.device_memory, MEM_OPTIONS);
     if (!($("bp-in-ua").value || "").trim()) {
       $("bp-in-ua").value = nav.user_agent || "";
     }
