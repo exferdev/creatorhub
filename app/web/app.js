@@ -1748,7 +1748,9 @@ function renderRiskAccounts() {
         <button class="ghost sm" onclick="probeRiskAccount(${account.account_id})" ${probeWaiting ? "disabled" : ""} title="${probeWaiting ? `下次探测 ${esc(riskTime(account.next_probe_at))}` : "执行一次受风控闸门约束的轻量账号探测"}">${probeWaiting ? "等待探测" : "探测"}</button>
         <button class="ghost sm" onclick="showRiskEvents(${account.account_id})">记录</button>
         <button class="ghost sm" onclick="openAccountBrowser(${account.account_id})">浏览器</button>
-        ${account.status !== "normal" ? `<button class="ghost sm danger" onclick="clearRiskAccount(${account.account_id})">解除</button>` : ""}
+        ${account.status !== "normal"
+          ? `<button class="ghost sm danger" onclick="clearRiskAccount(${account.account_id})">解除</button>`
+          : `<button class="ghost sm" disabled title="当前账号无风控状态，无需解除">解除</button>`}
       </td>
     </tr>`;
   }).join("") || empty(9, "没有匹配的账号状态", "i-shield", "调整筛选条件或先添加平台账号");
