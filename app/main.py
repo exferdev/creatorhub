@@ -586,21 +586,29 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
 
         # 3) 仅在成功且 cookie 探活通过时才落库
         if ok and state_json:
-            from .engine.cookie_health import check_cookie_health as _login_chk
-            health = await asyncio.to_thread(_login_chk, state_json, publish_required=creator, ua=identity.ua)
-            if not health.get("valid"):
-                msg = health.get("error", "cookie 验证失败")[:120]
-                print(f"[login] cookie 探活失败: {msg}")
-                if fresh_account and tmp_profile:
-                    try:
-                        await browser.close_context(identity.key)
-                    except Exception:
-                        pass
-                    if bind_profile is None:
-                        shutil.rmtree(tmp_profile, ignore_errors=True)
-                login_tasks[task_id] = {"status": "error",
-                                        "error": f"登录态无效: {msg} — 请关闭窗口后重试，或重新扫码"}
-                return
+            # 登录态健康检查按平台分发：抖音走 check_cookie_health（sessionid 探活
+            # + creator.douyin.com 双段校验）；小红书 / 快手 / 视频号不使用抖音独有的
+            # sessionid 探测——它们的交互登录流程已各自确认会话有效（小红书观察
+            # web_session + user/me 非游客态，快手/视频号看各自强登录 Cookie），
+            # 套用抖音探测会把 web_session 等非抖音 Cookie 判成“缺少 sessionid”
+            # 而误拒本已成功的登录。
+            if platform == "douyin":
+                from .engine.cookie_health import check_cookie_health as _login_chk
+                health = await asyncio.to_thread(
+                    _login_chk, state_json, publish_required=creator, ua=identity.ua)
+                if not health.get("valid"):
+                    msg = health.get("error", "cookie 验证失败")[:120]
+                    print(f"[login] cookie 探活失败: {msg}")
+                    if fresh_account and tmp_profile:
+                        try:
+                            await browser.close_context(identity.key)
+                        except Exception:
+                            pass
+                        if bind_profile is None:
+                            shutil.rmtree(tmp_profile, ignore_errors=True)
+                    login_tasks[task_id] = {"status": "error",
+                                            "error": f"登录态无效: {msg} — 请关闭窗口后重试，或重新扫码"}
+                    return
 
             is_xhs = platform == "xhs"
             with get_session() as s:
