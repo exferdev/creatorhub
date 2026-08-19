@@ -441,7 +441,10 @@ async def _enrich_account_profile(account_id: int, state: str, *,
             # 抓资料为准。此处 logged_out 多因抓资料复用浏览器时 fallback 到无登录
             # 态的后端所致,属「资料抓取失败」而非「登录失效」,降级为 error。
             # 不把账号 status 写成 invalid,避免登录成功的账号被误判失效。
-            return _done("error", err or "logged_out")
+            # detail 故意用不含 auth 标识的中性文案: refresh 读取路径会把返回的
+            # detail 再次送入 risk.classify_platform_error 归类, 若回传字面
+            # "logged_out" 会被判成 AUTH → 标记账号失效, 恰好抵消这里的降级。
+            return _done("error", "profile_grab_fallback")
         if getattr(err, "category", None) == RiskCategory.AUTH.value:
             acc.status = "invalid"
             s.add(acc); s.commit()

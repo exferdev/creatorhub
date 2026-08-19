@@ -437,7 +437,11 @@ class RiskApiGateTests(unittest.TestCase):
             "(含它实际看到的请求),把它发我即可定位")
         self.assertEqual(self._event_outcomes(), ["network"])
 
-    def test_profile_logged_out_maps_to_auth_but_default_interface_stays_string(self):
+    def test_profile_logged_out_downgrades_to_error_without_auth_invalidation(self):
+        # _enrich_account_profile 有意把抓资料时的 logged_out 从 invalid 降级为
+        # error(登录态有效性以 cookie 探活为准, 避免把登录成功账号误判失效),
+        # 并返回不含 auth 标识的中性 detail, 使 refresh 读取路径不会再把它
+        # 按 risk.classify_platform_error 的 "logged_out" 标识判成 AUTH/失效。
         profile = AsyncMock(return_value=({}, "logged_out"))
 
         with patch("app.main._xhs_profile", profile):
@@ -445,7 +449,7 @@ class RiskApiGateTests(unittest.TestCase):
                 self.account_id,
                 '{"cookies":[{"name":"a1","value":"fixture"}]}'))
 
-        self.assertEqual(result, "invalid")
+        self.assertEqual(result, "error")
 
         with db.get_session() as session:
             account = session.get(DouyinAccount, self.account_id)
@@ -458,8 +462,16 @@ class RiskApiGateTests(unittest.TestCase):
                 asyncio.run(main.refresh_account_profile(self.account_id))
 
         self.assertEqual(caught.exception.status_code, 400)
-        self.assertEqual(caught.exception.detail, "登录态已失效,请点「重新登录」")
-        self.assertEqual(self._event_outcomes(), ["auth"])
+        self.assertEqual(
+            caught.exception.detail,
+            "未能获取账号资料:请看服务端控制台 [xhs_self_profile] 那行日志"
+            "(含它实际看到的请求),把它发我即可定位")
+        # 降级链路: 既不改账号状态, 也不触发 auth 冷却 —— 归类为 business
+        self.assertEqual(self._event_outcomes(), ["business"])
+        with db.get_session() as session:
+            self.assertEqual(
+                session.get(DouyinAccount, self.account_id).status,
+                "active")
 
     def test_creator_profile_default_contract_and_detailed_raw_error(self):
         error = XhsApiError(
