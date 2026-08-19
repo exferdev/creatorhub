@@ -126,6 +126,12 @@ class RiskControlConfig:
     recovery_successes: int = 3
     recovery_probe_gap_seconds: int = 600
     event_retention_days: int = 30
+    # 风控中心管理面暴露的出口熔断参数(管理端可编辑并持久化)。
+    # 分支 RiskController 已有自己的出口/账号熔断实现;这些字段供风控中心
+    # 配置界面保存与展示,实际执行仍以 app/risk.py 的实现为准。
+    network_group_risk_accounts: int = 2
+    network_group_risk_window_seconds: int = 900
+    network_group_cooldown_seconds: int = 7200
 
 
 @dataclass
