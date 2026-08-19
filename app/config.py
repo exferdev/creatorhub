@@ -34,6 +34,8 @@ class EngineConfig:
     # 自有账号弹幕模式:创作中心弹幕管理页(实验性,抖音改版时改这里)
     creator_danmaku_url: str = "https://creator.douyin.com/creator-micro/interaction/danmaku-management"
     request_timeout_seconds: int = 20
+    douyin_captcha_wait_seconds: int = 300  # 关键词采集遇验证时被动等待人工处理；期间不重试接口
+    douyin_keyword_gap_seconds: float = 8.0  # 同一任务内相邻抖音关键词的最小停顿
     download_timeout_seconds: int = 120
     media_dir: str = "./data/media"
     user_agent: str = (

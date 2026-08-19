@@ -6,8 +6,10 @@
 """
 from __future__ import annotations
 
+import json
+import time
 from typing import Dict, List, Optional, Set, Tuple
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from .identity import Identity
 from .manager import BrowserManager
@@ -18,6 +20,11 @@ PROFILE_API = "aweme/v1/web/user/profile/other"
 SELF_PROFILE_API = "aweme/v1/web/user/profile/self"
 COMMENT_API = "aweme/v1/web/comment/list"
 DANMAKU_API = "aweme/v1/web/danmaku"
+SEARCH_API_MARKERS = (
+    "/aweme/v1/web/general/search/single/",
+    "/aweme/v1/web/search/item/",
+    "/aweme/v1/web/search/feed/",
+)
 # 与 login.py 的登录成功判据保持一致。资料接口改版时不能再只靠页面“登录”按钮
 # 判断登录态：按钮可能未渲染，或者被 AB 页面隐藏。
 _LOGIN_COOKIES = {"sessionid", "sessionid_ss", "sid_tt", "uid_tt", "sid_guard"}
@@ -40,6 +47,314 @@ _SCROLL_PROFILE_JS = """() => {
   if (best) best.scrollTop = best.scrollHeight;
   return { range: bestRange, top: best ? best.scrollTop : window.scrollY };
 }"""
+
+_DOUYIN_SEARCH_INPUTS = (
+    'input[data-e2e="searchbar-input"]',
+    'input[data-e2e="search-input"]',
+    'input[placeholder*="搜索"]',
+    'input[type="search"]',
+)
+
+
+async def _submit_douyin_search(page, keyword: str) -> bool:
+    """只操作站内搜索框；不拼装、重放或主动调用抖音搜索接口。"""
+    for selector in _DOUYIN_SEARCH_INPUTS:
+        try:
+            field = page.locator(selector).first
+            if not await field.count() or not await field.is_visible(timeout=600):
+                continue
+            await field.click(timeout=2000)
+            await field.fill(keyword, timeout=3000)
+            await field.press("Enter", timeout=3000)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def extract_search_awemes(payload) -> List[dict]:
+    """从抖音不同版本的搜索响应中提取作品对象并保持首次出现顺序。
+
+    搜索接口先后出现过 ``data[].aweme_info``、``aweme_list`` 与混合卡片等
+    包装；这里只遍历已知容器键，避免把作者推荐卡误判成作品。
+    """
+    found: Dict[str, dict] = {}
+    container_keys = (
+        "data", "items", "list", "aweme_list", "aweme_info",
+        "aweme_mix_info", "mix_items", "search_result", "card",
+    )
+
+    def visit(value):
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        aid = str(value.get("aweme_id") or "")
+        if aid and (value.get("video") or value.get("images")):
+            found.setdefault(aid, value)
+            return
+        for key in container_keys:
+            child = value.get(key)
+            if child is not None and child is not value:
+                visit(child)
+
+    visit(payload)
+    return list(found.values())
+
+
+def douyin_search_empty_error(page_title: str, page_text: str,
+                              final_url: str, api_seen: List[str]) -> str:
+    """把空搜索结果区分为验证、掉登录、接口变化和真正的空响应。"""
+    diagnostic = f"{page_title}\n{page_text}\n{final_url}".casefold()
+    # 登录弹窗本身包含“验证码登录”字样，必须先识别“扫码登录”等登录墙信号，
+    # 否则会被下面的安全验证码分支误报成风控验证。
+    if any(token in diagnostic for token in (
+            "扫码登录", "登录后即可", "登录后查看", "立即登录", "/login")):
+        return "抖音登录态已失效；请重新扫码登录后再续跑"
+    if any(token in diagnostic for token in (
+            "验证码", "安全验证", "访问频繁", "环境异常",
+            "captcha", "verify")):
+        return ("抖音触发验证码/安全验证；请在账号页点击“打开浏览器”，"
+                "完成验证并关窗保存登录态后再续跑")
+    if api_seen:
+        return "抖音搜索接口有响应，但没有可解析的作品（关键词可能无结果或接口结构已变化）"
+    return "抖音搜索页没有发出作品搜索接口（页面可能未完整加载或平台页面已变化）"
+
+
+def douyin_search_exception_error(exc: Exception) -> str:
+    """把用户主动关窗与真正的页面异常分开，避免向界面泄漏超长堆栈文本。"""
+    detail = repr(exc)
+    if "TargetClosedError" in detail or "has been closed" in detail:
+        return "抖音采集窗口被关闭；请续跑任务，并在任务结束前保持窗口打开"
+    return f"打开抖音搜索页失败: {detail}"
+
+
+def _douyin_search_needs_verification(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    nil_info = payload.get("search_nil_info") or {}
+    marker = " ".join(str(nil_info.get(key) or "") for key in (
+        "search_nil_type", "search_nil_item", "text_type"))
+    return "verify" in marker.casefold()
+
+
+_SEARCH_SORT_CODES = {"general": "0", "most_liked": "1", "latest": "2"}
+_SEARCH_TIME_CODES = {"all": "0", "day": "1", "week": "7", "half_year": "180"}
+_SEARCH_TIME_SECONDS = {"day": 86400, "week": 7 * 86400, "half_year": 180 * 86400}
+
+
+def _douyin_search_item_matches(item: dict, *, content_type: str = "all",
+                                publish_time: str = "all", min_likes: int = 0,
+                                min_comments: int = 0, now: int | None = None) -> bool:
+    """对平台返回结果做确定性二次筛选，避免页面筛选未生效时混入错误数据。"""
+    if not isinstance(item, dict):
+        return False
+    if content_type == "video" and not item.get("video"):
+        return False
+    if content_type == "images" and not item.get("images"):
+        return False
+    statistics = item.get("statistics") or {}
+    if int(statistics.get("digg_count") or 0) < max(0, int(min_likes or 0)):
+        return False
+    if int(statistics.get("comment_count") or 0) < max(0, int(min_comments or 0)):
+        return False
+    window = _SEARCH_TIME_SECONDS.get(publish_time)
+    created = int(item.get("create_time") or 0)
+    # 少数搜索卡片不带 create_time；平台筛选仍可能已生效，未知值不在本地误删。
+    if window and created and created < int(now or time.time()) - window:
+        return False
+    return True
+
+
+def _sort_douyin_search_items(items: list[dict], search_sort: str) -> list[dict]:
+    if search_sort == "latest":
+        return sorted(items, key=lambda item: int(item.get("create_time") or 0), reverse=True)
+    if search_sort == "most_liked":
+        return sorted(
+            items,
+            key=lambda item: int((item.get("statistics") or {}).get("digg_count") or 0),
+            reverse=True,
+        )
+    return items
+
+
+async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: str,
+                               max_results: int = 20, max_scrolls: int = 12,
+                               stagnant_limit: int = 3,
+                               search_sort: str = "general",
+                               publish_time: str = "all",
+                               content_type: str = "all",
+                               min_likes: int = 0,
+                               min_comments: int = 0,
+                               settle_ms: int = 1800,
+                               captcha_wait_seconds: int = 300,
+                               block_media: bool = False,
+                               context=None) -> Tuple[List[dict], str]:
+    """打开抖音视频搜索页，拦截站内搜索响应并返回作品原始对象。"""
+    collected: Dict[str, dict] = {}
+    api_seen: List[str] = []
+    error = ""
+    verification_active = False
+    verification_seen = False
+    search_candidates_seen = 0
+    search_sort = search_sort if search_sort in _SEARCH_SORT_CODES else "general"
+    publish_time = publish_time if publish_time in _SEARCH_TIME_CODES else "all"
+    content_type = content_type if content_type in {"all", "video", "images"} else "all"
+    stagnant_limit = max(1, min(int(stagnant_limit or 3), 8))
+    # 关键词搜索在抖音无头上下文中容易直接落到“验证码中间页”。批量任务可传入
+    # 同账号的临时有头 context；普通调用仍沿用后台常驻 context。
+    if context is not None:
+        page = next((candidate for candidate in context.pages
+                     if candidate.url == "about:blank"), None)
+        page = page or await context.new_page()
+    else:
+        page = await mgr.new_page(identity, block_media)
+
+    def collect_payload(payload) -> int:
+        nonlocal search_candidates_seen
+        before = len(collected)
+        for raw in extract_search_awemes(payload):
+            search_candidates_seen += 1
+            aid = str(raw.get("aweme_id") or "")
+            if aid and _douyin_search_item_matches(
+                    raw, content_type=content_type, publish_time=publish_time,
+                    min_likes=min_likes, min_comments=min_comments):
+                collected.setdefault(aid, raw)
+        return len(collected) - before
+
+    async def on_response(resp):
+        nonlocal verification_active, verification_seen
+        url = resp.url
+        # 保留已知接口，同时接受路径中含 search 的新版本网页接口，避免平台只改
+        # 路径就被误报成“没有发出搜索接口”。
+        is_search_api = any(marker in url for marker in SEARCH_API_MARKERS)
+        is_search_api = is_search_api or (
+            "/aweme/v1/web/" in url and "search" in urlsplit(url).path.casefold())
+        if not is_search_api:
+            return
+        if len(api_seen) < 40:
+            api_seen.append(f"{resp.status} {url.split('?')[0]}")
+        try:
+            payload = await resp.json()
+        except Exception:
+            return
+        if _douyin_search_needs_verification(payload):
+            verification_active = True
+            verification_seen = True
+            return
+        if collect_payload(payload):
+            verification_active = False
+
+    async def wait_for_verification() -> bool:
+        """被动等待用户完成验证；等待期间不产生搜索请求。"""
+        if not verification_active:
+            return True
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        rounds = max(1, min(600, int(captcha_wait_seconds)))
+        for _ in range(rounds):
+            await page.wait_for_timeout(1000)
+            if collected or not verification_active:
+                return True
+        return False
+
+    page.on("response", on_response)
+    final_url = ""
+    page_title = ""
+    page_text = ""
+    try:
+        # 先像普通用户一样进入站内搜索结果页，只消费页面自己发出的响应。
+        query = urlencode({
+            "type": "video" if content_type == "video" else "general",
+            "publish_time": _SEARCH_TIME_CODES[publish_time],
+            "sort_type": _SEARCH_SORT_CODES[search_sort],
+        })
+        target = f"https://www.douyin.com/search/{quote(keyword, safe='')}?{query}"
+        await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(settle_ms)
+
+        challenge_error = ""
+        if verification_active and not await wait_for_verification():
+            challenge_error = (
+                "抖音要求完成滑块验证；本次任务已停止后续请求，"
+                "请完成验证并等待冷却后再续跑")
+
+        # 某些 AB 页面进入 URL 后不会自动提交首屏搜索。此时只操作一次页面搜索框，
+        # 由抖音页面生成参数和签名；不再使用 context.request/page.fetch 兜底。
+        if not collected and not challenge_error:
+            submitted = await _submit_douyin_search(page, keyword)
+            if submitted:
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(max(settle_ms, 2200))
+                if verification_active and not await wait_for_verification():
+                    challenge_error = (
+                        "抖音要求完成滑块验证；本次任务已停止后续请求，"
+                        "请完成验证并等待冷却后再续跑")
+
+        stagnant = 0
+        for _ in range(0 if challenge_error else max(1, min(max_scrolls, 40))):
+            if len(collected) >= max_results:
+                break
+            before = len(collected)
+            try:
+                await page.evaluate(_SCROLL_PROFILE_JS)
+            except Exception:
+                pass
+            await page.mouse.wheel(0, 4200)
+            await page.wait_for_timeout(settle_ms)
+            if verification_active and not await wait_for_verification():
+                challenge_error = (
+                    "抖音要求完成滑块验证；本次任务已停止后续请求，"
+                    "请完成验证并等待冷却后再续跑")
+                break
+            if len(collected) == before:
+                stagnant += 1
+                if collected and stagnant >= stagnant_limit:
+                    break
+            else:
+                stagnant = 0
+        final_url = page.url
+        if not collected:
+            try:
+                page_title = (await page.title()).strip()
+            except Exception:
+                pass
+            try:
+                page_text = (await page.locator("body").inner_text())[:1200]
+            except Exception:
+                pass
+            filter_error = (
+                "抖音搜索有结果，但当前内容类型、发布时间或数据门槛下没有符合条件的作品"
+                if search_candidates_seen else "")
+            error = challenge_error or filter_error or (
+                "抖音触发验证码/安全验证；本次任务已停止后续请求，"
+                "请完成验证并等待冷却后再续跑"
+                if verification_seen else "") or douyin_search_empty_error(
+                page_title, page_text, final_url, api_seen)
+    except Exception as exc:
+        error = douyin_search_exception_error(exc)
+    finally:
+        try:
+            final_url = final_url or page.url
+            await page.close()
+        except Exception:
+            pass
+
+    if not collected:
+        print(f"[dy_search] keyword={keyword!r} final_url={final_url!r} "
+              f"title={page_title!r} api_seen({len(api_seen)})={api_seen[:10]}")
+    return _sort_douyin_search_items(list(collected.values()), search_sort)[:max_results], error
 
 
 def _page_reaches_boundary(items: List[dict], known_ids: Set[str],
