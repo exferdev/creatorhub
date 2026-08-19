@@ -34,3 +34,9 @@ desktop-error.log
 
 # 内部方案文档(不随公开仓库发布)
 docs/
+
+# 独立设备指纹库(已拆分为外部项目 fingerprint-db, 不再入库)
+fingerprint-db/
+
+# 抖音 IM 协议调试转储(由代码在运行时写入 bdms/, 属生成物不入库)
+app/platforms/douyin/bdms/debug_body.bin
