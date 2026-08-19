@@ -955,6 +955,12 @@ class BrowserManager:
             else:
                 with suppress(Exception):
                     await ctx.close()
+                # 与登录流程 close_login_ctx 一致：彻底杀掉 ShardX 引擎进程树，
+                # 释放 profile 目录锁。否则取消/完成后的残留引擎会占用同一 profile，
+                # 下一次任务 open_headed 时 connect_over_cdp 拿到坏 CDP 端点而失败。
+                with suppress(Exception):
+                    self._kill_shardx_engine(
+                        getattr(ctx, "_shardx_bsess", None))
 
     # ── 独立 profile (ShardX Launcher 式, 与登录账号解耦) ──
     async def launch_profile(self, *, name: str, fingerprint_name: str,
