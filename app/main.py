@@ -199,7 +199,12 @@ async def lifespan(app: FastAPI):
         xhs_cdp_idle_seconds=cfg.engine.xhs_cdp_idle_seconds,
         fingerprint_db_dir=cfg.engine.fingerprint_db_dir,
         fingerprint_db_base_url=cfg.engine.fingerprint_db_base_url,
-        fingerprint_db_read_key=cfg.engine.fingerprint_db_read_key)
+        fingerprint_db_read_key=cfg.engine.fingerprint_db_read_key,
+        native_write_gate_enabled=cfg.engine.native_write_gate_enabled,
+        native_write_require_system_chrome=cfg.engine.native_write_require_system_chrome,
+        native_write_require_verified_proxy=cfg.engine.native_write_require_verified_proxy,
+        native_write_proxy_max_age_seconds=cfg.engine.native_write_proxy_max_age_seconds,
+        browser_exit_probe_url=cfg.engine.browser_exit_probe_url)
     await browser.start()
     engine = MonitorEngine(cfg, browser)
     # 首次启动:自动采集本机真机指纹并上传 fingerprint-db(仅一次,后续不自动)
@@ -911,6 +916,12 @@ async def list_accounts(platform: str | None = None):
                 "proxy": _mask_proxy(a.proxy),
                 "proxy_status": a.proxy_status,
                 "has_proxy": bool(a.proxy),
+                "exit_ip": a.exit_ip,
+                "exit_country": a.exit_country,
+                "exit_asn": a.exit_asn,
+                "exit_timezone": a.exit_timezone,
+                "exit_checked_at": (a.exit_checked_at.isoformat()
+                                    if a.exit_checked_at else None),
                 "write_paused_until": (a.write_paused_until.isoformat()
                                         if a.write_paused_until else None),
                 "write_pause_reason": a.write_pause_reason,
@@ -2516,6 +2527,9 @@ async def set_account_proxy(account_id: int, body: ProxyIn):
             raise HTTPException(404, "账号不存在")
         acc.proxy = p
         acc.proxy_status = "unknown"
+        acc.exit_proxy_signature = ""
+        acc.exit_checked_at = None
+        acc.exit_ip = acc.exit_country = acc.exit_asn = acc.exit_timezone = ""
         s.add(acc); s.commit()
     if browser:
         await browser.close_context(account_id)
@@ -2541,6 +2555,9 @@ async def assign_account_proxy(account_id: int):
             raise HTTPException(400, "代理池为空(请在 config.yaml 的 proxies 里配置)")
         acc.proxy = p
         acc.proxy_status = "unknown"
+        acc.exit_proxy_signature = ""
+        acc.exit_checked_at = None
+        acc.exit_ip = acc.exit_country = acc.exit_asn = acc.exit_timezone = ""
         s.add(acc); s.commit()
     if browser:
         await browser.close_context(account_id)
@@ -2721,6 +2738,9 @@ async def assign_proxies_all():
                 continue
             acc.proxy = p
             acc.proxy_status = "unknown"
+            acc.exit_proxy_signature = ""
+            acc.exit_checked_at = None
+            acc.exit_ip = acc.exit_country = acc.exit_asn = acc.exit_timezone = ""
             s.add(acc); s.commit()
             assigned += 1
         if browser:
@@ -2732,22 +2752,70 @@ async def assign_proxies_all():
 
 @app.post("/api/accounts/{account_id}/test-proxy")
 async def test_account_proxy(account_id: int):
-    """通过该账号代理实际连一次目标站,验证代理可用并更新 proxy_status。"""
+    """通过该账号代理验证出口，并维护出口基线。
+
+    native 账号优先用账号真实浏览器 context 探测出口(不经独立 HTTP 客户端)：
+    同一条代理线路下 ip/asn 与基线不一致 = 出口漂移 -> proxy_status = drifted，
+    写操作会被风控门禁拦截。无浏览器/legacy 时回退 _probe_proxy 直连探测。
+    """
+    from .browser.manager import normalize_proxy
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
         if not acc:
             raise HTTPException(404, "账号不存在")
         proxy = acc.proxy or ""
         platform = acc.platform
+        identity_mode = acc.identity_mode
+        identity = browser.identity_for(acc) if browser else None
     if not proxy:
         return {"ok": False, "detail": "该账号未配置代理(将走宿主真实 IP)"}
-    ok, detail = await _probe_proxy(proxy, platform)
+    browser_exit = None
+    if identity_mode == "native" and browser is not None and identity is not None:
+        try:
+            # 强制下次 context 使用数据库中最新的代理配置。
+            await browser.close_context(account_id)
+            browser_exit = await browser.probe_browser_exit(identity)
+            ok = True
+            detail = f"浏览器出口 IP {browser_exit['ip']}"
+        except Exception as exc:
+            ok = False
+            detail = f"浏览器出口探测失败: {exc}"
+    else:
+        ok, detail = await _probe_proxy(proxy, platform)
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
         if acc:
-            acc.proxy_status = _proxy_status_from_detail(ok, detail)
+            if ok and browser_exit:
+                signature = BrowserManager.proxy_signature(proxy)
+                same_generation = bool(acc.exit_proxy_signature) \
+                    and acc.exit_proxy_signature == signature
+                drift = same_generation and any((
+                    bool(acc.exit_ip and acc.exit_ip != browser_exit["ip"]),
+                    bool(acc.exit_country and browser_exit["country"]
+                         and acc.exit_country != browser_exit["country"]),
+                    bool(acc.exit_asn and browser_exit["asn"]
+                         and acc.exit_asn != browser_exit["asn"]),
+                ))
+                if drift:
+                    acc.proxy_status = "drifted"
+                    detail = (
+                        f"浏览器出口漂移: 基线 {acc.exit_ip or '-'} / "
+                        f"{acc.exit_asn or '-'}, 当前 {browser_exit['ip']} / "
+                        f"{browser_exit['asn'] or '-'}")
+                    ok = False
+                else:
+                    acc.proxy_status = "ok"
+                    acc.exit_ip = browser_exit["ip"]
+                    acc.exit_country = browser_exit["country"]
+                    acc.exit_asn = browser_exit["asn"]
+                    acc.exit_timezone = browser_exit["timezone"]
+                    acc.exit_proxy_signature = signature
+                    acc.exit_checked_at = datetime.utcnow()
+            else:
+                acc.proxy_status = _proxy_status_from_detail(ok, detail)
             s.add(acc); s.commit()
-    return {"ok": ok, "detail": detail, "proxy": _mask_proxy(proxy)}
+    return {"ok": ok, "detail": detail, "proxy": _mask_proxy(proxy),
+            "browser_exit": browser_exit}
 
 
 # ─────────── 代理池(提前配置,账号关联使用)───────────

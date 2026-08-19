@@ -394,8 +394,18 @@ class MonitorEngine:
     def _proxy_bad(acc) -> bool:
         return bool(
             acc and acc.proxy
-            and acc.proxy_status in {"bad", "auth_error", "blocked"}
+            and acc.proxy_status in {"bad", "auth_error", "blocked", "drifted"}
         )
+
+    def _native_write_environment_error(
+            self, acc, *, headed: bool = True,
+            browser_mode: bool = True) -> str:
+        """Run the BrowserManager's native-only hard gate when supported."""
+        checker = getattr(self.browser, "native_write_gate_error", None)
+        if not callable(checker) or acc is None:
+            return ""
+        return str(checker(
+            acc, headed=headed, browser_mode=browser_mode) or "")
 
     @staticmethod
     def _blocked_signal(reason: str) -> str:
@@ -2402,6 +2412,12 @@ class MonitorEngine:
                 self._defer_row(t, "账号代理当前不可用", fallback_seconds=300)
                 s.add(t); s.commit()
                 return {"ok": False, "error": "proxy unavailable"}
+            environment_error = self._native_write_environment_error(
+                acc, headed=True, browser_mode=True)
+            if environment_error:
+                self._defer_row(t, environment_error, fallback_seconds=300)
+                s.add(t); s.commit()
+                return {"ok": False, "error": environment_error}
             pause_error = self._write_pause_error(t.account_id)
             if pause_error:
                 decision = self.risk.preflight(t.account_id, OperationKind.PUBLISH)
@@ -3422,6 +3438,12 @@ class MonitorEngine:
                 self._defer_row(t, "账号代理当前不可用", fallback_seconds=300)
                 s.add(t); s.commit()
                 return {"ok": False, "error": "proxy unavailable"}
+            environment_error = self._native_write_environment_error(
+                acc, headed=True, browser_mode=True)
+            if environment_error:
+                self._defer_row(t, environment_error, fallback_seconds=300)
+                s.add(t); s.commit()
+                return {"ok": False, "error": environment_error}
             if acc.status == "invalid":
                 self._defer_row(t, "账号登录态已失效，等待重新登录", fallback_seconds=900)
                 s.add(t); s.commit()
@@ -3606,6 +3628,12 @@ class MonitorEngine:
                 self._defer_row(t, "账号代理当前不可用", fallback_seconds=300)
                 s.add(t); s.commit()
                 return {"ok": False, "error": "proxy unavailable"}
+            environment_error = self._native_write_environment_error(
+                acc, headed=True, browser_mode=True)
+            if environment_error:
+                self._defer_row(t, environment_error, fallback_seconds=300)
+                s.add(t); s.commit()
+                return {"ok": False, "error": environment_error}
             if acc.status == "invalid":
                 self._defer_row(t, "账号登录态已失效，等待重新登录", fallback_seconds=900)
                 s.add(t); s.commit()

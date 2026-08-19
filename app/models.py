@@ -35,7 +35,14 @@ class DouyinAccount(SQLModel, table=True):
     shardx_id: str = ""           # 绑定的 ShardX profile id(fpdb-xxx);非空则 open_profile 复用,跳过 fp_seed 随机
     geo_lat: float = 0.0          # geolocation 伪造纬度(代理体检时按出口 IP 归属地写入;0=按种子派生兜底)
     geo_lon: float = 0.0          # geolocation 伪造经度
-    proxy_status: str = "unknown"  # unknown | ok | bad
+    proxy_status: str = "unknown"  # unknown | ok | bad | drifted
+    # 由账号的真实浏览器 context 探测并持久化；后续写操作用它识别出口漂移。
+    exit_ip: str = ""
+    exit_country: str = ""
+    exit_asn: str = ""
+    exit_timezone: str = ""
+    exit_proxy_signature: str = ""
+    exit_checked_at: Optional[datetime] = None
     cookie_status: str = "unknown" # unknown | valid | expired | checking
     last_health_check: Optional[datetime] = None  # 上次 cookie 探活时间
     last_active_at: Optional[datetime] = None  # 上次活跃(用于错峰调度)

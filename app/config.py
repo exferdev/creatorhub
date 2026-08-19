@@ -83,6 +83,12 @@ class EngineConfig:
     active_hours_start: int = 8              # 活跃起点小时(含),0-23
     active_hours_end: int = 24               # 活跃止点小时(不含);可 >24 表示跨零点(如 25=次日 1 点)
     verify_proxy_region: bool = True         # 体检时探测代理出口国家,与账号时区不一致则告警
+    # 新建 native 账号的写操作环境门禁。存量 legacy 账号不受这组开关影响。
+    native_write_gate_enabled: bool = True
+    native_write_require_system_chrome: bool = True
+    native_write_require_verified_proxy: bool = True
+    native_write_proxy_max_age_seconds: int = 86400
+    browser_exit_probe_url: str = "https://ipinfo.io/json"
     # ── 本账号作品健康监控(B5:盯自己作品的流量/0播/违规,发现异常推送通知)──
     #   借鉴竞品「流速监控 / 持续0播 / 作品违规监控」。默认关闭(需 periodic 同步本账号作品,较重)。
     work_health_enabled: bool = False         # 作品健康监控总开关

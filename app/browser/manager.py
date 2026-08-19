@@ -129,7 +129,12 @@ class BrowserManager:
                  xhs_cdp_idle_seconds: int = 900,
                  fingerprint_db_dir: str = "",
                  fingerprint_db_base_url: str = "",
-                 fingerprint_db_read_key: str = ""):
+                 fingerprint_db_read_key: str = "",
+                 native_write_gate_enabled: bool = True,
+                 native_write_require_system_chrome: bool = True,
+                 native_write_require_verified_proxy: bool = True,
+                 native_write_proxy_max_age_seconds: int = 86400,
+                 browser_exit_probe_url: str = "https://ipinfo.io/json"):
         self.default_ua = default_ua
         self.profiles_root = profiles_root
         self.max_live = max(1, max_live)
@@ -139,6 +144,14 @@ class BrowserManager:
             else "auto"
         )
         self.xhs_cdp_idle_seconds = max(0, int(xhs_cdp_idle_seconds))
+        self.native_write_gate_enabled = bool(native_write_gate_enabled)
+        self.native_write_require_system_chrome = bool(
+            native_write_require_system_chrome)
+        self.native_write_require_verified_proxy = bool(
+            native_write_require_verified_proxy)
+        self.native_write_proxy_max_age_seconds = max(
+            0, int(native_write_proxy_max_age_seconds))
+        self.browser_exit_probe_url = str(browser_exit_probe_url or "").strip()
         # fingerprint-db 数据源 (API 优先, 文件回退)
         self._fingerprint_db_dir = fingerprint_db_dir
         self._fpdb_client = FingerprintDbClient(
@@ -320,6 +333,88 @@ class BrowserManager:
         return Identity(account_id=None,
                         profile_dir=str(Path(self.profiles_root) / "_anon"),
                         ua=self.default_ua)
+
+    @staticmethod
+    def proxy_signature(proxy: str) -> str:
+        """返回一条代理线路的稳定签名(不含凭据),用于识别"同一出口线路漂移"。
+
+        与 app/risk.py 的 network_key(按出口分组的风控事件桶)用途不同但同源:
+        这里识别"代理线路是否换了"。签名相同 + ip/asn 变化 = 出口漂移。
+        """
+        plan = try_proxy_plan(proxy)
+        return plan.signature if plan else "direct"
+
+    def native_write_gate_error(self, account, *, headed: bool = True,
+                                browser_mode: bool = True,
+                                now=None) -> str:
+        """仅对 native 账号执行写操作环境门禁；legacy 保持原行为。
+
+        返回空串=放行；返回 "write_env_blocked:..."=阻止写操作并给出原因。
+        """
+        if not self.native_write_gate_enabled \
+                or getattr(account, "identity_mode", "legacy") != "native":
+            return ""
+        if self._pw is None:
+            return "write_env_blocked:浏览器管理器未启动"
+        if browser_mode and not headed:
+            return "write_env_blocked:native 账号写操作必须使用有头浏览器"
+        # 系统稳定版 Chrome 或 ShardX 真 Chrome(Chromium 149)均为真浏览器；
+        # 仅当两者都缺失(回退到 bundled headless chromium)才拦截。
+        uses_shardx = bool(getattr(account, "shardx_id", ""))
+        if self.native_write_require_system_chrome \
+                and self._browser_channel != "chrome" and not uses_shardx:
+            return "write_env_blocked:未检测到系统稳定版 Chrome"
+        proxy = str(getattr(account, "proxy", "") or "").strip()
+        if not proxy or not self.native_write_require_verified_proxy:
+            return ""
+        if getattr(account, "proxy_status", "unknown") != "ok":
+            return "write_env_blocked:账号代理尚未通过浏览器出口验证"
+        signature = BrowserManager.proxy_signature(proxy)
+        if not getattr(account, "exit_ip", "") \
+                or getattr(account, "exit_proxy_signature", "") != signature:
+            return "write_env_blocked:账号代理缺少当前线路的浏览器出口基线"
+        checked = getattr(account, "exit_checked_at", None)
+        if not checked:
+            return "write_env_blocked:账号代理出口基线未记录检查时间"
+        if self.native_write_proxy_max_age_seconds > 0:
+            from datetime import datetime
+            sampled = now or datetime.utcnow()
+            if (sampled - checked).total_seconds() \
+                    > self.native_write_proxy_max_age_seconds:
+                return "write_env_blocked:账号代理的浏览器出口验证已过期"
+        return ""
+
+    async def probe_browser_exit(self, identity: Identity,
+                                 timeout_ms: int = 15000) -> Dict[str, str]:
+        """用账号真实 BrowserContext 探测出口，不经独立 HTTP 客户端。"""
+        if not self.browser_exit_probe_url:
+            raise RuntimeError("未配置 browser_exit_probe_url")
+        ctx = await self.context_for(identity)
+        page = await ctx.new_page()
+        try:
+            response = await page.goto(
+                self.browser_exit_probe_url, wait_until="domcontentloaded",
+                timeout=max(1000, int(timeout_ms)))
+            status = getattr(response, "status", 0) if response else 0
+            if status and not 200 <= int(status) < 300:
+                raise RuntimeError(f"出口探测返回 HTTP {status}")
+            raw = await page.locator("body").inner_text(timeout=3000)
+            data = json.loads(raw or "{}")
+            ip = str(data.get("ip") or "").strip()
+            if not ip:
+                raise RuntimeError("出口探测未返回 IP")
+            org = str(data.get("org") or "").strip()
+            asn = org.split(" ", 1)[0] if org.upper().startswith("AS") else org
+            return {
+                "ip": ip,
+                "country": str(data.get("country") or "").strip().upper(),
+                "asn": asn,
+                "timezone": str(data.get("timezone") or "").strip(),
+                "city": str(data.get("city") or "").strip(),
+            }
+        finally:
+            with suppress(Exception):
+                await page.close()
 
     def _uses_xhs_cdp(self, identity: Identity) -> bool:
         return (
