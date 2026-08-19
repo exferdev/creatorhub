@@ -12,6 +12,7 @@
   :root {
     /* shell sizing */
     --header-h:68px; --sidebar-w:232px; --content-max:1260px;
+    --control-bg:#0b0f16; --control-bg-hover:#0f141d;
     /* surfaces */
     --bg:#090b10; --bg-grad:#0d1018;
     --surface:#12161e; --surface-2:#181d27; --surface-3:#202632;
@@ -108,6 +109,7 @@
     /* surfaces — 干净白卡 + 暖米底 */
     --bg:#fbf3f1; --bg-grad:#fff;
     --surface:#ffffff; --surface-2:#fdf4f2; --surface-3:#f8e7e2;
+    --control-bg:#fffaf9; --control-bg-hover:#fff6f4;
     --line:#f2ddd7; --line-soft:#f8e9e4;
     /* text — 暖近黑,保证对比度 */
     --fg:#2b2226; --fg-strong:#181113; --mut:#6e5e62; --mut-2:#806f73;
@@ -569,6 +571,39 @@
   textarea { resize:vertical; min-height:62px; line-height:1.5; }
   select { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%238b94a3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 9px center; padding-right:30px; cursor:pointer; }
 
+  /* 统一重绘原生选择控件：保留语义、键盘操作与表单提交行为。 */
+  input[type="checkbox"], input[type="radio"] {
+    appearance:none; -webkit-appearance:none; position:relative; display:inline-grid; place-content:center;
+    width:18px!important; min-width:18px; height:18px; min-height:18px; padding:0!important; margin:0;
+    border:1px solid color-mix(in srgb,var(--line) 70%,var(--mut)); border-radius:5px;
+    background:var(--control-bg); box-shadow:inset 0 1px 2px rgba(0,0,0,.2); cursor:pointer;
+    vertical-align:-3px; transition:background .16s var(--ease), border-color .16s var(--ease), box-shadow .16s var(--ease), transform .12s var(--ease);
+  }
+  input[type="checkbox"]::before {
+    content:""; width:10px; height:8px; background:#fff;
+    clip-path:polygon(10% 42%,0 58%,40% 100%,100% 18%,84% 4%,38% 72%);
+    transform:scale(.35); opacity:0; transition:transform .16s var(--ease), opacity .12s var(--ease);
+  }
+  input[type="checkbox"]:checked, input[type="radio"]:checked {
+    border-color:var(--acc); background:linear-gradient(145deg,var(--acc-hover),var(--acc));
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--acc) 24%,transparent), 0 5px 12px -8px var(--acc);
+  }
+  input[type="checkbox"]:checked::before { transform:scale(1); opacity:1; }
+  input[type="checkbox"]:indeterminate { border-color:var(--acc); background:var(--acc); }
+  input[type="checkbox"]:indeterminate::before { width:9px; height:2px; clip-path:none; border-radius:2px; transform:scale(1); opacity:1; }
+  input[type="radio"] { border-radius:50%; }
+  input[type="radio"]::before {
+    content:""; width:8px; height:8px; border-radius:50%; background:#fff;
+    transform:scale(.3); opacity:0; transition:transform .16s var(--ease), opacity .12s var(--ease);
+  }
+  input[type="radio"]:checked::before { transform:scale(1); opacity:1; }
+  input[type="checkbox"]:hover, input[type="radio"]:hover { border-color:var(--acc); transform:scale(1.04); }
+  input[type="checkbox"]:focus-visible, input[type="radio"]:focus-visible { outline:none; box-shadow:0 0 0 3px var(--acc-ring); }
+  input[type="checkbox"]:disabled, input[type="radio"]:disabled { opacity:.42; cursor:not-allowed; transform:none; }
+  input[type="search"] { padding-left:36px; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b94a3' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.6-3.6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:12px center; }
+  input[type="number"] { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  input:disabled, textarea:disabled, select:disabled { opacity:.48; cursor:not-allowed; background-color:var(--surface-2); }
+
   .row { display:flex; gap:10px; align-items:center; }
   .danmaku-pager {
     display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);
@@ -631,13 +666,36 @@
   button.input-action:hover { color:var(--fg); background:var(--surface-2); filter:none; }
   button.input-action:active { transform:translateY(-50%); }
   .switch-row {
-    display:flex; align-items:flex-start; gap:11px; padding:12px 13px;
-    color:var(--fg); background:var(--bg); border:1px solid var(--line-soft); border-radius:var(--r-sm); cursor:pointer;
+    display:flex; align-items:center; gap:11px; padding:11px 12px;
+    color:var(--fg); background:var(--control-bg); border:1px solid var(--line-soft); border-radius:var(--r-sm); cursor:pointer;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.018);
+    transition:border-color .18s var(--ease), background .18s var(--ease), box-shadow .18s var(--ease);
   }
-  .switch-row:hover { border-color:var(--line); background:var(--surface-2); }
-  .switch-row input { width:17px; height:17px; flex:0 0 auto; margin:2px 0 0; }
+  .switch-row:hover { border-color:color-mix(in srgb,var(--line) 60%,var(--fg)); background:var(--control-bg-hover); }
+  .switch-row:has(input:checked) { border-color:color-mix(in srgb,var(--acc) 24%,var(--line)); background:color-mix(in srgb,var(--acc) 4%,var(--control-bg)); box-shadow:inset 0 1px 0 rgba(255,255,255,.025); }
+  .switch-row:has(input:focus-visible) { border-color:var(--acc); box-shadow:0 0 0 3px var(--acc-ring); }
+  .switch-row input[type="checkbox"] {
+    appearance:none; -webkit-appearance:none; display:block; position:relative;
+    width:38px!important; min-width:38px; height:22px; min-height:22px; flex:0 0 38px; align-self:center;
+    margin:0; padding:0!important; overflow:hidden; line-height:0;
+    border:1px solid color-mix(in srgb,var(--line) 72%,var(--mut)); border-radius:999px;
+    background:var(--surface-3); box-shadow:inset 0 1px 2px rgba(0,0,0,.24);
+    transform:none; transition:background .18s var(--ease), border-color .18s var(--ease), box-shadow .18s var(--ease);
+  }
+  .switch-row input[type="checkbox"]::before {
+    content:""; position:absolute; top:50%; left:2px; width:16px; height:16px;
+    clip-path:none; border:0; border-radius:50%;
+    background:color-mix(in srgb,var(--fg) 78%,var(--surface)); box-shadow:0 1px 3px rgba(0,0,0,.32);
+    transform:translateY(-50%); transform-origin:center; opacity:1;
+    transition:transform .18s var(--ease), background .18s var(--ease);
+  }
+  .switch-row input[type="checkbox"]:hover { border-color:color-mix(in srgb,var(--acc) 50%,var(--line)); transform:none; }
+  .switch-row input[type="checkbox"]:checked { border-color:var(--acc); background:var(--acc); box-shadow:inset 0 1px 2px rgba(0,0,0,.12); }
+  .switch-row input[type="checkbox"]:checked::before { left:2px; background:#fff; transform:translate(16px,-50%); opacity:1; }
+  .switch-row input[type="checkbox"]:indeterminate::before { left:2px; width:16px; height:16px; border-radius:50%; transform:translate(8px,-50%); }
+  .switch-row input[type="checkbox"]:focus-visible { box-shadow:inset 0 1px 2px rgba(0,0,0,.12); }
   .switch-copy { display:grid; gap:2px; min-width:0; }
-  .switch-copy b { color:var(--fg); font-size:12.5px; font-weight:600; }
+  .switch-copy b { color:var(--fg); font-size:12.5px; font-weight:650; }
   .switch-copy span { color:var(--mut); font-size:11.5px; line-height:1.4; }
   .option-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
   .option-grid .switch-row { padding:10px 11px; }
@@ -1798,10 +1856,10 @@
           <div class="table-wrap"><table class="risk-limit-table" aria-label="写操作风控额度">
             <thead><tr><th>操作</th><th>最小间隔（分钟）</th><th>每小时上限</th><th>每日上限</th></tr></thead>
             <tbody>
-              <tr><td>评论 / 回复</td><td><input id="risk-comment-gap" type="number" min="0"></td><td><input id="risk-comment-hourly" type="number" min="0"></td><td><input id="risk-comment-daily" type="number" min="0"></td></tr>
-              <tr><td>关注 / 取关</td><td><input id="risk-social-gap" type="number" min="0"></td><td><input id="risk-social-hourly" type="number" min="0"></td><td><input id="risk-social-daily" type="number" min="0"></td></tr>
-              <tr><td>私信</td><td><input id="risk-dm-gap" type="number" min="0"></td><td><input id="risk-dm-hourly" type="number" min="0"></td><td><input id="risk-dm-daily" type="number" min="0"></td></tr>
-              <tr><td>发布</td><td><input id="risk-publish-gap" type="number" min="0"></td><td><input id="risk-publish-hourly" type="number" min="0"></td><td><input id="risk-publish-daily" type="number" min="0"></td></tr>
+              <tr><td>评论 / 回复</td><td><input id="risk-comment-gap" type="number" min="0" aria-label="评论或回复最小间隔（分钟）"></td><td><input id="risk-comment-hourly" type="number" min="0" aria-label="评论或回复每小时上限"></td><td><input id="risk-comment-daily" type="number" min="0" aria-label="评论或回复每日上限"></td></tr>
+              <tr><td>关注 / 取关</td><td><input id="risk-social-gap" type="number" min="0" aria-label="关注或取关最小间隔（分钟）"></td><td><input id="risk-social-hourly" type="number" min="0" aria-label="关注或取关每小时上限"></td><td><input id="risk-social-daily" type="number" min="0" aria-label="关注或取关每日上限"></td></tr>
+              <tr><td>私信</td><td><input id="risk-dm-gap" type="number" min="0" aria-label="私信最小间隔（分钟）"></td><td><input id="risk-dm-hourly" type="number" min="0" aria-label="私信每小时上限"></td><td><input id="risk-dm-daily" type="number" min="0" aria-label="私信每日上限"></td></tr>
+              <tr><td>发布</td><td><input id="risk-publish-gap" type="number" min="0" aria-label="发布最小间隔（分钟）"></td><td><input id="risk-publish-hourly" type="number" min="0" aria-label="发布每小时上限"></td><td><input id="risk-publish-daily" type="number" min="0" aria-label="发布每日上限"></td></tr>
             </tbody>
           </table></div>
           <div class="form-grid" style="margin-top:10px">
@@ -2053,8 +2111,8 @@
           </span>
           <div class="export-actions" role="group" aria-label="链接下载历史 Excel 导出">
             <span class="export-caption" title="导出链接下载历史"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span>
-            <button type="button" class="export-btn filtered" onclick="exportShareHistoryReport(false, this)" title="按当前筛选条件导出链接下载历史" aria-label="导出链接下载历史筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button>
-            <button type="button" class="export-btn full" onclick="exportShareHistoryReport(true, this)" title="忽略筛选，导出当前平台全部链接下载历史" aria-label="导出链接下载历史全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button>
+            <button type="button" class="export-btn filtered" onclick="exportShareHistoryReport(false, this)" title="导出当前条件下的链接下载历史" aria-label="导出链接下载历史当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button>
+            <button type="button" class="export-btn full" onclick="exportShareHistoryReport(true, this)" title="导出当前平台全部链接下载历史" aria-label="导出链接下载历史全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button>
           </div>
         </div>
       </div>
@@ -2463,7 +2521,7 @@
       <select id="mon-group" aria-label="按分组筛选监控" onchange="onMonitorFilter()"><option value="">全部分组</option></select>
       <select id="mon-tag" aria-label="按标签筛选监控" onchange="onMonitorFilter()"><option value="">全部标签</option></select>
       <span class="filter-count" id="mon-filter-count" role="status" aria-live="polite"></span>
-      <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="监控列表 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('monitors', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出监控列表筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('monitors', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出监控列表全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div></div>
+      <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="监控列表 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('monitors', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出监控列表当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('monitors', true, this)" title="导出当前平台全部记录" aria-label="导出监控列表全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div></div>
     </div>
     <div class="table-wrap"><table aria-label="作品监控列表"><thead><tr>
       <th>用户</th><th>分组 / 标签</th><th>作品数</th><th>间隔</th><th>下载设置</th><th>上次扫描</th><th>状态</th><th></th>
@@ -2498,7 +2556,7 @@
       </select>
       <span class="filter-count" id="content-filter-count" role="status" aria-live="polite"></span>
       <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span>
-        <div class="export-actions" role="group" aria-label="作品数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('contents', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出作品数据筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('contents', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出作品数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div>
+        <div class="export-actions" role="group" aria-label="作品数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('contents', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出作品数据当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('contents', true, this)" title="导出当前平台全部记录" aria-label="导出作品数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div>
         <button class="ghost sm" id="content-selall-btn" onclick="contentSelAllToggle()">全选</button>
         <span id="content-selbar" style="display:none;align-items:center;gap:8px">
           <span class="mut" id="content-selcount">已选 0</span>
@@ -2610,7 +2668,7 @@
       <select id="watch-group" aria-label="按分组筛选评论监控" onchange="onWatchFilter()"><option value="">全部分组</option></select>
       <select id="watch-tag" aria-label="按标签筛选评论监控" onchange="onWatchFilter()"><option value="">全部标签</option></select>
       <span class="filter-count" id="watch-filter-count" role="status" aria-live="polite"></span>
-      <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="评论监控 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('comment-watches', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出评论监控筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('comment-watches', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出评论监控全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div></div>
+      <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="评论监控 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('comment-watches', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出评论监控当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('comment-watches', true, this)" title="导出当前平台全部记录" aria-label="导出评论监控全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div></div>
       </div>
       <div class="table-wrap"><table aria-label="评论监控列表"><thead><tr>
         <th>对象</th><th>分组 / 标签</th><th>类型</th><th>来源</th><th>评论数</th><th>间隔</th><th>上次扫描</th><th>状态</th><th>操作</th>
@@ -2639,7 +2697,7 @@
         </select>
         <span class="filter-count" id="comment-filter-count" role="status" aria-live="polite"></span>
         <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span>
-          <div class="export-actions" role="group" aria-label="评论数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('comments', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出评论数据筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('comments', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出评论数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div>
+          <div class="export-actions" role="group" aria-label="评论数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('comments', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出评论数据当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('comments', true, this)" title="导出当前平台全部记录" aria-label="导出评论数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div>
           <button class="ghost sm" id="comment-selall-btn" onclick="commentSelAllToggle()">全选</button>
           <span class="mut" id="comment-selcount" style="display:none">已选 0</span>
           <button class="sm danger" id="comment-batchbtn" style="display:none" onclick="commentBatchDelete()"><svg><use href="#i-trash"/></svg>批量删除</button>
@@ -2745,10 +2803,10 @@
       </div>
       <div class="manage-toolbar">
         <input type="search" id="danmaku-watch-search" placeholder="搜索对象或别名" aria-label="搜索弹幕监控" oninput="renderDanmakuWatchRows()">
-        <select id="danmaku-watch-group" onchange="renderDanmakuWatchRows()"><option value="">全部分组</option></select>
-        <select id="danmaku-watch-tag" onchange="renderDanmakuWatchRows()"><option value="">全部标签</option></select>
+        <select id="danmaku-watch-group" aria-label="按分组筛选弹幕监控" onchange="renderDanmakuWatchRows()"><option value="">全部分组</option></select>
+        <select id="danmaku-watch-tag" aria-label="按标签筛选弹幕监控" onchange="renderDanmakuWatchRows()"><option value="">全部标签</option></select>
         <span class="filter-count" id="danmaku-watch-filter-count"></span>
-        <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="弹幕监控 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('danmaku-watches', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出弹幕监控筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('danmaku-watches', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出弹幕监控全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div></div>
+        <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span><div class="export-actions" role="group" aria-label="弹幕监控 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('danmaku-watches', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出弹幕监控当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('danmaku-watches', true, this)" title="导出当前平台全部记录" aria-label="导出弹幕监控全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div></div>
       </div>
       <div class="table-wrap"><table aria-label="弹幕监控列表"><thead><tr>
         <th>对象</th><th>类型</th><th>来源</th><th>弹幕数</th><th>间隔</th><th>上次扫描</th><th>状态</th><th>操作</th>
@@ -2761,7 +2819,7 @@
         <h2>抓到的弹幕</h2>
       </div>
       <div class="manage-toolbar">
-        <select id="danmaku-src" onchange="onDanmakuSrc()"><option value="">全部来源</option></select>
+        <select id="danmaku-src" aria-label="按来源筛选弹幕" onchange="onDanmakuSrc()"><option value="">全部来源</option></select>
         <input id="danmaku-query" type="search" placeholder="筛选文本 / 用户 ID" aria-label="筛选弹幕文本或用户" oninput="refreshDanmaku(true)">
         <input id="danmaku-time-start" type="number" min="0" step="0.1" placeholder="起点秒" aria-label="视频内起点秒" onchange="refreshDanmaku(true)">
         <input id="danmaku-time-end" type="number" min="0" step="0.1" placeholder="终点秒" aria-label="视频内终点秒" onchange="refreshDanmaku(true)">
@@ -2771,7 +2829,7 @@
         </select>
         <span class="filter-count" id="danmaku-filter-count" role="status" aria-live="polite"></span>
         <div class="toolbar-actions"><span class="toolbar-actions-label">操作</span>
-          <div class="export-actions" role="group" aria-label="弹幕数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('danmaku', false, this)" title="按当前筛选条件导出全部匹配记录" aria-label="导出弹幕数据筛选结果"><svg aria-hidden="true"><use href="#i-filter"/></svg>导出筛选</button><button type="button" class="export-btn full" onclick="exportModuleReport('danmaku', true, this)" title="忽略本模块筛选，导出当前平台全部记录" aria-label="导出弹幕数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>导出全量</button></div>
+          <div class="export-actions" role="group" aria-label="弹幕数据 Excel 导出"><span class="export-caption" title="导出当前模块数据"><svg aria-hidden="true"><use href="#i-download"/></svg>Excel</span><button type="button" class="export-btn filtered" onclick="exportModuleReport('danmaku', false, this)" title="导出当前条件下的全部匹配记录" aria-label="导出弹幕数据当前结果"><svg aria-hidden="true"><use href="#i-download"/></svg>当前结果</button><button type="button" class="export-btn full" onclick="exportModuleReport('danmaku', true, this)" title="导出当前平台全部记录" aria-label="导出弹幕数据全部数据"><svg aria-hidden="true"><use href="#i-download"/></svg>全部数据</button></div>
           <button class="ghost sm danger" onclick="clearDanmaku()"><svg><use href="#i-trash"/></svg>清空弹幕</button>
         </div>
       </div>
