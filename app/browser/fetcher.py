@@ -1134,6 +1134,20 @@ async def _refetch_in_page(page, full_url: str) -> Optional[dict]:
         return None
 
 
+def _self_profile_session_is_invalid(has_login_btn, has_login_cookie,
+                                     has_result: bool,
+                                     profile_user_seen: bool) -> bool:
+    """根据页面和 Cookie 证据判断本人登录态是否已经失效。
+
+    登录 Cookie 即使仍在有效期内，也可能已被服务端撤销；页面明确显示可见的
+    “登录”入口时，应优先判定为退出状态，避免把 localStorage 或缓存接口中的
+    旧资料误当成一次成功的登录校验。
+    """
+    if has_login_btn is True:
+        return True
+    return bool(has_result and not profile_user_seen and has_login_cookie is False)
+
+
 async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
                              timeout_ms: int = 15000, block_media: bool = False
                              ) -> Tuple[dict, str]:
@@ -1270,8 +1284,11 @@ async def fetch_self_profile(mgr: BrowserManager, identity: Identity,
         except Exception:
             has_login_cookie = None
 
-        # localStorage 退出后可能残留。只有仍有登录 Cookie，弱来源资料才算有效。
-        if result and not profile_user_seen and has_login_cookie is False:
+        # localStorage 退出后可能残留。登录按钮可见即视为未登录；弱来源资料
+        # （未命中权威资料接口）还需登录 Cookie 佐证才算有效。
+        if _self_profile_session_is_invalid(
+                has_login_btn, has_login_cookie,
+                has_result=bool(result), profile_user_seen=profile_user_seen):
             result.clear()
             logged_out = True
     except Exception as e:

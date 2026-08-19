@@ -36,7 +36,8 @@ async def _reuse_or_create_login_page(ctx):
 
 async def interactive_login(mgr: BrowserManager, identity: Identity,
                             timeout_seconds: int = 180,
-                            start_url: str = "https://www.douyin.com/"
+                            start_url: str = "https://www.douyin.com/",
+                            force_reauth: bool = False,
                             ) -> Tuple[bool, str, str]:
     """返回 (是否成功, storage_state_json, nickname)。
     在账号专属持久 profile(独立 UA/视口/时区/代理/指纹)里有头扫码,
@@ -47,6 +48,11 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
     state_json 无论如何都会返回浏览器当前 cookie 快照(关窗前抓取),
     调用方用此更新 DB 的 storage_state，保证下次打开浏览器 cookie 是最新的。"""
     ctx = await mgr.open_headed(identity)
+    if force_reauth:
+        # “重新登录”必须从干净的认证态开始。持久 profile 和数据库快照里可能
+        # 仍保存着已被服务端撤销的 sessionid；若不先清掉，下面仅按 Cookie 名
+        # 轮询会在窗口刚打开时把旧 Cookie 误判为扫码成功。
+        await ctx.clear_cookies()
     page = await ctx.new_page()
     await _focus(page)
     logged = False
@@ -82,8 +88,18 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
             cur_vals = {c["name"]: c.get("value", "") for c in cookies
                         if c["name"] in _LOGIN_COOKIES}
             if cur_vals and cur_vals != init_vals:
-                logged = True
-                break
+                # Cookie 写入后再确认页面已离开登录态。扫码弹窗尚在时继续等，
+                # 避免平台刚轮换游客/旧 Cookie 就提前结束登录流程。
+                try:
+                    login_visible = await page.get_by_text(
+                        "登录", exact=True).first.is_visible(timeout=500)
+                except Exception:
+                    login_visible = None
+                current_url = str(page.url or "").lower()
+                if login_visible is not True and "passport" not in current_url \
+                        and "/login" not in current_url:
+                    logged = True
+                    break
             await asyncio.sleep(0.5)
             waited += 0.5
 
@@ -109,10 +125,12 @@ async def interactive_login(mgr: BrowserManager, identity: Identity,
 
 
 async def interactive_creator_login(mgr: BrowserManager, identity: Identity,
-                                    timeout_seconds: int = 180):
+                                    timeout_seconds: int = 180,
+                                    force_reauth: bool = False):
     """创作中心登录。返回 (ok, storage_state_json, nickname)。"""
     return await interactive_login(mgr, identity, timeout_seconds,
-                                   start_url="https://creator.douyin.com/")
+                                   start_url="https://creator.douyin.com/",
+                                   force_reauth=force_reauth)
 
 
 # 创作服务平台登录后才会写入的 Cookie(发布需要)
@@ -177,7 +195,8 @@ def _xhs_login_response_handler(authenticated_user: dict):
 
 
 async def interactive_xhs_login(mgr: BrowserManager, identity: Identity,
-                                timeout_seconds: int = 180
+                                timeout_seconds: int = 180,
+                                force_reauth: bool = False,
                                 ) -> Tuple[bool, str, str]:
     """小红书扫码登录。打开真实窗口让用户扫码,落地登录态。
     返回 (是否成功, storage_state_json, nickname)。
@@ -186,6 +205,8 @@ async def interactive_xhs_login(mgr: BrowserManager, identity: Identity,
     游客态 web_session 和登录弹窗 Cookie 都可能在扫码前生成或轮换，不能单独作为
     成功信号。用户中途关掉窗口则视为未登录。"""
     ctx = await mgr.context_for(identity)
+    if force_reauth:
+        await ctx.clear_cookies()
     logged = False
     nickname = ""
     state_json = ""
@@ -240,12 +261,15 @@ async def interactive_xhs_login(mgr: BrowserManager, identity: Identity,
 
 
 async def interactive_xhs_creator_login(mgr: BrowserManager, identity: Identity,
-                                        timeout_seconds: int = 180
+                                        timeout_seconds: int = 180,
+                                        force_reauth: bool = False,
                                         ) -> Tuple[bool, str, str]:
     """小红书「创作服务平台」登录(发布/已发布列表用)。打开 creator.xiaohongshu.com/login
     扫码,落地含创作者会话的登录态。返回 (是否成功, storage_state_json, nickname)。
     与普通登录区分:这里登录的是创作平台,登录态里含 customerClientId / galaxy_creator_session_id 等。"""
     ctx = await mgr.context_for(identity)
+    if force_reauth:
+        await ctx.clear_cookies()
     logged = False
     nickname = ""
     state_json = ""
@@ -291,13 +315,16 @@ _KS_CREATOR_COOKIES = {"kuaishou.web.cp.api_st", "kuaishou.web.cp.api_ph"}
 
 async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
                                timeout_seconds: int = 180,
-                               start_url: str = "https://www.kuaishou.com/"
+                               start_url: str = "https://www.kuaishou.com/",
+                               force_reauth: bool = False,
                                ) -> Tuple[bool, str, str]:
     """快手扫码登录。打开真实窗口让用户扫码,落地登录态。
     返回 (是否成功, storage_state_json, nickname)。
     判定登录:出现 userId + web_st/passToken(游客态没有)。用户中途关窗视为未登录。
     ⚠️ 选择器/登录态 Cookie 名随快手改版可能变化,集中在 _KS_LOGIN_COOKIES。"""
     ctx = await mgr.open_headed(identity)
+    if force_reauth:
+        await ctx.clear_cookies()
     page = await ctx.new_page()
     await _focus(page)
     logged = False
@@ -352,11 +379,14 @@ async def interactive_ks_login(mgr: BrowserManager, identity: Identity,
 
 
 async def interactive_ks_creator_login(mgr: BrowserManager, identity: Identity,
-                                       timeout_seconds: int = 180
+                                       timeout_seconds: int = 180,
+                                       force_reauth: bool = False,
                                        ) -> Tuple[bool, str, str]:
     """快手「创作者服务平台」登录(cp.kuaishou.com,发布用)。扫码后落地含创作者会话的登录态。
     返回 (是否成功, storage_state_json, nickname)。登录成功标志:出现 cp.api_st/api_ph。"""
     ctx = await mgr.open_headed(identity)
+    if force_reauth:
+        await ctx.clear_cookies()
     page = await ctx.new_page()
     await _focus(page)
     logged = False
@@ -461,7 +491,8 @@ def _channels_login_ready(cookie_names, auth_verified: bool, on_platform: bool) 
 
 
 async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
-                                     timeout_seconds: int = 180
+                                     timeout_seconds: int = 180,
+                                     force_reauth: bool = False,
                                      ) -> Tuple[bool, str, str]:
     """视频号扫码登录。打开视频号助手登录页让用户用微信扫码,落地登录态。
     返回 (是否成功, storage_state_json, nickname)。
@@ -469,6 +500,8 @@ async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
     昵称登录页不易读,返回空串,交由「资料刷新」用 fetch_channels_self_profile 补全。
     ⚠️ 登录判定 Cookie 名随视频号改版可能变化,集中在 _CHANNELS_LOGIN_COOKIES。"""
     ctx = await mgr.open_headed(identity)
+    if force_reauth:
+        await ctx.clear_cookies()
     page = await ctx.new_page()
     await _focus(page)
     logged = False
@@ -544,10 +577,12 @@ async def interactive_channels_login(mgr: BrowserManager, identity: Identity,
 
 
 async def interactive_channels_creator_login(mgr: BrowserManager, identity: Identity,
-                                             timeout_seconds: int = 180
+                                             timeout_seconds: int = 180,
+                                             force_reauth: bool = False,
                                              ) -> Tuple[bool, str, str]:
     """视频号无独立创作登录 —— 助手即创作平台,直接复用普通登录。"""
-    return await interactive_channels_login(mgr, identity, timeout_seconds)
+    return await interactive_channels_login(
+        mgr, identity, timeout_seconds, force_reauth=force_reauth)
 
 
 async def _read_ks_nickname(page) -> str:

@@ -565,28 +565,32 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                 yield guarded
 
         async with _login_guard():
+            # 重登已有账号时从干净认证态开始：持久 profile 里可能残留已被服务端
+            # 撤销的旧 Cookie，先清掉再扫码，避免“刚提示成功又登录失效”。
+            reauth_options = {"force_reauth": True} if account_id else {}
             if platform == "xhs":
                 if creator:
                     ok, state_json, nickname = await interactive_xhs_creator_login(
-                        browser, identity)
+                        browser, identity, **reauth_options)
                 else:
                     ok, state_json, nickname = await interactive_xhs_login(
-                        browser, identity)
+                        browser, identity, **reauth_options)
             elif platform == "kuaishou":
                 if creator:
                     ok, state_json, nickname = await interactive_ks_creator_login(
-                        browser, identity)
+                        browser, identity, **reauth_options)
                 else:
                     ok, state_json, nickname = await interactive_ks_login(
-                        browser, identity)
+                        browser, identity, **reauth_options)
             elif platform == "shipinhao":
                 ok, state_json, nickname = await interactive_channels_login(
-                    browser, identity)
+                    browser, identity, **reauth_options)
             elif creator:
                 ok, state_json, nickname = await interactive_creator_login(
-                    browser, identity)
+                    browser, identity, **reauth_options)
             else:
-                ok, state_json, nickname = await interactive_login(browser, identity)
+                ok, state_json, nickname = await interactive_login(
+                    browser, identity, **reauth_options)
 
         # 浏览器已经完成实际后端选择；此时快照能反映系统 Chrome 或真实回退。
         login_environment = browser.environment_snapshot(identity, headless=False)
