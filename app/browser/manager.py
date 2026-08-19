@@ -20,7 +20,7 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from playwright.async_api import BrowserContext, async_playwright
+from patchright.async_api import BrowserContext, async_playwright
 
 from ..windowing import (CHROMIUM_WINDOW_CLASSES, bring_window_to_front,
                          capture_window_snapshot)

@@ -44,20 +44,20 @@ def check_risk_control() -> bool:
 
 def check_playwright() -> bool:
     try:
-        import playwright  # noqa: F401
-        from playwright.sync_api import sync_playwright
+        import patchright  # noqa: F401
+        from patchright.sync_api import sync_playwright
     except Exception as e:
-        print(f"[Playwright] FAIL: 未安装: {e}")
+        print(f"[Patched Playwright] FAIL: 未安装: {e}")
         print("   运行: python creatorhub.py install")
         return False
     try:
         with sync_playwright() as p:
             b = p.chromium.launch(headless=True)
             b.close()
-        print("[Playwright] OK: Chromium 可启动")
+        print("[Patched Playwright] OK: Chromium 可启动")
         return True
     except Exception as e:
-        print(f"[Playwright] FAIL: 启动失败: {e}")
+        print(f"[Patched Playwright] FAIL: 启动失败: {e}")
         print("   运行: python creatorhub.py install")
         return False
 

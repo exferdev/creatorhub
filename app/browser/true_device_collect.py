@@ -17,7 +17,7 @@ PROBE_JS = (Path(__file__).resolve().parent / "fingerprint_probe.js").read_text(
 async def collect_true_device(headless: bool = True,
                               window_size: str = "1920x1080") -> dict:
     """在本机真实 Chrome 上采集真机指纹, 返回 ShardX 兼容的 profile dict。"""
-    from playwright.async_api import async_playwright
+    from patchright.async_api import async_playwright
 
     w, h = map(int, window_size.replace("x", ",").split(","))
     async with async_playwright() as p:
