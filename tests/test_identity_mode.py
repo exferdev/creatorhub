@@ -56,6 +56,20 @@ class _PlaywrightStub:
         self.chromium = _ChromiumStub()
 
 
+# 代理下禁止 WebRTC 走非代理 UDP 的参数(防止真实出口 IP 通过 STUN 泄露)
+_WEBRTC_ARGS = [
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+]
+
+
+def _native_render_args(manager, identity):
+    """native 启动按账号 seed 确定性分配渲染分异参数(非“伪装”, 是有意行为)。"""
+    if manager._rendering_mode_for(identity) == "swiftshader":
+        return ["--use-gl=swiftshader", "--enable-unsafe-swiftshader"]
+    return []
+
+
 class IdentityModeTests(unittest.TestCase):
     def setUp(self):
         self.previous_engine = db._engine
@@ -529,7 +543,8 @@ class IdentityModeTests(unittest.TestCase):
         self.assertNotIn("user_agent", kwargs)
         self.assertNotIn("geolocation", kwargs)
         self.assertNotIn("permissions", kwargs)
-        self.assertNotIn("args", kwargs)
+        # 渲染分异参数(seed 决定 GPU/SwiftShader, 非“伪装”)是 native 的有意行为
+        self.assertEqual(kwargs["args"], _native_render_args(manager, identity))
         self.assertNotIn("viewport", kwargs)
         self.assertNotIn("locale", kwargs)
         self.assertNotIn("timezone_id", kwargs)
@@ -537,7 +552,7 @@ class IdentityModeTests(unittest.TestCase):
         self.assertEqual(context.header_calls, [])
         self.assertEqual(context.script_calls, [])
 
-    def test_native_proxy_launch_only_adds_webrtc_proxy_routing_flags(self):
+    def test_native_proxy_launch_adds_webrtc_flags_on_top_of_rendering(self):
         manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
         manager._pw = _PlaywrightStub()
         identity = Identity(
@@ -550,10 +565,11 @@ class IdentityModeTests(unittest.TestCase):
         asyncio.run(manager._launch_persistent(identity, headless=False))
         kwargs = manager._pw.chromium.kwargs
 
-        self.assertEqual(kwargs["args"], [
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-        ])
+        # 期望: 渲染分异参数(若有) + 代理 WebRTC 防漏 IP 参数
+        self.assertEqual(
+            kwargs["args"],
+            _native_render_args(manager, identity) + _WEBRTC_ARGS,
+        )
         self.assertEqual(kwargs["proxy"], {"server": "http://127.0.0.1:8080"})
         self.assertTrue(kwargs["no_viewport"])
 
@@ -572,10 +588,15 @@ class IdentityModeTests(unittest.TestCase):
 
         self.assertEqual(major, 150)
         self.assertEqual(manager._browser_channel, "chrome")
-        self.assertEqual(chromium.launch.await_args.kwargs["channel"], "chrome")
+        self.assertEqual(
+            [c.kwargs.get("channel") for c in chromium.launch.await_args_list],
+            ["chrome", "msedge", None])
+        self.assertIn("chrome", manager._channels)
         self.assertNotIn("args", chromium.launch.await_args.kwargs)
 
-    def test_browser_probe_falls_back_when_stable_chrome_is_unavailable(self):
+    def test_browser_probe_falls_back_to_system_edge_when_chrome_missing(self):
+        # 当前实现: 探测 chrome → msedge → 内置; 系统 Chrome 缺失时优先用系统 Edge
+        # (同为 Chromium), 而非直接退回 Playwright bundled Chromium。
         manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
         page = AsyncMock()
         page.evaluate.return_value = (
@@ -583,15 +604,23 @@ class IdentityModeTests(unittest.TestCase):
         browser = AsyncMock()
         browser.new_page.return_value = page
         chromium = AsyncMock()
-        chromium.launch.side_effect = [RuntimeError("no stable chrome"), browser]
+
+        def launch(**kwargs):
+            if kwargs.get("channel") == "chrome":
+                raise RuntimeError("no stable chrome")
+            return browser
+
+        chromium.launch.side_effect = launch
         manager._pw = SimpleNamespace(chromium=chromium)
 
         major = asyncio.run(manager._detect_chrome_major())
 
         self.assertEqual(major, 149)
-        self.assertIsNone(manager._browser_channel)
-        self.assertEqual(chromium.launch.await_count, 2)
-        self.assertNotIn("channel", chromium.launch.await_args.kwargs)
+        self.assertEqual(manager._browser_channel, "msedge")
+        self.assertEqual(
+            [c.kwargs.get("channel") for c in chromium.launch.await_args_list],
+            ["chrome", "msedge", None])
+        self.assertIn("msedge", manager._channels)
 
     def test_persistent_context_uses_selected_browser_channel(self):
         manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
@@ -685,8 +714,11 @@ class IdentityModeTests(unittest.TestCase):
 
     def test_native_launch_persists_actual_ua_for_cookie_account(self):
         with db.get_session() as session:
+            # 用非抖音平台(此处 xhs)走 Playwright native 路径: 抖音账号现走 ShardX
+            # 引擎启动, 不含这套 native UA 实测→回写流程。
             account = DouyinAccount(
-                nickname="cookie", identity_mode="native", ua="",
+                nickname="cookie", platform="xhs",
+                identity_mode="native", ua="",
                 profile_dir=str(Path(self.tmp.name) / "cookie-profile"),
             )
             session.add(account)
@@ -714,6 +746,8 @@ class IdentityModeTests(unittest.TestCase):
         manager = BrowserManager("DEFAULT_UA", self.cfg.engine.profiles_dir)
         manager._pw = _PlaywrightStub()
         manager._chrome_major = 131
+        # 模拟启动时已探测到内核通道, legacy 才会注入一致的 Sec-CH-UA Client Hints 头
+        manager._channels = {"chrome": 131}
         identity = Identity(
             account_id=1,
             profile_dir=str(Path(self.tmp.name) / "legacy"),
