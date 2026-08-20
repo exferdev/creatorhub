@@ -551,25 +551,20 @@ class DouyinIMClient:
         self._method_id += 1; return self._method_id
 
     def _gen_abogus(self, path: str, query_params: dict = None) -> str:
-        """生成 a_bogus: 远程签名服务优先, 回退纯Python本地算法。"""
+        """生成 a_bogus: 完全云端(远程签名服务), 失败即报错。"""
         from urllib.parse import urlencode
         qs = ""
         if query_params:
             qs = urlencode({k: v for k, v in query_params.items() if v})
         if not qs:
             return ""
-        # 模式B: 远程签名服务 (Cloudflare Worker)
-        try:
-            from .sign_client import remote_abogus
-            ab = remote_abogus(qs, self.ua)
-            if ab:
-                print(f"[im-protocol] remote abogus=OK")
-                return ab
-        except Exception:
-            pass
-        # 模式A: 本地纯Python
-        from .bdms.abogus import generate_a_bogus
-        return generate_a_bogus(qs, self.ua)
+        from .sign_client import remote_abogus
+        ab = remote_abogus(qs, self.ua)
+        if not ab:
+            raise RuntimeError(
+                "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+        print(f"[im-protocol] remote abogus=OK")
+        return ab
 
     def _post(self, path: str, body: bytes, query_params: dict = None,
               a_bogus: str = "", extra_headers: dict = None) -> bytes:
@@ -585,7 +580,7 @@ class DouyinIMClient:
         print(f"[im-protocol] POST {path}?a_bogus={'SET' if a_bogus else 'NO'}")
         hdrs = dict(extra_headers or {})
         if a_bogus:
-            # bdms 生成的 a_bogus 放 URL, V8 frontier_sign 的 x-bogus 放 header
+            # a_bogus 放 URL, x-bogus 由页面 V8 frontier_sign 放 header
             params["a_bogus"] = a_bogus
         try:
             resp = self._sess.post(url, data=body, cookies=self.cookies,
@@ -747,7 +742,7 @@ class DouyinIMClient:
     def _load_template(self) -> bytearray:
         if DouyinIMClient._tpl_data is not None:
             return DouyinIMClient._tpl_data
-        path = Path(__file__).resolve().parent / "bdms" / "send_template.bin"
+        path = Path(__file__).resolve().parent / "send_template.bin"
         if not path.exists():
             raise RuntimeError("Template not found: " + str(path))
         with open(path, "rb") as f:
@@ -830,15 +825,19 @@ class DouyinIMClient:
 
         # URL + a_bogus
         from urllib.parse import urlencode
-        from .bdms.abogus import generate_a_bogus
         ms_token = self.cookies.get("msToken", "")
         verify_fp = self.cookies.get("UIFID_TEMP", "")[:19] or ""
         params = {"msToken": ms_token or ""}
         if verify_fp and len(verify_fp) > 10:
             params["verifyFp"] = params["fp"] = f"verify_{verify_fp}"
         if not a_bogus:
-            a_bogus = generate_a_bogus(urlencode({k: v for k, v in params.items() if v}), self.ua)
-            print(f"[im-protocol] tmpl a_bogus={'OK' if a_bogus else 'FAIL'}")
+            from .sign_client import remote_abogus
+            a_bogus = remote_abogus(
+                urlencode({k: v for k, v in params.items() if v}), self.ua)
+            if not a_bogus:
+                raise RuntimeError(
+                    "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+            print(f"[im-protocol] tmpl a_bogus=OK")
         params["a_bogus"] = a_bogus
         url = f"{self.API_BASE}/v1/message/send?" + urlencode({k: v for k, v in params.items() if v})
 
@@ -852,9 +851,6 @@ class DouyinIMClient:
         })
         resp = sess.post(url, data=bytes(new_outer), cookies=self.cookies, timeout=30)
         print(f"[im-protocol] tmpl send: {resp.status_code}, {len(resp.content)}b body={len(bytes(new_outer))}b")
-        # 调试: 保存body到文件
-        with open(Path(__file__).resolve().parent / "bdms" / "debug_body.bin", "wb") as f:
-            f.write(bytes(new_outer))
         if not resp.content:
             return {"ok": False, "msg": "empty", "cmd": 0}
         raw = resp.content

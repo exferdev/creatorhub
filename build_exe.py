@@ -26,15 +26,17 @@ VENV_PY = ROOT / ".venv" / "Scripts" / "python.exe"
 
 
 def _collect_app_data() -> list[str]:
-    """app/ 下的非 py 资源 (前端 / 签名 JS / bin / 缓存)。"""
+    """app/ 下的非 py 资源 (前端 / bin / 缓存 / IM 模板)。"""
     web = ROOT / "app" / "web"
     xhs_static = ROOT / "app" / "platforms" / "xhs" / "static"
-    bdms = ROOT / "app" / "platforms" / "douyin" / "bdms"
     data = ROOT / "app" / "data"
+    im_template = ROOT / "app" / "platforms" / "douyin" / "send_template.bin"
     out = []
-    for src in (web, xhs_static, bdms, data):
+    for src in (web, xhs_static, data):
         if src.is_dir():
             out.append(f"{src};{src.relative_to(ROOT)}")
+    if im_template.is_file():
+        out.append(f"{im_template};{im_template.relative_to(ROOT).parent}")
     return out
 
 

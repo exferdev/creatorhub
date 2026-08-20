@@ -2175,7 +2175,7 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
 async def dm_protocol_send(account_id: int, body: SendDmIn):
     """协议模式:发送私信。HTTP+guard headers ECDH签名投递。"""
     client = await _get_im_client(account_id)
-    # 在主事件循环中预生成 a_bogus (bdms.js Node子进程或V8 signer)
+    # 在主事件循环中预生成 a_bogus (远程签名服务)
     ab = client._gen_abogus("/v1/message/send",
         {"msToken": client.cookies.get("msToken", "")})
     print(f"[dm-protocol] precomputed a_bogus={'OK' if ab else 'FAIL'}")

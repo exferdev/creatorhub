@@ -3,8 +3,8 @@
 基于 douyin-ops publisher.py 的协议逆向，但 HTTP 层改用 page.evaluate(fetch)
 走真实浏览器 TLS 指纹（继承 CreatorHub 反检测体系），而非 curl_cffi 模拟。
 
-签名（X-Bogus / a_bogus）由纯 Python 实现 (bdms/xbogus.py, bdms/abogus.py)。
-msToken 由 ms_token.py 提供。
+签名（X-Bogus / a_bogus）由远程签名服务 js-sign-service 提供（SIGN_SERVICE_URL,
+github.com/exferdev/js）。msToken 由 ms_token.py 提供。
 """
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ async def _get_sts2(page, cookies: dict, ms_token_str: str, ua: str = "") -> dic
     path = "/aweme/mid/video/sts2"
     path_q = path + "?" + urlencode(p)
 
-    # X-Bogus: 远程签名服务优先, 回退纯Python本地算法
+    # X-Bogus: 完全云端(远程签名服务, 无本地回退)
     xb = None
     try:
         from .sign_client import remote_xbogus
@@ -195,14 +195,7 @@ async def _get_sts2(page, cookies: dict, ms_token_str: str, ua: str = "") -> dic
         if xb:
             print(f"[dy-protocol] remote xbogus=OK")
     except Exception:
-        pass
-    if not xb:
-        try:
-            from .bdms.xbogus import generate_x_bogus
-            xb = generate_x_bogus(path_q)
-            print(f"[dy-protocol] local xbogus: {'OK' if xb else 'FAIL'}")
-        except Exception as e:
-            print(f"[dy-protocol] xbogus error: {e!r}")
+        xb = None
     hdrs = {"Referer": "https://creator.douyin.com/"}
     if xb:
         hdrs["x-bogus"] = xb
@@ -559,21 +552,14 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
         body_json = json.dumps(current_body, ensure_ascii=False, separators=(",", ":"))
         signed_params = dict(params)
         url_without_ab = base_url + "?" + urlencode(signed_params)
-        # create_v2 a_bogus: 远程优先, 回退纯Python (A/B 已验证)
-        ab = ""
-        try:
-            from .sign_client import remote_abogus
-            ab = remote_abogus(urlencode(signed_params), ua)
-            if ab:
-                print(f"[dy-protocol] remote abogus=OK")
-        except Exception:
-            pass
+        # create_v2 a_bogus: 完全云端(远程签名服务, 无本地回退)
+        from .sign_client import remote_abogus
+        ab = remote_abogus(urlencode(signed_params), ua)
         if not ab:
-            from .bdms.abogus import generate_a_bogus as _py_abogus
-            ab = _py_abogus(urlencode(signed_params), ua)
-            print(f"[dy-protocol] local abogus: {'OK' if ab else 'FAIL'}")
-        if ab:
-            signed_params["a_bogus"] = ab
+            raise RuntimeError(
+                "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+        print(f"[dy-protocol] remote abogus=OK")
+        signed_params["a_bogus"] = ab
 
         query = urlencode(signed_params)
         url = f"https://creator.douyin.com{base_path}?{query}"
@@ -629,7 +615,7 @@ async def publish_douyin_protocol(
     """协议模式发布抖音作品。返回 (ok, item_id_or_error, error_detail)。
 
     走 8 步协议流程，HTTP 请求通过浏览器 page.evaluate(fetch) 发送。
-    签名由纯 Python 实现 (bdms/xbogus.py + bdms/abogus.py)。
+    签名（X-Bogus / a_bogus）由远程签名服务 js-sign-service 提供。
     """
     files = [str(Path(p)) for p in media_paths if p and Path(p).exists()]
     if not files:

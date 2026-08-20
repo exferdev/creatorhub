@@ -97,7 +97,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 小红书签名由远程签名服务（js-sign-service，Cloudflare Worker）提供，默认
 `https://js.faryi.workers.dev`，可用环境变量 `SIGN_SERVICE_URL` 覆盖；无需
-本地 Node.js / npm。抖音签名同样复用该服务（失败回退本地纯 Python 算法）。
+本地 Node.js / npm。抖音、小红书签名均由该服务提供（完全云端，无本地回退）。
 
 </details>
 

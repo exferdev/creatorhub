@@ -1,10 +1,10 @@
 """
 远程签名服务客户端 — 调用 exferdev/js (Cloudflare Worker)
 
-服务地址: https://js.faryi.workers.dev (见 E:\\JS\\js\\README.md)
+服务地址: https://js.faryi.workers.dev (GitHub: https://github.com/exferdev/js)
 路由: POST /sign/:platform/:algorithm
 
-双通道策略: 远程优先, 失败回退本地纯 Python (bdms/)
+完全云端签名: 失败返回 None, 由调用方决定抛错或跳过(无本地回退)。
 """
 import os
 from typing import Optional
