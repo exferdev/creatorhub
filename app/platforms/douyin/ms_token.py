@@ -69,20 +69,40 @@ def _seed_pick(seed: str, salt: str, options) -> int:
     return options[int(digest[:2], 16) % len(options)]
 
 
-def _default_db_dir() -> str:
-    """指纹库根目录: 优先环境变量, 其次既有默认路径(不存在则空→跳过文件解析)。"""
-    d = os.environ.get("FINGERPRINT_DB_DIR", "").strip()
-    if not d and os.path.exists("E:/fingerprint-db"):
-        d = "E:/fingerprint-db"
-    return d
+_FPDB_CLIENT = None
+
+
+def _fpdb_client():
+    """按 app config 构建 fingerprint-db API 客户端 (懒加载, 只读)。
+
+    数据源只走 API: 未配置/加载失败时返回 disabled 客户端, 由 resolve_navigator
+    抛错并在 build_strdata_profile 中明确提示 (无本地指纹库回退)。
+    """
+    global _FPDB_CLIENT
+    if _FPDB_CLIENT is None:
+        try:
+            from app.browser.fingerprint_store import FingerprintDbClient
+            from app.config import load_config
+            cfg = load_config()
+            _FPDB_CLIENT = FingerprintDbClient(
+                cfg.engine.fingerprint_db_base_url,
+                cfg.engine.fingerprint_db_read_key)
+        except Exception:
+            _FPDB_CLIENT = FingerprintDbClient("")
+    return _FPDB_CLIENT
+
+
+_WARNED_FP_API = False
 
 
 def build_strdata_profile(ua: str = "", *, identity=None, navigator=None) -> dict:
     """按账号画像构建 strData 参数(每账号指纹不同)。
 
     navigator 为空且 identity 携带 shardx_id/fingerprint_name/fp_seed 时,
-    会尝试只读解析该账号真实指纹 profile 的 navigator(不启动浏览器);
-    解析失败/无身份时回退 fp_seed 确定性派生 + UA。worker 白名单外字段会被忽略。
+    会尝试解析该账号真实的 navigator: shardx_id 走账号自己的 ShardX 持久化
+    profile, 指纹库 (fingerprint_name/fp_seed) 只走 fingerprint-db HTTP API。
+    解析失败(API 未配置/不可达)时, 打印一次明确提示并按 fp_seed 确定性派生
+    + UA 降级(派生参数为账号种子生成, 非本地指纹库数据)。worker 白名单外字段会被忽略。
     """
     profile: dict = {"ua": ua or ""}
     if identity is None:
@@ -93,13 +113,18 @@ def build_strdata_profile(ua: str = "", *, identity=None, navigator=None) -> dic
         try:
             from app.browser.fingerprint_store import resolve_navigator
             navigator = resolve_navigator(
-                _default_db_dir(),
+                _fpdb_client(),
                 shardx_id=getattr(identity, "shardx_id", "") or "",
                 fingerprint_name=getattr(identity, "fingerprint_name", "") or "",
                 fp_seed=seed,
                 platform=getattr(identity, "os", "") or "",
             )
-        except Exception:
+        except Exception as e:
+            global _WARNED_FP_API
+            if not _WARNED_FP_API:
+                _WARNED_FP_API = True
+                print(f"[strdata] fingerprint-db API 未配置/不可达, 改用种子派生参数"
+                      f"(配置 fingerprint_db_base_url 可获真实指纹): {e}")
             navigator = None
 
     if navigator and isinstance(navigator, dict):

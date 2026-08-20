@@ -1,13 +1,15 @@
-import json
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.browser.fingerprint_store import resolve_navigator
 from app.platforms.douyin import ms_token
 from app.platforms.douyin.sign_client import remote_strdata
+
+try:
+    from httpx import HTTPStatusError, Request, Response
+except ImportError:  # pragma: no cover
+    HTTPStatusError = Request = Response = None
 
 
 def _ident(**kw):
@@ -23,8 +25,10 @@ def _ident(**kw):
 
 class StrdataProfileTests(unittest.TestCase):
     def setUp(self):
-        # 默认机器可能有 E:/fingerprint-db → 屏蔽文件解析, 使派生测试与机器无关
-        patcher = patch.object(ms_token, "_default_db_dir", return_value="")
+        # 屏蔽真实 config.yaml 的指纹库配置 → 派生测试与机器/网络无关
+        patcher = patch.object(
+            ms_token, "_fpdb_client",
+            return_value=SimpleNamespace(enabled=False))
         self.addCleanup(patcher.stop)
         patcher.start()
 
@@ -84,29 +88,73 @@ class StrdataProfileTests(unittest.TestCase):
 
 
 class FpDbNavigatorTests(unittest.TestCase):
-    def test_resolve_navigator_from_local_fingerprint_db(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "database"
-            db.mkdir()
-            for name, cores, mem in (("p-a", 8, 16), ("p-b", 12, 32)):
-                (db / f"{name}.json").write_text(
-                    json.dumps({"navigator": {
-                        "platform": "Windows", "platform_value": "Win32",
-                        "hardware_concurrency": cores, "device_memory": mem,
-                        "language": "zh-CN",
-                    }}), encoding="utf-8")
-            nav = resolve_navigator(tmp, fp_seed="abc", platform="win")
-            self.assertIsNotNone(nav)
-            self.assertIn(nav.get("hardware_concurrency"), (8, 12))
-            self.assertIn(nav.get("device_memory"), (16, 32))
-            # 确定性选择: 同一 seed 结果一致
-            nav2 = resolve_navigator(tmp, fp_seed="abc", platform="win")
-            self.assertEqual(nav, nav2)
+    """resolve_navigator 只走 fingerprint-db API (无本地文件回退)。"""
 
-    def test_resolve_navigator_none_on_missing_db_or_seed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(resolve_navigator(tmp, fp_seed="x"))
-            self.assertIsNone(resolve_navigator(tmp, fingerprint_name="nope"))
+    PROFILES = [
+        {"name": "p-a", "platform": "Windows", "gpu": "g1",
+         "chrome_major": 149, "renderer": "r1"},
+        {"name": "p-b", "platform": "Windows", "gpu": "g2",
+         "chrome_major": 149, "renderer": "r2"},
+    ]
+    STORE = {
+        "p-a": {"navigator": {"platform": "Windows", "platform_value": "Win32",
+                              "hardware_concurrency": 8, "device_memory": 16,
+                              "language": "zh-CN"}},
+        "p-b": {"navigator": {"platform": "Windows", "platform_value": "Win32",
+                              "hardware_concurrency": 12, "device_memory": 32,
+                              "language": "zh-CN"}},
+    }
+
+    def _fake_client(self):
+        def load(name):
+            if name not in self.STORE:
+                req = Request("GET", f"http://fpdb/api/v1/profiles/{name}")
+                raise HTTPStatusError(
+                    "404 Not Found", request=req,
+                    response=Response(404, request=req))
+            return self.STORE[name]
+
+        return SimpleNamespace(
+            enabled=True,
+            list_profiles_sync=lambda platform: list(self.PROFILES),
+            load_profile_sync=load,
+        )
+
+    def test_resolve_navigator_from_api_via_fp_seed(self):
+        nav = resolve_navigator(self._fake_client(), fp_seed="abc", platform="win")
+        self.assertIsNotNone(nav)
+        self.assertIn(nav.get("hardware_concurrency"), (8, 12))
+        self.assertIn(nav.get("device_memory"), (16, 32))
+        # 确定性选择: 同一 seed 结果一致
+        nav2 = resolve_navigator(self._fake_client(), fp_seed="abc", platform="win")
+        self.assertEqual(nav, nav2)
+
+    def test_resolve_navigator_by_fingerprint_name(self):
+        nav = resolve_navigator(
+            self._fake_client(), fingerprint_name="p-b", platform="win")
+        self.assertEqual(nav.get("hardware_concurrency"), 12)
+
+    def test_resolve_navigator_raises_when_api_disabled(self):
+        with self.assertRaises(RuntimeError):
+            resolve_navigator(SimpleNamespace(enabled=False), fp_seed="x")
+        with self.assertRaises(RuntimeError):
+            resolve_navigator(None, fingerprint_name="nope")
+
+    def test_resolve_navigator_raises_when_api_unreachable(self):
+        def boom(*a, **k):
+            raise RuntimeError("connection refused")
+
+        client = SimpleNamespace(enabled=True,
+                                 list_profiles_sync=boom,
+                                 load_profile_sync=boom)
+        with self.assertRaises(RuntimeError):
+            resolve_navigator(client, fp_seed="x")
+        with self.assertRaises(RuntimeError):
+            resolve_navigator(client, fingerprint_name="nope")
+
+    def test_resolve_navigator_none_when_no_fingerprint_identity(self):
+        # 无 fingerprint_name 且无 fp_seed → 不访问 API, 直接返回 None
+        self.assertIsNone(resolve_navigator(None))
 
 
 class RemoteStrdataParamTests(unittest.TestCase):

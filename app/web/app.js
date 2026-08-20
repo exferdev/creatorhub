@@ -2812,11 +2812,9 @@ async function loadSettings() {
     }
     if ($("fpdb-base-url")) {
       $("fpdb-base-url").value = s.fingerprint_db_base_url || "";
-      $("fpdb-base-url").placeholder = s.fingerprint_db_base_url ? "" : "未配置(文件直读)";
+      $("fpdb-base-url").placeholder = s.fingerprint_db_base_url ? "" : "未配置(必需)";
       $("fpdb-read-key").value = s.fingerprint_db_read_key_set ? "已配置" : "";
       $("fpdb-read-key").placeholder = s.fingerprint_db_read_key_set ? "" : "未配置";
-      $("fpdb-dir").value = s.fingerprint_db_dir || "";
-      $("fpdb-dir").placeholder = s.fingerprint_db_dir ? "" : "—";
     }
     csSyncAll();
   } catch (e) {}

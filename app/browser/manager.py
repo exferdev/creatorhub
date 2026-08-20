@@ -127,7 +127,6 @@ class BrowserManager:
                  max_live: int = 6, native_ua_callback=None,
                  xhs_browser_mode: str = "auto",
                  xhs_cdp_idle_seconds: int = 900,
-                 fingerprint_db_dir: str = "",
                  fingerprint_db_base_url: str = "",
                  fingerprint_db_read_key: str = "",
                  native_write_gate_enabled: bool = True,
@@ -153,7 +152,6 @@ class BrowserManager:
             0, int(native_write_proxy_max_age_seconds))
         self.browser_exit_probe_url = str(browser_exit_probe_url or "").strip()
         # fingerprint-db 数据源 (API 优先, 文件回退)
-        self._fingerprint_db_dir = fingerprint_db_dir
         self._fpdb_client = FingerprintDbClient(
             fingerprint_db_base_url, fingerprint_db_read_key)
         self._pw = None
@@ -435,14 +433,6 @@ class BrowserManager:
 
     # ── 持久化 context ──
     @staticmethod
-    def _fingerprint_seed_from(fp_seed: str) -> int:
-        """fp_seed(hex) → 确定性整数种子 (同账号每次一致)。"""
-        try:
-            return int(fp_seed, 16) % 2 ** 32
-        except (ValueError, TypeError):
-            return 10000 + (abs(hash(fp_seed or "")) % 90000)
-
-    @staticmethod
     def _patch_pathlib_utf8() -> None:
         """shardx SDK 在 Windows 用 Path.read_text() 默认 GBK 读 UTF-8 JSON,
         monkey-patch 默认 encoding 为 UTF-8 (全局安全)。"""
@@ -483,29 +473,40 @@ class BrowserManager:
         平台过滤: platform 非空则按指定平台 (mac/win/linux) 选; 空则按宿主 OS。
         独立 profile 可指定 os 覆盖; 账号路径默认宿主 OS。
 
-        数据源: fingerprint-db HTTP API (fingerprint_db_base_url 非空)。
-        本地不再存指纹库, API 未配置或不可达时返回 None (回退 ShardX 自带库)。
+        数据源: 只走 fingerprint-db HTTP API (fingerprint_db_base_url)。本地不再存
+        指纹库、亦不回退 ShardX 自带库; API 未配置或不可达时抛 RuntimeError 明确报错。
         """
         from shardx import Profile
 
-        if self._fpdb_client.enabled:
-            key = platform or host_platform_key()
-            data = await self._fpdb_client.pick(identity.fp_seed, key)
-            if data is not None:
-                return Profile(dict(data))
-        return None
+        if not self._fpdb_client.enabled:
+            raise RuntimeError(
+                "fingerprint-db API 未配置 (fingerprint_db_base_url 为空); "
+                "指纹数据源只走 API, 已无本地/引擎自带库回退")
+        key = platform or host_platform_key()
+        data = await self._fpdb_client.pick(identity.fp_seed, key)
+        if data is None:
+            raise RuntimeError(
+                f"fingerprint-db API 未返回可用指纹 (platform={key})")
+        return Profile(dict(data))
 
     async def _load_named_profile(self, name: str) -> Any:
-        """按 name 直接加载 fingerprint-db profile (仅走 HTTP API)。"""
+        """按 name 直接加载 fingerprint-db profile (只走 HTTP API)。
+
+        API 未配置或不可达时抛 RuntimeError 明确报错 (无本地回退)。
+        """
         from shardx import Profile
 
-        if self._fpdb_client.enabled:
-            try:
-                data = await self._fpdb_client.load_profile(name)
-                return Profile(dict(data))
-            except Exception:
-                pass
-        return None
+        if not self._fpdb_client.enabled:
+            raise RuntimeError(
+                "fingerprint-db API 未配置 (fingerprint_db_base_url 为空); "
+                "指纹数据源只走 API, 已无本地/引擎自带库回退")
+        try:
+            data = await self._fpdb_client.load_profile(name)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"fingerprint-db API 不可达: {e}") from e
+        return Profile(dict(data))
 
     @staticmethod
     def _apply_profile_overrides(prof: Any, ua_override: str,
@@ -590,7 +591,8 @@ class BrowserManager:
         真机 GPU/硬件/UA 模板内部一致 → BrowserScan WebGL/Audio/隐身 全过 (实测)。
         自建指纹库 (fingerprint-db) 首次由 fp_seed 确定性选定后固化为按账号唯一的
         ShardX 持久化 profile (.fpdb_id 记 id), 后续 open_profile 复用 → 同账号每次
-        同指纹, 且对库演进 (增删/重生成) 免疫; 失败回退 ShardX 自带库 (.shardx_id)。
+        同指纹, 且对库演进 (增删/重生成) 免疫。选型数据源只走 fingerprint-db HTTP
+        API, 无本地/引擎自带库回退; 失败时明确报错 (见下方 raise)。
 
         fingerprint_name 非空时, 跳过 seed 确定性选择, 直接加载指定 fingerprint-db
         profile (独立 profile 用)。
@@ -653,27 +655,12 @@ class BrowserManager:
         else:
             print(f"[browser] shardx profile: 自建库持久化 {prof.id}")
         if prof is None:
-            # 回退 ShardX 自带库 (原有 .shardx_id 逻辑)
-            sid_file = pdir / ".shardx_id"
-            prof = None
-            if sid_file.exists():
-                try:
-                    prof = sdk.open_profile(sid_file.read_text(encoding="utf-8").strip())
-                except Exception:
-                    prof = None
-            if prof is None:
-                templates = sdk.list_profiles(platform="Windows")
-                if not templates:
-                    templates = sdk.list_profiles()
-                idx = self._fingerprint_seed_from(identity.fp_seed) % len(templates)
-                prof = sdk.create_profile(templates[idx])
-                prof.set_noise("canvas")          # canvas 确定性噪声; audio/webgl 保持真实
-                self._align_engine_version(prof)
-                sdk.save_profile(prof)
-                try:
-                    sid_file.write_text(prof.id, encoding="utf-8")
-                except Exception:
-                    pass
+            # 无可用指纹: 无绑定 profile、无可复用冻结副本, 且 fingerprint-db API
+            # 未配置/不可达(选择逻辑已抛错前于此)。明确报错, 不回退任何本地/自带库。
+            raise RuntimeError(
+                "账号无可用指纹: fingerprint-db API 未配置或不可达, 且已禁用本地/"
+                "引擎自带库回退。请在 config.yaml 配置 fingerprint_db_base_url, "
+                "或先在指纹页为该账号绑定 fingerprint profile")
         # 3) 应用覆盖 + noise (独立 profile; 账号路径参数为空则跳过)
         if prof is not None:
             # 对齐 UA 版本到引擎(覆盖 open_profile 读出的历史脏副本)

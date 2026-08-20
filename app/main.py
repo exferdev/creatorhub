@@ -197,7 +197,6 @@ async def lifespan(app: FastAPI):
         cfg.engine.max_live_contexts, native_ua_callback=_persist_native_ua,
         xhs_browser_mode=cfg.engine.xhs_browser_mode,
         xhs_cdp_idle_seconds=cfg.engine.xhs_cdp_idle_seconds,
-        fingerprint_db_dir=cfg.engine.fingerprint_db_dir,
         fingerprint_db_base_url=cfg.engine.fingerprint_db_base_url,
         fingerprint_db_read_key=cfg.engine.fingerprint_db_read_key,
         native_write_gate_enabled=cfg.engine.native_write_gate_enabled,
@@ -3036,10 +3035,9 @@ def _settings_dict() -> dict:
         "ai_temperature": get_setting("ai_temperature", "0.9"),
         # 不回传明文 key,只告知是否已配置
         "ai_api_key_set": bool(get_setting("ai_api_key", "")),
-        # fingerprint-db 数据源 (只读, 改 config.yaml 后重启)
+        # 指纹数据源 (只走 API, 无本地回退; 只读展示, 改 config.yaml 后重启)
         "fingerprint_db_base_url": cfg.engine.fingerprint_db_base_url,
         "fingerprint_db_read_key_set": bool(cfg.engine.fingerprint_db_read_key),
-        "fingerprint_db_dir": cfg.engine.fingerprint_db_dir,
     }
 
 
@@ -7731,6 +7729,8 @@ async def list_fingerprints(platform: str | None = None):
     key = platform or host_platform_key()
     try:
         profiles = await browser._fpdb_client.list_profiles(key)
+    except RuntimeError as e:
+        raise HTTPException(502, f"fingerprint-db API 不可用: {e}")
     except Exception:
         raise HTTPException(502, "fingerprint-db API 不可达")
     return {"ok": True, "count": len(profiles), "profiles": profiles}
@@ -7744,6 +7744,8 @@ async def random_fingerprint(platform: str | None = None):
     key = platform or host_platform_key()
     try:
         data = await browser._fpdb_client.pick(uuid.uuid4().hex, key)
+    except RuntimeError as e:
+        raise HTTPException(502, f"fingerprint-db API 不可用: {e}")
     except Exception:
         raise HTTPException(502, "fingerprint-db API 不可达")
     if data is None:
@@ -7756,7 +7758,10 @@ async def get_fingerprint(name: str):
     """取单个 fingerprint 完整 JSON。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
-    cfg = await browser._load_named_profile(name)
+    try:
+        cfg = await browser._load_named_profile(name)
+    except RuntimeError as e:
+        raise HTTPException(502, f"fingerprint-db API 不可用: {e}")
     if cfg is None:
         raise HTTPException(404, f"fingerprint {name!r} not found")
     return cfg.config
