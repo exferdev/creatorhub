@@ -1,107 +1,104 @@
-"""小红书创作平台签名(参考 Spider_XHS)。
-- x-s / x-t / x-s-common:用 static/xhs_creator_260411.js(execjs + Node + crypto-js)
-- x-rap-param:用 static/xhs_rap.js
-- 上传文件的 COS 签名(getSignature):纯 Python 复刻(HMAC-SHA1),不走 JS
-- traceid 等:Python 随机生成
+"""小红书签名：从 js-sign-service (Cloudflare Worker) 远程获取。
 
-依赖:Node.js(PATH 里)+ 本项目 node_modules 里的 crypto-js(npm install crypto-js)。
-小红书改版导致签名失效时,从参考项目更新 static/*.js 即可。
+服务地址: https://js.faryi.workers.dev (GitHub: https://github.com/exferdev/js)
+路由:     POST /sign/xhs/{all|x_rap|cos_sign|traceid|xs|xs_common|xyw}
+
+- x-s / x-t / x-s-common / b3/xray traceid: 用 `/sign/xhs/all` 一次聚合
+- x-rap-param: 用 `/sign/xhs/x_rap`
+- 上传 COS 签名: 用 `/sign/xhs/cos_sign`
+- traceid: 用 `/sign/xhs/traceid`
+
+彻底远程化：不再打包签名 JS、不依赖 Node/execjs/crypto-js。
+非签名辅助(纯 Python)保留本地：splice_str / trans_cookies / now_ms。
+远程签名服务可用 `SIGN_SERVICE_URL` 环境变量覆盖(与 douyin sign_client 一致)。
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import os
-import random
 import time
-from pathlib import Path
 from urllib.parse import urlencode
 
-_STATIC = Path(__file__).parent / "static"
-_NODE_MODULES = Path(__file__).parents[2] / "node_modules"
+_BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.workers.dev")
+_TIMEOUT = 8
 
-# 让 execjs 启动的 node 能 require 到 crypto-js
-_existing = os.environ.get("NODE_PATH", "")
-if str(_NODE_MODULES) not in _existing:
-    os.environ["NODE_PATH"] = (str(_NODE_MODULES) + os.pathsep + _existing).rstrip(os.pathsep)
-
-_JS_CACHE: dict = {}
 _AVAILABLE: bool | None = None
+_AVAILABLE_AT = 0.0
+_AVAILABLE_TTL = 60.0
 
 
-def _ctx(filename: str):
-    if filename not in _JS_CACHE:
-        import execjs
-        _JS_CACHE[filename] = execjs.compile((_STATIC / filename).read_text(encoding="utf-8"))
-    return _JS_CACHE[filename]
+def _post(algorithm: str, payload: dict) -> dict:
+    """调远程签名服务；非 ok 响应抛 RuntimeError。"""
+    import curl_cffi.requests as cr
+    url = f"{_BASE_URL}/sign/xhs/{algorithm}"
+    resp = cr.post(url, json=payload, timeout=_TIMEOUT)
+    data = resp.json()
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError(
+            f"sign service error: {data.get('error', resp.status_code)}")
+    return data
 
 
 def available() -> bool:
-    """检测 execjs + Node + 签名 JS 是否可用(供发布前判断,不可用则回退浏览器)。"""
-    global _AVAILABLE
-    if _AVAILABLE is not None:
+    """探测远程签名服务可达性(轻量 traceid, 60s 缓存)。"""
+    global _AVAILABLE, _AVAILABLE_AT
+    now = time.time()
+    if _AVAILABLE is not None and now - _AVAILABLE_AT < _AVAILABLE_TTL:
         return _AVAILABLE
     try:
-        import execjs  # noqa
-        r = _ctx("xhs_creator_260411.js").call(
-            "get_request_headers_params", "/api/test", "", "a1test")
-        _AVAILABLE = bool(r and r.get("xs"))
+        _post("traceid", {})
+        _AVAILABLE, _AVAILABLE_AT = True, now
     except Exception:
-        _AVAILABLE = False
-    return _AVAILABLE
+        _AVAILABLE, _AVAILABLE_AT = False, now
+    return bool(_AVAILABLE)
 
 
 def generate_xs_xs_common(a1: str, api: str, data="") -> tuple:
-    ret = _ctx("xhs_creator_260411.js").call("get_request_headers_params", api, data, a1)
-    return ret["xs"], ret["xt"], ret["xs_common"]
+    """x-s / x-t / x-s-common 一次聚合(all)。"""
+    ret = _post("all", {"a1": a1, "api": api, "method": "GET", "data": data})
+    return ret["x_s"], ret["x_t"], ret["x_s_common"]
 
 
 def generate_xsc_main(a1: str, api: str, data="", method: str = "GET") -> dict:
-    """网页主签名(xhs_main_260411.js,带 method)。用于 www/edith 的带参 GET 等。
-    api 传"路径?query"(splice_str 结果),data='',method='GET'(对齐 Spider_XHS)。"""
-    ret = _ctx("xhs_main_260411.js").call("get_request_headers_params", api, data, a1, method)
+    """网页主签名(x-s/x-t/x-s-common + traceid)。api 传"路径?query"。"""
+    ret = _post("all", {"a1": a1, "api": api, "method": method, "data": data})
     return {
-        "x-s": ret["xs"], "x-t": str(ret["xt"]), "x-s-common": ret["xs_common"],
-        "x-b3-traceid": gen_b3_traceid(), "x-xray-traceid": gen_xray_traceid(),
+        "x-s": ret["x_s"], "x-t": str(ret["x_t"]), "x-s-common": ret["x_s_common"],
+        "x-b3-traceid": ret["x_b3_traceid"], "x-xray-traceid": ret["x_xray_traceid"],
+    }
+
+
+def generate_xsc(a1: str, api: str, data="") -> dict:
+    ret = _post("all", {"a1": a1, "api": api, "method": "GET", "data": data})
+    return {
+        "x-s": ret["x_s"], "x-t": str(ret["x_t"]), "x-s-common": ret["x_s_common"],
+        "x-b3-traceid": ret["x_b3_traceid"], "x-xray-traceid": ret["x_xray_traceid"],
     }
 
 
 def generate_x_rap_param(api: str, data="") -> str:
     if isinstance(data, (dict, list)):
+        import json
         data = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    return _ctx("xhs_rap.js").call("generate_x_rap_param", api, data or "", None)
-
-
-def _rand_hex(n: int) -> str:
-    return "".join(random.choice("abcdef0123456789") for _ in range(n))
-
-
-def gen_b3_traceid() -> str:
-    return _rand_hex(16)
-
-
-def gen_xray_traceid() -> str:
-    return _rand_hex(32)
-
-
-def generate_xsc(a1: str, api: str, data="") -> dict:
-    xs, xt, xs_common = generate_xs_xs_common(a1, api, data)
-    return {
-        "x-s": xs, "x-t": str(xt), "x-s-common": xs_common,
-        "x-b3-traceid": gen_b3_traceid(), "x-xray-traceid": gen_xray_traceid(),
-    }
+    ret = _post("x_rap", {"api": api, "data": data})
+    return ret["x_rap_param"]
 
 
 def cos_signature(message: str, file_id: str, content_length: int,
                   host: str = "ros-upload.xiaohongshu.com") -> str:
-    """复刻 static/xhs_creator_signature.js 的 getSignature(腾讯云 COS 风格 HMAC-SHA1)。"""
-    k1 = hmac.new(b"null", message.encode(), hashlib.sha1).hexdigest()
-    new_message = (f"put\n/spectrum/{file_id}\n\n"
-                   f"content-length={content_length}&host={host}\n")
-    params = hashlib.sha1(new_message.encode()).hexdigest()
-    sign_msg = f"sha1\n{message}\n{params}\n"
-    return hmac.new(k1.encode(), sign_msg.encode(), hashlib.sha1).hexdigest()
+    """上传 COS 签名(腾讯云风格 HMAC-SHA1)，由 worker cos_sign 计算。"""
+    ret = _post("cos_sign", {
+        "message": message, "file_id": file_id,
+        "content_length": content_length, "host": host,
+    })
+    return ret["signature"]
+
+
+def gen_b3_traceid() -> str:
+    return _post("traceid", {})["x_b3_traceid"]
+
+
+def gen_xray_traceid() -> str:
+    return _post("traceid", {})["x_xray_traceid"]
 
 
 def splice_str(api: str, params: dict) -> str:
