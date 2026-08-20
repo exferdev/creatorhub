@@ -662,7 +662,7 @@ async def publish_douyin_protocol(
         uid = cookie_dict.get("uid_tt", "") or identity.account_id or ""
         page_uid = uid
 
-        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua)
+        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua, identity=identity)
         ms_token_str = ms_result.get("ms_token", "") if ms_result.get("ok") else (cookie_dict.get("msToken", "") or "")
         print(f"[dy-protocol] msToken via {ms_result.get('source','?')}{(ms_token_str and ' (ok)') or ''}")
 
@@ -792,7 +792,7 @@ async def publish_douyin_image_protocol(
             pass
 
         uid = cookie_dict.get("uid_tt", "") or identity.account_id or ""
-        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua)
+        ms_result = _ms_token.get_ms_token(cookie_dict, ms_appid="2906", ua=identity.ua, identity=identity)
         ms_token_str = ms_result.get("ms_token", "") if ms_result.get("ok") else (cookie_dict.get("msToken", "") or "")
         print(f"[dy-image-protocol] msToken via {ms_result.get('source','?')}{(ms_token_str and ' (ok)') or ''}")
 

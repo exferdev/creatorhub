@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -41,6 +42,67 @@ _FAKE_CHARSET = string.ascii_letters + string.digits + "=_-"
 def gen_false_ms_token(length: int = 126) -> str:
     """本地伪造 msToken(读取公开作品列表通常够用, 非签名)。"""
     return "".join(random.choice(_FAKE_CHARSET) for _ in range(length))
+
+
+# ── strData 画像参数化(每账号指纹不同, 防多账号共用同一指纹被风控关联)──
+_TZ_OFFSET_CACHE: dict = {}
+_MEM_OPTIONS = (4, 6, 8, 12, 16, 32)
+_CORE_OPTIONS = (4, 8, 12, 16, 24)
+
+
+def _tz_offset_hours(timezone_id: str) -> int | None:
+    """按 IANA 时区名算当前 UTC 偏移小时(worker 的 timezone 参数)。"""
+    tz_id = (timezone_id or "").strip() or "Asia/Shanghai"
+    if tz_id in _TZ_OFFSET_CACHE:
+        return _TZ_OFFSET_CACHE[tz_id]
+    try:
+        from zoneinfo import ZoneInfo
+        offset = int(datetime.now(ZoneInfo(tz_id)).utcoffset().total_seconds() // 3600)
+        _TZ_OFFSET_CACHE[tz_id] = offset
+        return offset
+    except Exception:
+        return None
+
+
+def _seed_pick(seed: str, salt: str, options) -> int:
+    digest = hashlib.sha256(f"{seed}:{salt}".encode("utf-8")).hexdigest()
+    return options[int(digest[:2], 16) % len(options)]
+
+
+def build_strdata_profile(ua: str = "", *, identity=None) -> dict:
+    """按账号画像构建 strData 参数(每账号指纹不同)。
+
+    worker strdata 端点白名单外字段会被忽略; 缺省回退 worker 内置常量(向后兼容)。
+    identity 缺省时仅带 UA(UA 本身即每账号不同)。
+    """
+    profile: dict = {"ua": ua or ""}
+    if identity is None:
+        return profile
+    seed = str(getattr(identity, "fp_seed", "") or "")
+    mem = getattr(identity, "memory_gb", 0) or _seed_pick(seed, "mem", _MEM_OPTIONS)
+    cores = getattr(identity, "cpu_cores", 0) or _seed_pick(seed, "cores", _CORE_OPTIONS)
+    profile["deviceMemory"] = int(mem)
+    profile["hardwareConcurrency"] = int(cores)
+    lang = str(getattr(identity, "locale", "") or "zh-CN").strip()
+    if lang:
+        profile["language"] = lang
+    tz = _tz_offset_hours(getattr(identity, "timezone_id", ""))
+    if tz is not None:
+        profile["timezone"] = tz
+    if getattr(identity, "viewport_w", 0) and getattr(identity, "viewport_h", 0):
+        profile["viewport_w"] = int(identity.viewport_w)
+        profile["viewport_h"] = int(identity.viewport_h)
+    profile["screen"] = {"colorDepth": 24}
+    return profile
+
+
+def _strdata_cache_key(ua: str = "", identity=None) -> str:
+    """strData 缓存按账号隔离: 避免账号 A 的指纹被账号 B 复用。"""
+    seed = str(getattr(identity, "fp_seed", "") or "")
+    raw = f"{ua or ''}|{seed}".strip("|")
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _write_json_secure(path: str, data: dict):
@@ -85,26 +147,39 @@ def set_cached_ms_token(token: str, cookies_domain: str = "creator.douyin.com"):
     _write_json_secure(CACHE_FILE, cache)
 
 
-def _load_strdata() -> str:
+def _load_strdata(cache_key: str = "") -> str:
     d = _load_json(STRDATA_CACHE_FILE)
-    saved_at = d.get("saved_at", 0)
+    if cache_key:
+        entry = (d.get("accounts") or {}).get(cache_key) or {}
+    else:
+        entry = d
+    saved_at = entry.get("saved_at", 0)
     if time.time() - saved_at < 7 * 86400:
-        return d.get("strData", "")
+        return entry.get("strData", "")
     return ""
 
 
-def _save_strdata(strdata: str):
-    _write_json_secure(STRDATA_CACHE_FILE, {"strData": strdata, "saved_at": time.time()})
+def _save_strdata(strdata: str, cache_key: str = ""):
+    d = _load_json(STRDATA_CACHE_FILE)
+    if cache_key:
+        accounts = d.setdefault("accounts", {})
+        if not isinstance(accounts, dict):
+            accounts = d["accounts"] = {}
+        accounts[cache_key] = {"strData": strdata, "saved_at": time.time()}
+    else:
+        d["strData"] = strdata
+        d["saved_at"] = time.time()
+    _write_json_secure(STRDATA_CACHE_FILE, d)
 
 
 def refresh_ms_token_via_strdata(strdata: str = "", ms_appid: str = "6383",
                                   existing_ms_token: str = "", max_retries: int = 3,
-                                  ua: str = "") -> dict:
+                                  ua: str = "", cache_key: str = "") -> dict:
     """S0: 用 strData 重放 /web/r/token API 获取 msToken (纯 Python, 首选)。"""
     import requests as req
 
     if not strdata:
-        strdata = _load_strdata()
+        strdata = _load_strdata(cache_key)
     if not strdata:
         return {"ok": False, "error": "no strData — 需要先从浏览器抓取一次 strData 指纹",
                 "source": "strdata_replay"}
@@ -132,7 +207,7 @@ def refresh_ms_token_via_strdata(strdata: str = "", ms_appid: str = "6383",
                 if m:
                     ms_token = m.group(1)
             if ms_token:
-                _save_strdata(strdata)
+                _save_strdata(strdata, cache_key)
                 set_cached_ms_token(ms_token)
                 return {"ok": True, "ms_token": ms_token, "source": "strdata_replay"}
             if attempt < max_retries - 1:
@@ -197,16 +272,20 @@ def refresh_ms_token_via_mssdk(cookies_dict: dict, existing_ms_token: str = "",
 
 
 def get_ms_token(cookies: dict = None, force_refresh: bool = False,
-                 ms_appid: str = "2906", ua: str = "") -> dict:
+                 ms_appid: str = "2906", ua: str = "", identity=None) -> dict:
     """获取 msToken，自动选择最优策略。
 
     优先级: strData重放(纯Python) > 缓存(7天) > mssdk API > 远程签名服务
     ua 应传账号真实浏览器身份的 User-Agent,保证这里直连的 HTTP 请求
     和该账号浏览器实际发出的请求头一致。
+    identity 非空时,远程 strData 会带账号画像(每账号不同指纹, 防共用被关联)。
     """
     ms_tok = (cookies or {}).get("msToken", "")
+    profile = build_strdata_profile(ua, identity=identity)
+    cache_key = _strdata_cache_key(ua, identity)
 
-    result = refresh_ms_token_via_strdata(existing_ms_token=ms_tok, ms_appid=ms_appid, ua=ua)
+    result = refresh_ms_token_via_strdata(
+        existing_ms_token=ms_tok, ms_appid=ms_appid, ua=ua, cache_key=cache_key)
     if result.get("ok"):
         return result
 
@@ -220,16 +299,18 @@ def get_ms_token(cookies: dict = None, force_refresh: bool = False,
         if result.get("ok"):
             return result
 
-    # 模式B: 远程签名服务兜底 (Worker 仅提供纯算 strdata, mssdk 重放必须本地 IP)
+    # 模式B: 远程签名服务(strData 按账号画像参数化) — mssdk 重放必须本地 IP
     try:
         from .sign_client import remote_strdata
-        strdata = _load_strdata() or remote_strdata()
+        strdata = remote_strdata(profile)
+        if not strdata:
+            strdata = _load_strdata(cache_key) or remote_strdata()
         if strdata:
-            r = refresh_ms_token_via_strdata(strdata, ms_appid=ms_appid, ua=ua)
+            r = refresh_ms_token_via_strdata(
+                strdata, ms_appid=ms_appid, ua=ua, cache_key=cache_key)
             if r.get("ok"):
-                _save_strdata(strdata)
                 return r
     except Exception:
         pass
 
-    return {"ok": False, "error": "all strategies failed — 需要先缓存 strData", "source": "none"}
+    return {"ok": False, "error": "all strategies failed — 需要先获取 strData", "source": "none"}

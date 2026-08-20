@@ -41,10 +41,15 @@ def remote_xbogus(path: str, salt: str = "") -> Optional[str]:
         return None
 
 
-def remote_strdata() -> Optional[str]:
-    """远程生成 strData 指纹。失败返回 None。"""
+def remote_strdata(profile: dict | None = None) -> Optional[str]:
+    """远程生成 strData 指纹(msToken 重放用), 可传账号画像参数使每账号指纹不同。
+
+    worker strdata 端点白名单: ua/platform/deviceMemory/hardwareConcurrency/
+    language/languages/timezone/canvas/browserType/screen{width,height,colorDepth}/
+    viewport_w/h。失败返回 None。
+    """
     try:
-        data = _post("strdata", {})
+        data = _post("strdata", profile or {})
         return data.get("strData")
     except Exception:
         return None
