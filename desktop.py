@@ -2,7 +2,7 @@
 
 用途:
   - 后台启动 FastAPI (uvicorn), 前台用系统 WebView 打开 http://127.0.0.1:8000
-  - 首次运行环境检查: 系统 Chrome / Node(随附 node.exe) / ShardX 引擎(离线包引导)
+  - 首次运行环境检查: 系统 Chrome / ShardX 引擎(离线包引导)
   - 窗口关闭后干净退出 (杀 uvicorn, 不留后台进程)
 
 开发运行:
@@ -45,9 +45,9 @@ def _normalize_python_paths():
     """打包后把依赖的 dll/pyd 目录加进 DLL 搜索路径 (PyInstaller one-folder 需要)。"""
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).parent
-        # playwright 的浏览器驱动 / shardx 引擎依赖 dll
-        for sub in ("_internal", "_internal/playwright/driver",
-                    "_internal/playwright/driver/package"):
+        # patchright 的浏览器驱动 / shardx 引擎依赖 dll
+        for sub in ("_internal", "_internal/patchright/driver",
+                    "_internal/patchright/driver/package"):
             dll = base / sub
             if dll.is_dir():
                 os.environ.setdefault("PATH", str(dll) + os.pathsep + os.environ.get("PATH", ""))
@@ -90,15 +90,6 @@ def _ensure_shardx_engine():
     print(f"[desktop] 已安装离线 ShardX 引擎 → {target}")
 
 
-def _ensure_node():
-    """把随附的 node.exe 加入 PATH (小红书创作平台签名需要)。"""
-    node_exe = bundle_root() / "node.exe"
-    if node_exe.is_file():
-        os.environ["PATH"] = str(bundle_root()) + os.pathsep + os.environ.get("PATH", "")
-        return node_exe
-    return shutil.which("node")
-
-
 def check_env() -> list[str]:
     """环境检查, 返回缺失项列表 (空 = 全部就绪)。"""
     missing = []
@@ -109,10 +100,7 @@ def check_env() -> list[str]:
             missing.append("未检测到系统 Google Chrome (扫码登录/抓取需要)")
     except Exception:
         pass
-    # 2) Node (小红书签名)
-    if _ensure_node() is None:
-        missing.append("未找到 node.exe (小红书创作平台签名需要)")
-    # 3) ShardX 引擎
+    # 2) ShardX 引擎
     try:
         from shardx.runtime import RUNTIME_DIR
         from shardx.runtime import Runtime
@@ -145,7 +133,6 @@ def _main():
     _normalize_python_paths()
     _log("[desktop] env paths ok")
     _ensure_shardx_engine()
-    _ensure_node()
 
     missing = check_env()
     if missing:

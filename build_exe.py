@@ -7,7 +7,6 @@
 输出:
     dist/CreatorHubPRO/
         CreatorHubPRO.exe    # 主程序 (后端+前端+全依赖)
-        node.exe             # 随附 Node (小红书签名)
         shardx-sdk/          # 可选: 离线 ShardX 引擎 (--with-engine)
         config.yaml          # 默认配置
         README.txt           # 分发说明
@@ -79,13 +78,6 @@ def build(args) -> None:
 
     # 拷贝随附文件到 dist
     DIST.mkdir(parents=True, exist_ok=True)
-    # node.exe (小红书签名)
-    node_src = Path(os.environ.get("NODE_EXE", r"C:\Program Files\nodejs\node.exe"))
-    if node_src.is_file():
-        shutil.copy2(node_src, DIST / "node.exe")
-        print("[build] 已拷贝 node.exe")
-    else:
-        print("[build] 警告: 未找到 node.exe (小红书创作平台签名将不可用)")
     # config.yaml
     if (ROOT / "config.yaml").exists():
         shutil.copy2(ROOT / "config.yaml", DIST / "config.yaml")

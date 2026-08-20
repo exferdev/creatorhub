@@ -95,7 +95,7 @@ class XhsApiClient:
                         for k, v in params.items())
 
     async def _get(self, uri: str, params: Dict[str, Any]) -> dict:
-        # 带参数 GET:优先用 execjs 签名(xhshow 的带参 GET 签名有 bug,会被判"无登录")。
+        # 带参数 GET:优先用远程主签名(creator_sign 已完全云端;xhshow 的带参 GET 签名有 bug,会被判"无登录")。
         try:
             from . import creator_sign
             use_execjs = bool(params) and creator_sign.available()

@@ -226,7 +226,7 @@ def start(
     if reload and sys.platform != "win32":
         command.append("--reload")
     elif reload:
-        log("Windows 不支持 --reload（与 Playwright 子进程不兼容），已自动关闭。修改代码后请手动 Ctrl+C 重启。")
+        log("Windows 不支持 --reload（与浏览器自动化子进程不兼容），已自动关闭。修改代码后请手动 Ctrl+C 重启。")
 
     run(command)
 
@@ -263,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-browser",
         action="store_true",
-        help="安装时跳过 Playwright Chromium",
+        help="安装时跳过 Patchright Chromium",
     )
     return parser
 

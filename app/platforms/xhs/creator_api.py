@@ -1,6 +1,6 @@
 """小红书创作平台「API 直发」客户端(参考 Spider_XHS-master/apis/xhs_creator_apis.py)。
 流程:获取上传凭证 -> PUT 文件到 ros-upload(COS 签名)-> (视频)轮询转码 -> POST 发布笔记。
-同步实现(curl_cffi.Session + execjs 签名 + cv2 取图像尺寸/视频封面),由引擎用线程调度。
+同步实现(curl_cffi.Session + 远程签名 + cv2 取图像尺寸/视频封面),由引擎用线程调度。
 走 curl_cffi 的 impersonate 复刻 Chrome TLS 指纹(发布是写操作,风控更严)。
 """
 from __future__ import annotations
