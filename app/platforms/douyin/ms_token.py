@@ -69,21 +69,57 @@ def _seed_pick(seed: str, salt: str, options) -> int:
     return options[int(digest[:2], 16) % len(options)]
 
 
-def build_strdata_profile(ua: str = "", *, identity=None) -> dict:
+def _default_db_dir() -> str:
+    """指纹库根目录: 优先环境变量, 其次既有默认路径(不存在则空→跳过文件解析)。"""
+    d = os.environ.get("FINGERPRINT_DB_DIR", "").strip()
+    if not d and os.path.exists("E:/fingerprint-db"):
+        d = "E:/fingerprint-db"
+    return d
+
+
+def build_strdata_profile(ua: str = "", *, identity=None, navigator=None) -> dict:
     """按账号画像构建 strData 参数(每账号指纹不同)。
 
-    worker strdata 端点白名单外字段会被忽略; 缺省回退 worker 内置常量(向后兼容)。
-    identity 缺省时仅带 UA(UA 本身即每账号不同)。
+    navigator 为空且 identity 携带 shardx_id/fingerprint_name/fp_seed 时,
+    会尝试只读解析该账号真实指纹 profile 的 navigator(不启动浏览器);
+    解析失败/无身份时回退 fp_seed 确定性派生 + UA。worker 白名单外字段会被忽略。
     """
     profile: dict = {"ua": ua or ""}
     if identity is None:
         return profile
     seed = str(getattr(identity, "fp_seed", "") or "")
-    mem = getattr(identity, "memory_gb", 0) or _seed_pick(seed, "mem", _MEM_OPTIONS)
-    cores = getattr(identity, "cpu_cores", 0) or _seed_pick(seed, "cores", _CORE_OPTIONS)
+
+    if navigator is None:
+        try:
+            from app.browser.fingerprint_store import resolve_navigator
+            navigator = resolve_navigator(
+                _default_db_dir(),
+                shardx_id=getattr(identity, "shardx_id", "") or "",
+                fingerprint_name=getattr(identity, "fingerprint_name", "") or "",
+                fp_seed=seed,
+                platform=getattr(identity, "os", "") or "",
+            )
+        except Exception:
+            navigator = None
+
+    if navigator and isinstance(navigator, dict):
+        mem = navigator.get("device_memory")
+        cores = navigator.get("hardware_concurrency")
+        plat = navigator.get("platform_value")
+        lang = navigator.get("language")
+    else:
+        mem = cores = plat = lang = None
+
+    if not mem:
+        mem = getattr(identity, "memory_gb", 0) or _seed_pick(seed, "mem", _MEM_OPTIONS)
+    if not cores:
+        cores = getattr(identity, "cpu_cores", 0) or _seed_pick(seed, "cores", _CORE_OPTIONS)
     profile["deviceMemory"] = int(mem)
     profile["hardwareConcurrency"] = int(cores)
-    lang = str(getattr(identity, "locale", "") or "zh-CN").strip()
+    if plat:
+        profile["platform"] = str(plat)
+    if not lang:
+        lang = str(getattr(identity, "locale", "") or "zh-CN").strip()
     if lang:
         profile["language"] = lang
     tz = _tz_offset_hours(getattr(identity, "timezone_id", ""))

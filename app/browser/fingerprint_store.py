@@ -57,6 +57,54 @@ def list_profiles_local(db_dir: str, platform: str | None = None) -> list[dict]:
     return out
 
 
+def load_profile_local(db_dir: str, name: str) -> Optional[dict]:
+    """文件直读单个 fingerprint profile JSON; 缺失/损坏返回 None。"""
+    try:
+        path = Path(db_dir) / "database" / f"{name}.json"
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        return cfg if isinstance(cfg, dict) else None
+    except Exception:
+        return None
+
+
+def resolve_navigator(db_dir: str, *, shardx_id: str = "",
+                      fingerprint_name: str = "", fp_seed: str = "",
+                      platform: str = "") -> Optional[dict]:
+    """解析账号将使用的指纹 profile, 返回其 navigator(只读文件, 不启动浏览器)。
+
+    与浏览器侧同序: 绑定 shardx_id(ShardX 持久化 profile.json) >
+    指定 fingerprint_name(指纹库) > fp_seed 确定性选择(指纹库)。
+    db_dir 仅用于指纹库路径; shardx_id 走 ShardX 保存目录。
+    失败均静默返回 None, 由调用方回退(如按 seed 派生近似)。
+    """
+    if shardx_id:
+        try:
+            from shardx import ShardX
+            prof = ShardX().open_profile(shardx_id)
+            nav = prof.config.get("navigator") if prof and getattr(prof, "config", None) else None
+            if isinstance(nav, dict) and nav:
+                return nav
+        except Exception:
+            pass
+    if fingerprint_name or fp_seed:
+        try:
+            if fingerprint_name:
+                cfg = load_profile_local(db_dir, fingerprint_name)
+            else:
+                profiles = list_profiles_local(db_dir, platform or host_platform_key())
+                if profiles:
+                    idx = _seed_from(fp_seed) % len(profiles)
+                    cfg = load_profile_local(db_dir, profiles[idx]["name"])
+                else:
+                    cfg = None
+            nav = (cfg or {}).get("navigator")
+            if isinstance(nav, dict) and nav:
+                return nav
+        except Exception:
+            pass
+    return None
+
+
 class FingerprintDbClient:
     """fingerprint-db 只读 API 客户端。"""
 
