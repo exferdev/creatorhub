@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 
 from app.browser.cdp import (
     CdpProxyAuthController,
