@@ -11,9 +11,6 @@ python-multipart>=0.0.9   # 发布:上传图集/视频文件
 openpyxl>=3.1.5          # 监控报告:Excel 导出
 opencv-python-headless>=4.8  # 发布:图片尺寸 / 视频封面与元数据
 numpy>=1.24               # opencv 依赖
-mini-racer>=0.12.0        # 发布:V8 JS引擎(抖音协议签名 X-Bogus / a_bogus)。旧包名 py-mini-racer 停在
-                           # 0.6.0(2021)且无 macOS arm64 wheel,在 Apple Silicon 上会退回源码编译 V8 大概率失败;
-                           # 新包名 mini-racer(import 路径仍是 py_mini_racer)持续维护且带 arm64 wheel。
 aws-requests-auth>=0.4.3   # 发布:抖音 VOD 上传 AWS V4 签名
 requests>=2.31             # 发布:抖音 VOD 上传 + msToken API
 

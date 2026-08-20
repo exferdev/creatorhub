@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import os
-import time
+import random
 import re
+import string
+import time
 from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +34,13 @@ MSSDK_BODY_TEMPLATE = {
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
        "AppleWebKit/537.36 Chrome/149.0.0.0 Safari/537.36")
+
+_FAKE_CHARSET = string.ascii_letters + string.digits + "=_-"
+
+
+def gen_false_ms_token(length: int = 126) -> str:
+    """本地伪造 msToken(读取公开作品列表通常够用, 非签名)。"""
+    return "".join(random.choice(_FAKE_CHARSET) for _ in range(length))
 
 
 def _write_json_secure(path: str, data: dict):

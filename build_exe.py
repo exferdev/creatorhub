@@ -54,9 +54,9 @@ def build(args) -> None:
     # 默认 windowed(隐藏黑窗口/启动日志); --console 时用控制台(调试用)
     if not args.console:
         cmd.insert(5, "--windowed")
-    # 收集第三方包 (playwright 驱动 / shardx SDK / 签名库)
-    for pkg in ("playwright", "shardx", "curl_cffi", "xhshow", "mini_racer",
-                "PyExecJS", "opencv", "cv2", "sqlmodel", "httpx", "imageio_ffmpeg",
+    # 收集第三方包 (patchright 驱动 / shardx SDK / 签名库)
+    for pkg in ("patchright", "shardx", "curl_cffi", "xhshow",
+                "opencv", "cv2", "sqlmodel", "httpx", "imageio_ffmpeg",
                 "yt_dlp", "bottle", "webview", "app"):
         cmd.append(f"--collect-all={pkg}")
     # app 数据资源

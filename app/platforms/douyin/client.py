@@ -11,7 +11,7 @@ from curl_cffi.requests import AsyncSession
 
 import re
 
-from .signing import sign_url, gen_false_ms_token
+from .ms_token import gen_false_ms_token
 from ...netfp import impersonate_for_ua
 
 BASE = "https://www.douyin.com"
@@ -90,8 +90,13 @@ class DouyinClient:
         q.update({k: v for k, v in params.items() if v is not None})
         q["msToken"] = gen_false_ms_token()
         qs = urllib.parse.urlencode(q)
-        signed = sign_url(qs, self.ua)
-        return f"{BASE}{path}?{signed}"
+        # a_bogus: 完全云端(远程签名服务, 无本地回退)
+        from .sign_client import remote_abogus
+        a_bogus = remote_abogus(qs, self.ua)
+        if not a_bogus:
+            raise RuntimeError(
+                "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+        return f"{BASE}{path}?{qs}&a_bogus={a_bogus}"
 
     async def _get_json(self, path: str, params: Dict[str, Any],
                         referer: str = BASE + "/") -> Optional[dict]:

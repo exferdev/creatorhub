@@ -1,24 +1,23 @@
-"""自检脚本(离线):验证签名原语 + 关键依赖是否就位。
+"""自检脚本(离线):验证基础能力 + 关键依赖是否就位。
   python selftest.py
-注:抓取/登录现在走真实浏览器(Playwright),不再依赖自算 a_bogus,
-   所以这里只做基础原语自检 + Playwright 可用性检查。
+注:抓取/登录现在走真实浏览器(Patchright),签名已完全云端(js-sign-service),
+   所以这里只做基础自检 + 远程签名客户端导入检查 + Playwright 可用性检查。
 """
 import sys
 
 
-def check_primitives() -> bool:
+def check_sign_client() -> bool:
+    """签名已完全云端: 离线校验远程签名客户端模块可导入即可(不打网络)。"""
     try:
-        from app.platforms.douyin.signing import sm3_hash, rc4
-
-        h = sm3_hash(b"abc").hex()
-        assert h == "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0", "SM3 失败"
-        print("[SM3] OK")
-        out = bytes(rc4(b"Key", b"Plaintext")).hex().upper()
-        assert out == "BBF316E8D940AF0AD3", "RC4 失败"
-        print("[RC4] OK")
+        from app.platforms.douyin.sign_client import (
+            remote_abogus, remote_xbogus, remote_strdata, remote_mstoken)
+        from app.platforms.xhs.creator_sign import (
+            generate_xsc, generate_x_rap_param, available)
+        assert callable(remote_abogus) and callable(generate_xsc)
+        print("[签名服务] OK: 抖音/小红书远程签名客户端可导入(完全云端)")
         return True
     except Exception as e:
-        print(f"[签名原语] FAIL: {e}")
+        print(f"[签名服务] FAIL: {e}")
         return False
 
 
@@ -80,7 +79,7 @@ def check_share_downloader() -> bool:
 
 if __name__ == "__main__":
     checks = (
-        check_primitives(),
+        check_sign_client(),
         check_risk_control(),
         check_playwright(),
         check_share_downloader(),
