@@ -45,19 +45,26 @@ def _collect_app_data() -> list[str]:
 
 
 def build(args) -> None:
+    # 每次构建先清空 dist, 避免上次模式的残留 (如 onedir 的 lib/_internal) 混入
+    import shutil as _sh
+    _sh.rmtree(ROOT / "dist", ignore_errors=True)
     py = sys.executable if not VENV_PY.exists() else str(VENV_PY)
+    DIST = ROOT / "dist" if args.onefile else ROOT / "dist" / "CreatorHubPRO"
     cmd = [
         py, "-m", "PyInstaller", "--noconfirm", "--clean",
-        "--onedir",
+        "--onefile" if args.onefile else "--onedir",
         "--name", "CreatorHubPRO",        "--distpath", str(ROOT / "dist"),
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),
-        # 主入口
-        str(ROOT / "desktop.py"),
     ]
+    if not args.onefile:
+        # 依赖目录不叫 _internal 而叫 lib (更中性, 且会设隐藏属性, 资源管理器默认不显示)
+        cmd += ["--contents-directory", "lib"]
     # 默认 windowed(隐藏黑窗口/启动日志); --console 时用控制台(调试用)
     if not args.console:
-        cmd.insert(5, "--windowed")
+        cmd.append("--windowed")
+    # 主入口
+    cmd.append(str(ROOT / "desktop.py"))
     # 收集第三方包 (patchright 驱动 / shardx SDK / 签名库)
     for pkg in ("patchright", "shardx", "curl_cffi", "xhshow",
                 "opencv", "cv2", "sqlmodel", "httpx", "imageio_ffmpeg",
@@ -83,6 +90,23 @@ def build(args) -> None:
 
     # 拷贝随附文件到 dist
     DIST.mkdir(parents=True, exist_ok=True)
+
+    if not args.onefile:
+        # 隐藏依赖目录 (lib = 原 _internal; 资源管理器默认不可见, 减少对用户的干扰)
+        import ctypes
+        for name in ("lib", "_internal"):
+            dep_dir = DIST / name
+            if dep_dir.is_dir():
+                FILE_ATTRIBUTE_HIDDEN = 0x2
+                FILE_ATTRIBUTE_SYSTEM = 0x4
+                try:
+                    ctypes.windll.kernel32.SetFileAttributesW(
+                        str(dep_dir),
+                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+                    print(f"[build] 已隐藏依赖目录: {dep_dir}")
+                except Exception as e:
+                    print(f"[build] 设置隐藏属性失败: {e!r}")
+                break
     # config.yaml
     if (ROOT / "config.yaml").exists():
         shutil.copy2(ROOT / "config.yaml", DIST / "config.yaml")
@@ -109,10 +133,12 @@ def build(args) -> None:
         else:
             print(f"[build] 警告: 未找到 {sdk_src}, 跳过离线引擎")
     # README
+    single = "是" if args.onefile else "否"
     (DIST / "README.txt").write_text(
         "CreatorHub PRO\n\n"
         "使用说明:\n"
         "  1. 双击 CreatorHubPRO.exe 启动 (macOS: 打开 CreatorHubPRO.app)\n"
+        f"  单文件模式: {single}。非单文件模式下的 lib 目录是程序运行依赖, 请勿删除。\n"
         "  2. 需要系统安装 Google Chrome (扫码登录/数据抓取)\n"
         "  3. 首次启动会自动完成 ShardX 引擎检查(随附离线包则免网络)\n"
         "  4. 数据保存在程序目录 data/ 下 (账号/代理/发布记录)\n\n"
@@ -135,6 +161,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--with-engine", action="store_true",
                     help="附带离线 ShardX 引擎包 (引擎资产 ~450MB)")
+    ap.add_argument("--onefile", action="store_true",
+                    help="单文件模式: 依赖全部打进 exe (启动时解压到临时目录, 略慢; 便于分发)")
     ap.add_argument("--console", action="store_true",
                     help="用控制台模式打包(调试用, 默认 windowed 隐藏日志)")
     args = ap.parse_args()
