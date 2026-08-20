@@ -39,7 +39,7 @@ engine:
 
   # ── 多账号风控隔离 ──
   profiles_dir: ./data/profiles   # 每账号独立持久化浏览器 profile 根目录
-  fingerprint_db_base_url: ""     # 指纹库 API 地址(必填; 数据源只走 API, 无本地回退; 为空时指纹相关功能报错), 例: https://127.0.0.1:8100
+  fingerprint_db_base_url: https://fingerprint.faryi.com   # 指纹库 API 地址(固定; 数据源只走 API, 无本地回退)
   fingerprint_db_read_key: ""     # API 读 token(服务未配鉴权则留空)
   fingerprint_db_write_key: ""    # API 写 token (真机指纹采集上传用)
   max_live_contexts: 6            # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存;20+账号无需全开)
