@@ -68,10 +68,12 @@ def log_dir() -> Path:
 
 _log_file = None
 _log_lock = threading.Lock()
+_STDOUT_REDIRECTED = False
 
 
 def _log(msg: str):
-    """带时间戳写日志文件 + 尽力打屏 (windowed 模式无控制台则只写文件)。"""
+    """带时间戳写日志文件 + 尽力打屏 (windowed 模式无控制台则只写文件;
+    stdout 已被重定向到日志文件时不再重复 print, 避免日志每行出现两次)。"""
     global _log_file
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     with _log_lock:
@@ -82,10 +84,11 @@ def _log(msg: str):
             _log_file.flush()
         except Exception:
             pass
-    try:
-        print(f"[{ts}] {msg}", flush=True)
-    except Exception:
-        pass
+    if not _STDOUT_REDIRECTED:
+        try:
+            print(f"[{ts}] {msg}", flush=True)
+        except Exception:
+            pass
 
 
 def read_server_bind() -> tuple[str, int]:
@@ -228,11 +231,32 @@ def check_env() -> list[str]:
     return missing
 
 
+def _ensure_stdio():
+    """windowed 打包 (无控制台) 时 sys.stdout/sys.stderr 为 None,
+    uvicorn 初始化日志会调 stderr.isatty() 判色而崩溃 ('NoneType' has no attribute
+    'isatty' -> Unable to configure formatter)。把缺失的流接到日志文件,
+    既修复崩溃, 又能让 uvicorn 自身日志直接落进 desktop.log 便于异机排障。"""
+    global _STDOUT_REDIRECTED
+    if getattr(sys, "stdout", None) is not None and getattr(sys, "stderr", None) is not None:
+        return
+    try:
+        stream = open(log_dir() / "desktop.log", "a", encoding="utf-8", buffering=1)
+    except Exception:
+        stream = open(os.devnull, "w", encoding="utf-8")
+    if getattr(sys, "stdout", None) is None:
+        sys.stdout = stream
+        _STDOUT_REDIRECTED = True
+    if getattr(sys, "stderr", None) is None:
+        sys.stderr = stream
+        _STDOUT_REDIRECTED = True
+
+
 def run_server(host: str, port: int, debug: bool):
     global _SERVER_ERROR
     # 直接 import app.main 的 app 对象传给 uvicorn —— PyInstaller 静态分析能看到
     # app 包并整体收集 (字符串 "app.main:app" 在 frozen 下会找不到)。
     try:
+        _ensure_stdio()
         from app.main import app
         _log(f"[server] uvicorn 绑定 {host}:{port} (debug={debug})")
         uvicorn.run(app, host=host, port=port,
