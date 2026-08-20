@@ -4,14 +4,19 @@
     python build_exe.py                 # 基础版: 不含离线 ShardX 引擎包
     python build_exe.py --with-engine   # 完整版: 附带离线 ShardX 引擎 (1.6GB, zip 后 ~600MB)
 
+平台: PyInstaller 不支持交叉编译 —— Windows 版需在 Windows 上构建 (输出 .exe),
+macOS 版需在 macOS 上构建 (输出 .app/.dmg)。引擎离线包按平台匹配
+ShardX-Windows / ShardX-macOS (desktop.py 启动时自动探测)。
+
 输出:
     dist/CreatorHubPRO/
         CreatorHubPRO.exe    # 主程序 (后端+前端+全依赖)
-        shardx-sdk/          # 可选: 离线 ShardX 引擎 (--with-engine)
-        config.yaml          # 默认配置
+        shardx-sdk/          # 可选: 离线 ShardX 引擎 (--with-engine, 随平台)
+        config.yaml          # 默认配置 (server.port 决定客户端服务端口)
         README.txt           # 分发说明
 
-分发: 整个 dist/CreatorHubPRO 目录打 zip 发给用户, 解压后双击 exe 即用。
+分发: 整个 dist/CreatorHubPRO 目录打 zip 发给用户, 解压后双击 exe 即用
+(macOS 分发 .app 打包的 DMG)。
 """
 import argparse
 import os
@@ -107,12 +112,18 @@ def build(args) -> None:
     (DIST / "README.txt").write_text(
         "CreatorHub PRO\n\n"
         "使用说明:\n"
-        "  1. 双击 CreatorHubPRO.exe 启动\n"
+        "  1. 双击 CreatorHubPRO.exe 启动 (macOS: 打开 CreatorHubPRO.app)\n"
         "  2. 需要系统安装 Google Chrome (扫码登录/数据抓取)\n"
         "  3. 首次启动会自动完成 ShardX 引擎检查(随附离线包则免网络)\n"
         "  4. 数据保存在程序目录 data/ 下 (账号/代理/发布记录)\n\n"
+        "排障:\n"
+        "  服务端口以随附 config.yaml 的 server.port 为准, 启动后自动打开对应地址。\n"
+        "  日志文件: Windows: %LOCALAPPDATA%\\CreatorHubPRO\\desktop.log\n"
+        "            macOS: ~/Library/Logs/CreatorHubPRO/desktop.log\n"
+        "  打不开页面时先看日志, 常见原因: 端口被占用 / 缺 WebView2(Runtime) /\n"
+        "  缺少系统 Google Chrome / 杀毒拦截。设置环境变量 DEBUG=1 可保留控制台并输出全量日志。\n\n"
         "环境要求:\n"
-        "  - Windows 10/11 x64\n"
+        "  - Windows 10/11 x64 或 macOS 12+ (Apple Silicon/Intel)\n"
         "  - Google Chrome\n"
         "  - (可选) 安装.NET WebView2 Runtime (Win11 自带)\n",
         encoding="utf-8")
