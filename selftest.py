@@ -3,7 +3,6 @@
 注:抓取/登录现在走真实浏览器(Playwright),不再依赖自算 a_bogus,
    所以这里只做基础原语自检 + Playwright 可用性检查。
 """
-import shutil
 import sys
 
 
@@ -62,15 +61,6 @@ def check_playwright() -> bool:
         return False
 
 
-def check_node() -> bool:
-    npm = shutil.which("npm.cmd") or shutil.which("npm")
-    if npm:
-        print("[Node.js] OK: 小红书 API 发布兼容模式依赖可安装/更新")
-        return True
-    print("[Node.js] INFO: 未检测到（仅影响小红书 API 发布兼容模式）")
-    return True
-
-
 def check_share_downloader() -> bool:
     try:
         import yt_dlp
@@ -93,7 +83,6 @@ if __name__ == "__main__":
         check_primitives(),
         check_risk_control(),
         check_playwright(),
-        check_node(),
         check_share_downloader(),
     )
     if all(checks):

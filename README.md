@@ -31,7 +31,6 @@ CreatorHub 使用 Python + FastAPI 提供统一 Web 界面，用于管理账号�
 - Python 3.10+
 - 桌面环境（扫码登录时需要弹出浏览器）
 - Google Chrome 稳定版（可选，但小红书扫码登录建议安装）
-- Node.js 18+（仅启用小红书 `api` 发布兼容模式时需要）
 - 系统 ffmpeg（可选；未安装时自动使用 Python 依赖附带的 ffmpeg）
 
 ### 一键启动
@@ -96,11 +95,9 @@ python selftest.py
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-仅当显式启用小红书 API 发布兼容模式时，才需安装 Node.js 依赖：
-
-```bash
-npm install
-```
+小红书签名由远程签名服务（js-sign-service，Cloudflare Worker）提供，默认
+`https://js.faryi.workers.dev`，可用环境变量 `SIGN_SERVICE_URL` 覆盖；无需
+本地 Node.js / npm。抖音签名同样复用该服务（失败回退本地纯 Python 算法）。
 
 </details>
 

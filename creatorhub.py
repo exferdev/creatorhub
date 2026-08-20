@@ -80,25 +80,14 @@ def ensure_venv() -> Path:
     return python
 
 
-def npm_executable() -> str | None:
-    # PowerShell 默认可能禁止 npm.ps1；Windows 明确优先使用 npm.cmd。
-    names = ("npm.cmd", "npm") if os.name == "nt" else ("npm",)
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
-
-
 def source_fingerprint() -> str:
     digest = hashlib.sha256()
-    for relative in ("requirements.txt", "package.json", "package-lock.json"):
+    for relative in ("requirements.txt",):
         path = ROOT / relative
         digest.update(relative.encode("utf-8"))
         if path.exists():
             digest.update(path.read_bytes())
     digest.update(f"py{sys.version_info.major}.{sys.version_info.minor}".encode())
-    digest.update(f"node={bool(npm_executable())}".encode())
     return digest.hexdigest()
 
 
@@ -112,12 +101,11 @@ def installation_is_current() -> bool:
     return marker.get("fingerprint") == source_fingerprint()
 
 
-def write_install_marker(*, node_installed: bool, browser_installed: bool) -> None:
+def write_install_marker(*, browser_installed: bool) -> None:
     MARKER_FILE.write_text(
         json.dumps(
             {
                 "fingerprint": source_fingerprint(),
-                "node_installed": node_installed,
                 "browser_installed": browser_installed,
                 "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             },
@@ -129,7 +117,7 @@ def write_install_marker(*, node_installed: bool, browser_installed: bool) -> No
     )
 
 
-def install(*, skip_browser: bool = False, skip_node: bool = False) -> None:
+def install(*, skip_browser: bool = False) -> None:
     ensure_config()
     python = ensure_venv()
 
@@ -148,22 +136,7 @@ def install(*, skip_browser: bool = False, skip_node: bool = False) -> None:
         log("正在安装 Patchright Chromium（首次下载耗时取决于网络）")
         run([python, "-m", "patchright", "install", "chromium"])
 
-    node_installed = False
-    npm = npm_executable()
-    if skip_node:
-        log("已跳过 Node.js 依赖（仅影响小红书发布）")
-    elif npm:
-        log("正在安装小红书发布所需的 Node.js 依赖")
-        run([npm, "install", "--no-audit", "--no-fund"])
-        node_installed = True
-    else:
-        log("未检测到 Node.js：核心功能可正常使用，小红书发布功能暂不可用")
-        log("需要该功能时安装 Node.js 18+，再重新运行安装命令")
-
-    write_install_marker(
-        node_installed=node_installed,
-        browser_installed=browser_installed,
-    )
+    write_install_marker(browser_installed=browser_installed)
     log("安装完成")
 
 
@@ -223,11 +196,10 @@ def start(
     reload: bool,
     skip_install: bool,
     skip_browser: bool,
-    skip_node: bool,
 ) -> None:
     ensure_config()
     if not skip_install and not installation_is_current():
-        install(skip_browser=skip_browser, skip_node=skip_node)
+        install(skip_browser=skip_browser)
 
     python = venv_python()
     if not python.exists():
@@ -293,11 +265,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="安装时跳过 Playwright Chromium",
     )
-    parser.add_argument(
-        "--skip-node",
-        action="store_true",
-        help="安装时跳过 Node.js 依赖（仅影响小红书发布）",
-    )
     return parser
 
 
@@ -307,7 +274,7 @@ def main() -> int:
         ensure_supported_python()
         os.chdir(ROOT)
         if args.command == "install":
-            install(skip_browser=args.skip_browser, skip_node=args.skip_node)
+            install(skip_browser=args.skip_browser)
         elif args.command == "check":
             check()
         else:
@@ -318,7 +285,6 @@ def main() -> int:
                 reload=args.reload,
                 skip_install=args.skip_install,
                 skip_browser=args.skip_browser,
-                skip_node=args.skip_node,
             )
         return 0
     except KeyboardInterrupt:
