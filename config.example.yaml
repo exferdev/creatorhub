@@ -8,7 +8,7 @@ engine:
   worker_pool_size: 2             # 并发下载数(跨作品)
   scan_concurrency: 2             # 同时抓取的目标数(并发浏览器上下文)
   block_media_resources: false    # 屏蔽图片/视频/字体加载(省带宽但会打断抖音 SPA 致拿不到数据,建议保持 false)
-  xhs_browser_mode: auto          # auto=优先每账号系统 Chrome CDP;cdp=严格 CDP;playwright=兼容旧浏览器
+  xhs_browser_mode: auto          # auto=优先每账号系统 Chrome CDP;cdp=严格 CDP;playwright=旧兼容模式(现由 patchright 驱动)
   xhs_cdp_idle_seconds: 900       # 小红书专用 Chrome 空闲回收秒数;0=仅按 LRU/退出回收
   xhs_publish_mode: browser       # browser=页面发布;api=显式 API 兼容模式
   monitor_initial_backfill_count: 0  # 新增博主时回填最近 N 条;0=只下载订阅后的新作品,-1=尽可能全量
@@ -23,10 +23,14 @@ engine:
   danmaku_max_records_per_scan: 1000 # 单轮最多入库弹幕数,0=不限
   danmaku_max_records_total: 0    # 每个监控最多保留记录数,0=不限
   account_check_interval_seconds: 1800   # 账号登录态定时体检间隔(秒,0=关闭)
+  idle_keepalive_hours: 6.0      # 闲置保活阈值:账号距上次活跃超此时长才摸一次(0=每轮都摸)
+  creator_keepalive_hours: 4.0   # 创作者保活阈值:距上次创作者活跃超此时长开浏览器访问 creator.douyin.com 维持会话(0=关闭)
   # 自有账号评论模式(创作中心)页面 URL —— 实验性,抖音改版/字段变了改这里
   creator_comment_url: https://creator.douyin.com/creator-micro/interaction/comment-management
   creator_danmaku_url: https://creator.douyin.com/creator-micro/interaction/danmaku-management
   request_timeout_seconds: 20
+  douyin_captcha_wait_seconds: 300   # 关键词采集遇验证时被动等待人工处理;期间不重试接口
+  douyin_keyword_gap_seconds: 8.0    # 同一任务内相邻抖音关键词的最小停顿
   download_timeout_seconds: 120
   media_dir: ./data/media         # 下载文件落地目录
   user_agent: >-
@@ -38,6 +42,7 @@ engine:
   fingerprint_db_dir: E:/fingerprint-db  # 独立指纹库项目根目录(文件直读回退)
   fingerprint_db_base_url: ""     # fingerprint-db HTTP API 地址(非空优先走 API 确定性选择), 例: https://127.0.0.1:8100
   fingerprint_db_read_key: ""     # API 读 token(服务未配鉴权则留空)
+  fingerprint_db_write_key: ""    # API 写 token (真机指纹采集上传用)
   max_live_contexts: 6            # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存;20+账号无需全开)
   active_accounts: 3              # 同一时刻最多并发活跃的账号数(错峰,降低"多号同时活跃"特征)
   scan_jitter: 0.15              # 扫描间隔随机抖动比例(±15%),消除整点齐发特征
@@ -45,13 +50,24 @@ engine:
   verify_proxy_region: true       # 体检时探测代理出口国家,与账号时区(默认东八区)不一致则告警
 
   # ── 写操作风控闸(取关/回关/私信 + 自动评论)──
+  comment_daily_cap_per_account: 30   # 每账号每日自动评论总上限(0=不限)
+  comment_min_gap_seconds: 60         # 同账号两条评论的全局最小间隔(秒)
+  comment_jitter: 0.4                 # 评论发送时间额外抖动比例(±40%)
   comment_hourly_cap_per_account: 10   # 每账号每小时自动评论上限(0=不限)
   comment_risk_cooldown_seconds: 21600 # 平台拒绝/验证后暂停该账号写操作(默认6小时)
+  comment_browser_headed: true        # 抖音发评论用有头浏览器(弹真实窗口,可手动过验证码)
   xhs_comment_write_mode: browser      # browser=页面发布;api=显式兼容;manual=只保存草稿
   xhs_comment_review_before_publish: true # true=人工审核后自动发布;false=生成后直接发布
   action_daily_cap_per_account: 20     # 每账号每日写操作(关注/取关/私信)总上限(0=不限)
   action_hourly_cap_per_account: 6     # 每账号每小时写操作上限(0=不限)
   action_min_gap_seconds: 90           # 同账号两次写操作全局最小间隔(与任务级 min_gap 取大)
+
+  # ── 新建 native 账号的写操作环境门禁(存量 legacy 账号不受影响)──
+  native_write_gate_enabled: true                    # 总开关
+  native_write_require_system_chrome: true           # 必须走系统 Chrome(拒绝 patchright 自带浏览器写操作)
+  native_write_require_verified_proxy: true          # 必须使用已通过出口探测的代理
+  native_write_proxy_max_age_seconds: 86400          # 代理出口探测结果最长有效时间
+  browser_exit_probe_url: https://ipinfo.io/json     # 浏览器/代理出口探测地址
 
   # ── 活跃时段(夜间静默)—— 仅约束写操作自动排队执行,按东八区小时判定 ──
   quiet_hours_enabled: true       # 夜间静默总开关(手动「立即执行」不受限)
@@ -73,7 +89,10 @@ engine:
 risk_control:
   enabled: true
   mode: conservative
-  network_group_concurrency: 1   # 同一代理出口（含直连出口）同时只做一个平台操作
+  network_group_concurrency: 1   # 同一代理出口(含直连出口)同时只做一个平台操作
+  network_group_risk_accounts: 2      # 同出口 N 个账号触发风控后,该出口进入熔断冷却
+  network_group_risk_window_seconds: 900   # 熔断判定窗口(秒)
+  network_group_cooldown_seconds: 7200      # 熔断冷却时长(秒)
   read_light_gap_seconds: 20
   read_heavy_gap_seconds: 60
   shared_write_gap_seconds: 300  # 评论/账号动作/私信/发布之间的跨功能共享间隔

@@ -61,7 +61,7 @@ chmod +x start.sh
 http://127.0.0.1:8000
 ```
 
-> **小红书登录建议：** 尽量使用本机系统中已安装的稳定版 Google Chrome。CreatorHub 会优先通过 CDP 启动系统 Chrome，并为每个账号使用独立的持久化 Profile，不会读取或复用个人 Chrome 的日常 Profile；未安装 Chrome 时会自动回退到可见的 Playwright Chromium，功能仍可使用，但更容易遇到平台设备安全验证。
+> **小红书登录建议：** 尽量使用本机系统中已安装的稳定版 Google Chrome。CreatorHub 会优先通过 CDP 启动系统 Chrome，并为每个账号使用独立的持久化 Profile，不会读取或复用个人 Chrome 的日常 Profile；未安装 Chrome 时会自动回退到可见的 Patchright Chromium（stealth 加固的浏览器驱动），功能仍可使用，但更容易遇到平台设备安全验证。
 
 常用命令：
 
@@ -88,7 +88,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 python -m pip install -r requirements.txt
-python -m playwright install chromium
+python -m patchright install chromium
 
 # 复制 config.example.yaml 为 config.yaml 后启动
 python selftest.py
@@ -162,10 +162,10 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 - 默认 `xhs_browser_mode: auto`：每个小红书账号启动一个独立、可见的系统 Chrome CDP 会话，并长期复用该账号自己的 Profile、Cookie、缓存和本地存储。
 - 项目专用 Profile 与用户平时打开 Chrome 使用的默认 Profile 完全分开；请勿同时用其他 Chrome 进程打开项目的账号 Profile。
 - 页面任务加载完整的图片、字体和媒体资源；搜索、滚动、输入、发布和评论统一走可见页面控件，且整台机器同一时刻只执行一个小红书可见操作。
-- 机器未安装稳定版 Chrome 时，`auto` 会回退到可见的 Playwright Chromium；账号列表会显示实际后端和回退原因。`cdp` 为严格模式，Chrome 缺失或 Profile 冲突时直接报错。
+- 机器未安装稳定版 Chrome 时，`auto` 会回退到可见的 Patchright Chromium；账号列表会显示实际后端和回退原因。`cdp` 为严格模式，Chrome 缺失或 Profile 冲突时直接报错。
 - 账号代理支持 HTTP、HTTPS、SOCKS5 及账号密码认证。代理不可连接或认证失败时按失败关闭处理，不会静默改走本机直连；建议同一账号长期保持稳定出口。
 - 小红书发布和评论默认使用 `browser` 页面模式。提交按钮只点击一次；提交后若浏览器连接中断或缺少成功证据，任务会标记为“结果待确认”，不会自动重试，需先到平台核对。
-- 如需恢复旧兼容行为，可显式设置 `xhs_browser_mode: playwright`、`xhs_publish_mode: api`、`xhs_comment_write_mode: api`（或 `manual` 只保留草稿）。
+- 如需恢复旧兼容行为，可显式设置 `xhs_browser_mode: playwright`（该模式现由 Patchright 驱动，配置值保留仅为兼容旧配置）、`xhs_publish_mode: api`、`xhs_comment_write_mode: api`（或 `manual` 只保留草稿）。
 
 ### 4. 本账号与通知
 
@@ -239,11 +239,11 @@ python -m app.engine.share_downloader "完整分享文案或链接" -o ./data/me
 
 | 问题 | 处理方式 |
 |---|---|
-| macOS 安装依赖时报 `command /usr/bin/clang++ failed with code 1` | 更新代码后删除旧的 `.venv`，再运行 `./start.sh install`。旧版 `playwright==1.49.1` 固定依赖不支持 Python 3.14 wheel 的 `greenlet==3.1.1`，会错误地退回本地编译；当前依赖已更新，并会先升级 pip/setuptools/wheel。 |
-| Playwright 启动失败或找不到浏览器 | 运行 `python -m playwright install chromium` |
+| macOS 安装依赖时报 `command /usr/bin/clang++ failed with code 1` | 更新代码后删除旧的 `.venv`，再运行 `./start.sh install`。旧版浏览器自动化驱动固定了不支持 Python 3.14 wheel 的 `greenlet==3.1.1`，会错误地退回本地编译；当前依赖已更新，并会先升级 pip/setuptools/wheel。 |
+| Patchright 启动失败或找不到浏览器 | 运行 `python -m patchright install chromium` |
 | 扫码登录没有弹窗 | 确认当前机器有桌面环境；抖音也可使用 Cookie 登录 |
-| 小红书扫码登录出现设备安全验证 | 尽量安装或更新本机稳定版 Google Chrome，并保持同一账号的 Profile 和网络出口稳定；没有 Chrome 时项目会回退到 Playwright Chromium |
-| Windows 下出现 Playwright 子进程错误 | 使用单 worker 启动，不要添加 `--workers` |
+| 小红书扫码登录出现设备安全验证 | 尽量安装或更新本机稳定版 Google Chrome，并保持同一账号的 Profile 和网络出口稳定；没有 Chrome 时项目会回退到 Patchright Chromium |
+| Windows 下出现浏览器自动化子进程错误 | 使用单 worker 启动，不要添加 `--workers` |
 | 抓取不到作品或评论 | 检查登录态、目标链接和网络状态，必要时重新登录并降低频率 |
 | 小红书链接解析失败 | 重新复制包含有效 `xsec_token` 的完整链接 |
 | 仅音频仍得到 MP4，或视频没有声音/画质受限 | 重新运行安装命令更新依赖；也可安装系统 ffmpeg 并加入 `PATH` |
