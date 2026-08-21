@@ -163,21 +163,32 @@ def _persist_native_ua(account_id: int, ua: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global browser, engine, im_receiver
+    _T = os.environ.get("CREATORHUB_STARTUP_TIMING") == "1"
+    if _T:
+        import time as _t
+        _t0 = _t.perf_counter()
+        def _mark(label):
+            print(f"[startup-timing] {label}: {(_t.perf_counter() - _t0) * 1000:.0f} ms", flush=True)
+        _mark("lifespan+import")
     init_db(cfg.db_path)
+    if _T: _mark("init_db")
     if load_persisted_risk_settings(cfg):
         print("[startup] 已加载风控中心保存的运行时规则")
+    if _T: _mark("load_risk")
     try:
         repaired = _backfill_danmaku_records()
         if repaired:
             print(f"[startup] 已补齐 {repaired} 条弹幕的时间/用户字段")
     except Exception as e:
         print(f"[startup] 弹幕存量字段补齐失败（不影响启动）: {e!r}")
+    if _T: _mark("backfill_danmaku")
     try:
         restored = _backfill_share_download_history()
         if restored:
             print(f"[startup] 已从本地下载目录补录 {restored} 条链接下载历史")
     except Exception as e:
         print(f"[startup] 链接下载历史补录失败（不影响启动）: {e!r}")
+    if _T: _mark("backfill_share_history")
     # config.yaml 里配的 proxies 导入数据库代理池(之后统一在页面管理)
     try:
         seeded = seed_proxy_pool(cfg)
@@ -204,18 +215,32 @@ async def lifespan(app: FastAPI):
         native_write_require_verified_proxy=cfg.engine.native_write_require_verified_proxy,
         native_write_proxy_max_age_seconds=cfg.engine.native_write_proxy_max_age_seconds,
         browser_exit_probe_url=cfg.engine.browser_exit_probe_url)
+    if _T: _mark("browser_ctor")
     await browser.start()
+    if _T: _mark("browser.start (patchright)")
     engine = MonitorEngine(cfg, browser)
+    if _T: _mark("engine_ctor")
     # 首次启动:自动采集本机真机指纹并上传 fingerprint-db(仅一次,后续不自动)
     asyncio.create_task(_collect_true_device_once())
+    # 启动清理同步执行: SQLite 单写者下与监控环并发会退化成分钟级锁等待
+    # (实测后移后台反而把冷启动从 ~5s 拖到 ~34s), 故保持启动时顺序完成。
     startup_now = datetime.utcnow()
-    pruned_risk_events = engine._prune_risk_events_if_due(startup_now)
-    if pruned_risk_events:
-        print(f"[startup] 已清理 {pruned_risk_events} 条过期风控事件")
-    recovered = engine.recover_interrupted_tasks()
-    if recovered:
-        print(f"[startup] 已恢复 {recovered} 条中断的写任务")
+    try:
+        pruned_risk_events = engine._prune_risk_events_if_due(startup_now)
+        if pruned_risk_events:
+            print(f"[startup] 已清理 {pruned_risk_events} 条过期风控事件")
+    except Exception as e:
+        print(f"[startup] 风控事件清理失败(不影响启动): {e!r}")
+    try:
+        recovered = engine.recover_interrupted_tasks()
+        if recovered:
+            print(f"[startup] 已恢复 {recovered} 条中断的写任务")
+    except Exception as e:
+        print(f"[startup] 中断任务恢复失败(不影响启动): {e!r}")
+    if _T: _mark("housekeeping (sync)")
     engine.start()
+    if _T:
+        _mark("startup-ready (yield)")
     from .engine.im_receiver import ImReceiverManager
     im_receiver = ImReceiverManager(browser)
     yield

@@ -124,14 +124,21 @@ def read_server_bind() -> tuple[str, int]:
 
 
 def _normalize_python_paths():
-    """打包后把依赖的 dll/pyd 目录加进搜索路径 (仅 Windows, PyInstaller one-folder 需要)。"""
+    """打包后把依赖的 dll/pyd 目录加进搜索路径 (仅 Windows, PyInstaller one-folder 需要)。
+
+    依赖目录名兼容新打包 (lib, 原 _internal 改名) 与旧打包 (_internal)。"""
     if not (is_windows() and getattr(sys, "frozen", False)):
         return
     base = Path(sys.executable).parent
     # patchright 的浏览器驱动 / shardx 引擎依赖 dll
-    for sub in ("_internal", "_internal/patchright/driver",
-                "_internal/patchright/driver/package"):
-        dll = base / sub
+    candidates = [
+        base / "lib", base / "_internal",
+        base / "lib" / "patchright" / "driver",
+        base / "lib" / "patchright" / "driver" / "package",
+        base / "_internal" / "patchright" / "driver",
+        base / "_internal" / "patchright" / "driver" / "package",
+    ]
+    for dll in candidates:
         if dll.is_dir():
             os.environ.setdefault("PATH", str(dll) + os.pathsep + os.environ.get("PATH", ""))
 
@@ -229,6 +236,28 @@ def check_env() -> list[str]:
     except Exception as e:
         _log(f"ShardX 检查异常: {e!r}")
     return missing
+
+
+_START_T0 = time.time()
+
+_SPLASH_HTML = (
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<style>html,body{height:100%;margin:0;background:#0f1115;color:#e6e6e6;"
+    "font-family:'Segoe UI',system-ui,sans-serif;"
+    "display:flex;flex-direction:column;align-items:center;justify-content:center}"
+    ".spinner{width:42px;height:42px;border:4px solid #2a2f3a;"
+    "border-top-color:#4f8cff;border-radius:50%;animation:sp 1s linear infinite}"
+    "@keyframes sp{to{transform:rotate(360deg)}}"
+    "h1{font-size:20px;font-weight:600;margin:20px 0 6px}"
+    "p{color:#8a93a6;font-size:13px;margin:0}</style></head><body>"
+    "<div class='spinner'></div><h1>CreatorHub PRO</h1>"
+    "<p>Starting local service...</p></body></html>"
+)
+
+
+def splash_url() -> str:
+    import urllib.parse
+    return "data:text/html;charset=utf-8," + urllib.parse.quote(_SPLASH_HTML)
 
 
 def _ensure_stdio():
@@ -332,40 +361,19 @@ def _main(debug: bool):
     url = f"http://127.0.0.1:{port}"
     _log(f"[desktop] 服务地址: {url} (host={host}, 来自 config.yaml server.port)")
 
-    for line in env_report():
-        _log(f"[env] {line}")
+    # ① 后台起服务 (不等它; 窗口先用闪屏秒开)
+    threading.Thread(target=run_server, args=(host, port, debug), daemon=True).start()
 
-    _ensure_shardx_engine()
-
-    missing = check_env()
-    if missing:
-        msg = "CreatorHub PRO 环境检查:\n\n" + "\n".join(f"  • {m}" for m in missing)
-        _log("[desktop] 环境缺失:\n" + "\n".join(missing))
-        _show_error("环境缺失", f"{msg}\n\n日志: {log_dir() / 'desktop.log'}")
-
-    # 后台起服务
-    t = threading.Thread(target=run_server, args=(host, port, debug), daemon=True)
-    t.start()
-
-    if not wait_ready(url, timeout=60):
-        err = repr(_SERVER_ERROR) if _SERVER_ERROR else "启动超时(60s 内 /health 未就绪)"
-        _show_error(
-            "CreatorHub PRO 无法启动服务",
-            f"无法访问 {url}\n\n后端错误: {err}\n\n"
-            f"排查：\n"
-            f"  1. 查看日志: {log_dir() / 'desktop.log'}\n"
-            f"  2. 端口 {port} 是否被占用: 命令行执行 netstat -ano | findstr :{port}\n"
-            f"  3. 首次使用需已安装 WebView2 运行时 (Win10/11 一般自带)\n"
-            f"  4. 缺少系统 Google Chrome 时请先安装或关闭杀毒拦截\n")
-        return
-
-    _log(f"[desktop] 服务就绪 {url}, 打开窗口...")
     import webview
+    _log("[desktop] 创建窗口(闪屏即开) ...")
     window = webview.create_window(
-        "CreatorHub PRO", url, width=1280, height=860, min_size=(1024, 700))
+        "CreatorHub PRO", splash_url(), width=1280, height=860,
+        min_size=(1024, 700))
     _log("[desktop] webview.start...")
     try:
-        webview.start(gui=gui_backend(), debug=debug)
+        # func 在 GUI 事件循环启动后于后台线程运行: 自检后移(③) + 就绪后跳转(②)
+        webview.start(gui=gui_backend(), func=lambda: _loader(window, url),
+                      debug=debug)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -377,6 +385,45 @@ def _main(debug: bool):
                     f"日志: {log_dir() / 'desktop.log'}")
         raise
     _log("[desktop] 窗口已关闭")
+
+
+def _loader(window, url: str):
+    """窗口打开后于后台线程执行: 不阻塞展示, 后台自检 + 就绪后跳转真实地址。"""
+    # ③ 环境自检后移: 只写日志/弹一次性提示, 不挡窗口
+    try:
+        for line in env_report():
+            _log(f"[env] {line}")
+    except Exception as e:
+        _log(f"[desktop] env_report 异常: {e!r}")
+    _ensure_shardx_engine()
+    try:
+        missing = check_env()
+        if missing:
+            msg = "CreatorHub PRO 环境检查:\n\n" + "\n".join(
+                f"  • {m}" for m in missing)
+            _log("[desktop] 环境缺失:\n" + "\n".join(missing))
+            _show_error("环境缺失", f"{msg}\n\n日志: {log_dir() / 'desktop.log'}")
+    except Exception as e:
+        _log(f"[desktop] check_env 异常: {e!r}")
+
+    # ② 等后端就绪后跳转真实 URL (期间闪屏保持, 用户不干等白屏)
+    if wait_ready(url, timeout=90):
+        _log(f"[desktop] 服务就绪 {url} "
+             f"(冷启动 {'{:.1f}'.format(time.time() - _START_T0)}s), 跳转窗口...")
+        try:
+            window.load_url(url)
+        except Exception as e:
+            _log(f"[desktop] load_url 失败: {e!r}")
+    else:
+        err = repr(_SERVER_ERROR) if _SERVER_ERROR else "启动超时(90s 内 /health 未就绪)"
+        _show_error(
+            "CreatorHub PRO 无法启动服务",
+            f"无法访问 {url}\n\n后端错误: {err}\n\n"
+            f"排查：\n"
+            f"  1. 查看日志: {log_dir() / 'desktop.log'}\n"
+            f"  2. 端口 {url.rsplit(':', 1)[-1]} 是否被占用: netstat -ano | findstr :{url.rsplit(':', 1)[-1]}\n"
+            f"  3. 首次使用需已安装 WebView2 运行时 (Win10/11 一般自带)\n"
+            f"  4. 缺少系统 Google Chrome 时请先安装或关闭杀毒拦截\n")
 
 
 if __name__ == "__main__":

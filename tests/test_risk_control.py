@@ -645,6 +645,12 @@ risk_control:
                           return_value=ReceiverStub()):
                 async def scenario():
                     async with main.lifespan(main.app):
+                        # 启动清理已移到后台任务: 轮询等它触发 prune 再断言
+                        for _ in range(200):
+                            if prune_events.call_count >= 1:
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertEqual(prune_events.call_count, 1)
                         startup_now = prune_events.call_args.kwargs["now"]
                         self.assertEqual(
                             main.engine._prune_risk_events_if_due(
