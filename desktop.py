@@ -242,22 +242,33 @@ _START_T0 = time.time()
 
 _SPLASH_HTML = (
     "<!doctype html><html><head><meta charset='utf-8'>"
-    "<style>html,body{height:100%;margin:0;background:#0f1115;color:#e6e6e6;"
+    "<style>html,body{height:100%;margin:0;background:rgb(15,17,21);color:rgb(230,230,230);"
     "font-family:'Segoe UI',system-ui,sans-serif;"
     "display:flex;flex-direction:column;align-items:center;justify-content:center}"
-    ".spinner{width:42px;height:42px;border:4px solid #2a2f3a;"
-    "border-top-color:#4f8cff;border-radius:50%;animation:sp 1s linear infinite}"
+    ".spinner{width:42px;height:42px;border:4px solid rgb(42,47,58);"
+    "border-top-color:rgb(79,140,255);border-radius:50%;animation:sp 1s linear infinite}"
     "@keyframes sp{to{transform:rotate(360deg)}}"
     "h1{font-size:20px;font-weight:600;margin:20px 0 6px}"
-    "p{color:#8a93a6;font-size:13px;margin:0}</style></head><body>"
+    "p{color:rgb(138,147,166);font-size:13px;margin:0}</style></head><body>"
     "<div class='spinner'></div><h1>CreatorHub PRO</h1>"
     "<p>Starting local service...</p></body></html>"
 )
 
 
 def splash_url() -> str:
-    import urllib.parse
-    return "data:text/html;charset=utf-8," + urllib.parse.quote(_SPLASH_HTML)
+    """闪屏页以本地文件提供(file://), 不用 data: URI。
+
+    实测: data:text/html 长 URI 在 Windows WebView2 里会被解析夹坏, 把 HTML 尾巴
+    (如 'htm1>') 拼成导航 URL 导致先弹 404 错误页。写进可写目录再 file:// 打开稳定。
+    """
+    try:
+        path = log_dir() / "splash.html"
+        path.write_text(_SPLASH_HTML, encoding="utf-8")
+        return path.as_uri()
+    except Exception:
+        # 兜底: 无法写文件时退回极简 data URI (纯 ASCII, 无注解字符)
+        import urllib.parse
+        return "data:text/html;charset=utf-8," + urllib.parse.quote(_SPLASH_HTML)
 
 
 def _ensure_stdio():
