@@ -529,6 +529,13 @@ class MonitorEngine:
             return 0
 
     async def _loop(self):
+        # 启动宽限期: 先把 UI/health 让给用户, 暂不开始扫描与保活 (冷启动优化)。
+        # 否则首轮立即触发的账号体检 + 创作者保活会在 t=0 抢 CPU/开 ShardX 引擎。
+        if self.cfg.engine.startup_grace_seconds > 0:
+            try:
+                await asyncio.sleep(self.cfg.engine.startup_grace_seconds)
+            except asyncio.CancelledError:
+                return
         while self._running:
             try:
                 sampled_at = datetime.utcnow()

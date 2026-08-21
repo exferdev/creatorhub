@@ -173,6 +173,7 @@ class BrowserManager:
         self._browser_channel: Optional[str] = None
         self._channels: Dict[str, int] = {}   # channel → Chromium 大版本 (探测结果)
         self._shardx_sdk = None                # ShardX SDK 实例 (惰性, 抖音引擎级方案)
+        self._shardx_launch_lock = asyncio.Lock()  # 串行 ShardX 启动(线程安全 + 防并发复炸)
 
     async def start(self):
         self._pw = await async_playwright().start()
@@ -669,14 +670,37 @@ class BrowserManager:
                 prof, ua_override, cpu_cores, memory_gb, timezone, language,
                 overrides)
         proxy_url = self._proxy_to_url(_parse_proxy(identity.proxy))
-        bsess = sdk.launch(prof, cdp=True, proxy=proxy_url, headless=headless,
-                           webrtc=webrtc_mode)
+        # ShardX 引擎启动是同步重活(起引擎进程+Chrome, 数秒级), 直接跑在事件循环会
+        # 卡死 /health 与整个 API (冷启动 30s 元凶之一)。丢进线程执行, 并用锁串行
+        # 避免多探针并发启动撞 SDK 线程安全性; 单实例每次只允许一个引擎在起。
         try:
-            browser = await self._pw.chromium.connect_over_cdp(bsess.cdp_url)
+            async with self._shardx_launch_lock:
+                bsess = await asyncio.to_thread(
+                    sdk.launch, prof, cdp=True, proxy=proxy_url,
+                    headless=headless, webrtc=webrtc_mode)
+        except Exception as e:
+            raise RuntimeError(f"ShardX 引擎启动失败: {e}") from e
+        if not getattr(bsess, "cdp_url", ""):
+            with suppress(Exception):
+                self._kill_shardx_engine(bsess)
+            raise RuntimeError("ShardX 引擎未返回 CDP 端点 (cdp_url 为空)")
+        try:
+            # 引擎刚起可能未就绪: 连接失败重试一次; 仍失败则彻底杀进程树再抛明确错误。
+            browser = None
+            for attempt in (1, 2):
+                try:
+                    browser = await self._pw.chromium.connect_over_cdp(bsess.cdp_url)
+                    break
+                except Exception as e:
+                    if attempt == 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise RuntimeError(
+                        f"connect_over_cdp 失败(引擎可能未就绪/已被杀): {e}") from e
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
         except Exception:
             with suppress(Exception):
-                bsess.stop()
+                self._kill_shardx_engine(bsess)
             raise
         ctx._shardx_bsess = bsess  # type: ignore[attr-defined]  # 关闭时杀进程
         ctx._shardx_id = getattr(prof, "id", "")  # type: ignore[attr-defined]  # 固化后回填 shardx_id

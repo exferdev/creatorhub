@@ -37,6 +37,7 @@ class EngineConfig:
     douyin_captcha_wait_seconds: int = 300  # 关键词采集遇验证时被动等待人工处理；期间不重试接口
     douyin_keyword_gap_seconds: float = 8.0  # 同一任务内相邻抖音关键词的最小停顿
     download_timeout_seconds: int = 120
+    startup_grace_seconds: float = 10.0  # 引擎启动后的宽限期: 期间不做扫描/保活, 让 UI 与 /health 先就绪
     media_dir: str = "./data/media"
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

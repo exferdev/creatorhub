@@ -29,6 +29,7 @@ engine:
   creator_comment_url: https://creator.douyin.com/creator-micro/interaction/comment-management
   creator_danmaku_url: https://creator.douyin.com/creator-micro/interaction/danmaku-management
   request_timeout_seconds: 20
+  startup_grace_seconds: 10.0   # 引擎启动宽限期: 开始扫描/保活前先让 UI 与 /health 就绪
   douyin_captcha_wait_seconds: 300   # 关键词采集遇验证时被动等待人工处理;期间不重试接口
   douyin_keyword_gap_seconds: 8.0    # 同一任务内相邻抖音关键词的最小停顿
   download_timeout_seconds: 120
