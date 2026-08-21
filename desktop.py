@@ -175,9 +175,9 @@ def _ensure_shardx_engine():
             pass
     try:
         target.mkdir(parents=True, exist_ok=True)
-        # 只拷引擎资产, 排除 profiles(运行时数据)与下载残留
+        # 只拷引擎资产, 排除 profiles(运行时数据)/fingerprints(云端取)/下载残留
         for item in bundled.iterdir():
-            if item.name in ("profiles", ".tmp") or item.name.startswith("."):
+            if item.name in ("profiles", "fingerprints", ".tmp") or item.name.startswith("."):
                 continue
             if item.is_dir():
                 shutil.copytree(item, target / item.name, dirs_exist_ok=True,
@@ -185,6 +185,16 @@ def _ensure_shardx_engine():
                                     "*.tmp", ".tmp", "*.download", "*.part"))
             else:
                 shutil.copy2(item, target / item.name)
+        # 指纹模板库不再随包附带(指纹数据源只走云端 fingerprint-db API)。但 SDK
+        # install() 在 fingerprints/*.json 为空时会尝试联网下载 ShardX-Fingerprints.zip;
+        # 离线异机会失败。写入一个极简占位 json, 让 SDK 判定"已有指纹"从而跳过联网下载。
+        try:
+            fp_dir = target / "fingerprints"
+            if not list(fp_dir.glob("*.json")):
+                fp_dir.mkdir(parents=True, exist_ok=True)
+                (fp_dir / "sdk-offline-stub.json").write_text("{}", encoding="utf-8")
+        except Exception as e2:
+            _log(f"[desktop] fingerprints 占位写入失败(非致命): {e2!r}")
         _log(f"[desktop] 已安装离线 ShardX 引擎 → {target} ({engine_dir})")
     except Exception as e:
         _log(f"[desktop] 安装离线 ShardX 引擎失败: {e!r}")

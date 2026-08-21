@@ -121,7 +121,8 @@ def build(args) -> None:
             dst = DIST / "shardx-sdk"
             dst.mkdir(parents=True, exist_ok=True)
             for item in sdk_src.iterdir():
-                if item.name in ("profiles", ".tmp") or item.name.startswith("."):
+                # 排除 profiles(运行时数据) / fingerprints(云端取, 不随包附带) / 下载残留
+                if item.name in ("profiles", "fingerprints", ".tmp") or item.name.startswith("."):
                     continue
                 if item.is_dir():
                     shutil.copytree(item, dst / item.name, dirs_exist_ok=True,
