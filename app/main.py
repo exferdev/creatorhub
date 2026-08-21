@@ -2515,6 +2515,12 @@ async def open_account_browser(account_id: int, url: str = ""):
             await ctx.close()
         except Exception:
             pass
+        # 用户关窗后彻底杀掉 ShardX 引擎进程树, 防僵尸 chrome 占 profile 目录锁
+        # (否则下次 open-browser 的 sdk.launch 拿不到 CDP 端点)。
+        try:
+            browser._kill_shardx_engine(getattr(ctx, "_shardx_bsess", None))
+        except Exception:
+            pass
 
     close_callback = _close_with_cookie_snapshot if platform == "douyin" else (
         (lambda: browser.close_context(identity.key)) if platform == "xhs" else None

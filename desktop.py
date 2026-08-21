@@ -406,6 +406,46 @@ def _main(debug: bool):
                     f"日志: {log_dir() / 'desktop.log'}")
         raise
     _log("[desktop] 窗口已关闭")
+    _kill_leftover_engines()
+
+
+def _kill_leftover_engines():
+    """关窗退出前清理残留 ShardX 引擎进程树。
+
+    应用的 uvicorn 在守护线程里, 窗口关闭进程即退出, 引擎子进程树可能存活并
+    继续占用账号 profile 目录锁 → 下次启动 sdk.launch 起不来 (cdp_url 为空)。
+    按命令行匹配 shardx-sdk 引擎路径, 杀整棵树 (不影响用户自己开的 ShardX Launcher)。
+    """
+    if not is_windows():
+        return
+    script = ("Get-CimInstance Win32_Process | Where-Object { "
+              "$_.CommandLine -like '*shardx-sdk*ShardX*' } | "
+              "ForEach-Object { $_.ProcessId }")
+    try:
+        out = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        _log(f"[desktop] 残留引擎扫描失败: {e!r}")
+        return
+    killed = 0
+    for line in out.stdout.splitlines():
+        pid = line.strip()
+        if not pid.isdigit():
+            continue
+        try:
+            subprocess.run(
+                ["taskkill.exe", "/PID", pid, "/T", "/F"],
+                capture_output=True, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            killed += 1
+        except Exception:
+            pass
+    if killed:
+        _log(f"[desktop] 已清理 {killed} 个残留 ShardX 引擎进程")
 
 
 def _loader(window, url: str):

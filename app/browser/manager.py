@@ -681,9 +681,25 @@ class BrowserManager:
         except Exception as e:
             raise RuntimeError(f"ShardX 引擎启动失败: {e}") from e
         if not getattr(bsess, "cdp_url", ""):
+            # 引擎没给 CDP 端点: 大概率是上次残留引擎(僵尸 chrome 树, 如强杀进程
+            # 留下)占着同一账号 profile 目录锁。按 profile id 清掉残留后重试一次。
             with suppress(Exception):
                 self._kill_shardx_engine(bsess)
-            raise RuntimeError("ShardX 引擎未返回 CDP 端点 (cdp_url 为空)")
+            self._kill_stale_engines_for_profile(
+                getattr(prof, "id", "") or pdir.name)
+            try:
+                async with self._shardx_launch_lock:
+                    bsess = await asyncio.to_thread(
+                        sdk.launch, prof, cdp=True, proxy=proxy_url,
+                        headless=headless, webrtc=webrtc_mode)
+            except Exception as e:
+                raise RuntimeError(f"ShardX 引擎二次启动失败: {e}") from e
+            if not getattr(bsess, "cdp_url", ""):
+                with suppress(Exception):
+                    self._kill_shardx_engine(bsess)
+                raise RuntimeError(
+                    "ShardX 引擎未返回 CDP 端点 (cdp_url 为空): 请确认没有残留引擎"
+                    "进程占用账号 profile 目录, 或重启程序后再试")
         try:
             # 引擎刚起可能未就绪: 连接失败重试一次; 仍失败则彻底杀进程树再抛明确错误。
             browser = None
@@ -1098,6 +1114,47 @@ class BrowserManager:
             memory_gb=memory_gb, timezone=timezone, language=language,
             webrtc_mode=webrtc_mode, overrides=overrides)
         return ctx
+
+    @staticmethod
+    def _kill_stale_engines_for_profile(marker: str) -> int:
+        """按账号 profile 标识清掉残留引擎进程(僵尸 chrome 树)并释放目录锁。
+
+        触发场景: 应用被强杀/窗口直接关闭时, 引擎子进程树可能存活, 继续占用
+        user-data-dir, 导致下次 sdk.launch 起不来 (cdp_url 为空)。
+        marker 应为 ShardX profile id (如 fpdb-xxxx, 引擎 -user-data-dir 里含此串);
+        Windows 上按命令行匹配, taskkill 杀整棵树。
+        """
+        if os.name != "nt" or not marker:
+            return 0
+        # PowerShell -like 通配符中反斜杠是字面量, 不要转义成双反斜杠
+        script = (
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$_.CommandLine -like '*" + marker + "*' } | "
+            "ForEach-Object { $_.ProcessId }")
+        try:
+            out = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-Command", script],
+                capture_output=True, text=True, timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            return 0
+        killed = 0
+        for line in out.stdout.splitlines():
+            pid = line.strip()
+            if not pid.isdigit():
+                continue
+            with suppress(Exception):
+                subprocess.run(
+                    ["taskkill.exe", "/PID", pid, "/T", "/F"],
+                    capture_output=True, timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                killed += 1
+        if killed:
+            print(f"[browser] 已清理 {killed} 个占用 profile 的残留引擎进程: {marker}")
+        return killed
 
     @staticmethod
     def _kill_shardx_engine(bsess: Any) -> None:

@@ -360,6 +360,10 @@ class IdentityModeTests(unittest.TestCase):
                 self_outer.assertTrue(engine.inside)
                 return ContextStub()
 
+            @staticmethod
+            def _kill_shardx_engine(_bsess):
+                return None
+
         self_outer = self
         async def scenario():
             result = await main.open_account_browser(account_id)
