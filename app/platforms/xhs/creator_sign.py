@@ -1,7 +1,9 @@
 """小红书签名：从 js-sign-service (Cloudflare Worker) 远程获取。
 
-服务地址: https://js.faryi.workers.dev (GitHub: https://github.com/exferdev/js)
+服务地址: https://js.faryi.com (GitHub: https://github.com/exferdev/js)
 路由:     POST /sign/xhs/{all|x_rap|cos_sign|traceid|xs|xs_common|xyw}
+
+注意: 使用自定义域名 js.faryi.com (非 *.workers.dev, 后者国内网络常不可达)。
 
 - x-s / x-t / x-s-common / b3/xray traceid: 用 `/sign/xhs/all` 一次聚合
 - x-rap-param: 用 `/sign/xhs/x_rap`
@@ -18,7 +20,7 @@ import os
 import time
 from urllib.parse import urlencode
 
-_BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.workers.dev")
+_BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.com")
 _TIMEOUT = 10        # 单次请求超时; Worker 冷启动可达数秒
 _MAX_ATTEMPTS = 3    # 失败重试(1s/2s 退避), 防网络抖动/冷启动误杀
 

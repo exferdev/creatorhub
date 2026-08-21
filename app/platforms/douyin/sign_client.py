@@ -1,20 +1,23 @@
 """
 远程签名服务客户端 — 调用 exferdev/js (Cloudflare Worker)
 
-服务地址: https://js.faryi.workers.dev (GitHub: https://github.com/exferdev/js)
+服务地址: https://js.faryi.com (GitHub: https://github.com/exferdev/js)
 路由: POST /sign/:platform/:algorithm
+
+注意: 使用自定义域名 js.faryi.com 而非 *.workers.dev —— workers.dev 子域在
+中国大陆网络常被墙/不稳定, 异机可达性差(实测异机只能访问 js.faryi.com)。
 
 完全云端签名: 失败返回 None, 由调用方决定抛错或跳过(无本地回退)。
 
 网络抖动/Worker 冷启动场景: _post 自动重试 3 次(1s/2s 递增退避), 超时 10s。
 最近一次失败的**明细**(超时/非 JSON/服务端错误)记入 last_error(), 调用方报错
-时带上它, 让异机上的失败(如 workers.dev 不可达)一眼可查, 而不是笼统的"未返回"。
+时带上它, 让异机上的失败一眼可查, 而不是笼统的"未返回"。
 """
 import os
 import time
 from typing import Optional
 
-_BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.workers.dev")
+_BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.com")
 _TIMEOUT = 10          # 单次请求超时(秒); Worker 冷启动可达数秒
 _MAX_ATTEMPTS = 3      # 最大尝试次数(含首试)
 
