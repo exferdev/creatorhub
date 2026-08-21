@@ -558,11 +558,12 @@ class DouyinIMClient:
             qs = urlencode({k: v for k, v in query_params.items() if v})
         if not qs:
             return ""
-        from .sign_client import remote_abogus
+        from .sign_client import remote_abogus, last_error
         ab = remote_abogus(qs, self.ua)
         if not ab:
             raise RuntimeError(
-                "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+                f"抖音签名服务不可用: remote_abogus 未返回 ({last_error()})；"
+                f"请检查 SIGN_SERVICE_URL 与网络可达性")
         print(f"[im-protocol] remote abogus=OK")
         return ab
 
@@ -831,12 +832,13 @@ class DouyinIMClient:
         if verify_fp and len(verify_fp) > 10:
             params["verifyFp"] = params["fp"] = f"verify_{verify_fp}"
         if not a_bogus:
-            from .sign_client import remote_abogus
+            from .sign_client import remote_abogus, last_error
             a_bogus = remote_abogus(
                 urlencode({k: v for k, v in params.items() if v}), self.ua)
             if not a_bogus:
                 raise RuntimeError(
-                    "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+                    f"抖音签名服务不可用: remote_abogus 未返回 ({last_error()})；"
+                    f"请检查 SIGN_SERVICE_URL 与网络可达性")
             print(f"[im-protocol] tmpl a_bogus=OK")
         params["a_bogus"] = a_bogus
         url = f"{self.API_BASE}/v1/message/send?" + urlencode({k: v for k, v in params.items() if v})

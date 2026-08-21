@@ -19,7 +19,8 @@ import time
 from urllib.parse import urlencode
 
 _BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.workers.dev")
-_TIMEOUT = 8
+_TIMEOUT = 10        # 单次请求超时; Worker 冷启动可达数秒
+_MAX_ATTEMPTS = 3    # 失败重试(1s/2s 退避), 防网络抖动/冷启动误杀
 
 _AVAILABLE: bool | None = None
 _AVAILABLE_AT = 0.0
@@ -27,15 +28,35 @@ _AVAILABLE_TTL = 60.0
 
 
 def _post(algorithm: str, payload: dict) -> dict:
-    """调远程签名服务；非 ok 响应抛 RuntimeError。"""
+    """调远程签名服务；失败重试 _MAX_ATTEMPTS 次，仍失败抛 RuntimeError(含明细)。"""
     import curl_cffi.requests as cr
+    import time as _t
     url = f"{_BASE_URL}/sign/xhs/{algorithm}"
-    resp = cr.post(url, json=payload, timeout=_TIMEOUT)
-    data = resp.json()
-    if not isinstance(data, dict) or not data.get("ok"):
-        raise RuntimeError(
-            f"sign service error: {data.get('error', resp.status_code)}")
-    return data
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            resp = cr.post(url, json=payload, timeout=_TIMEOUT)
+            data = resp.json()
+            if not isinstance(data, dict) or not data.get("ok"):
+                raise RuntimeError(
+                    f"sign service error: {data.get('error', resp.status_code)}")
+            return data
+        except RuntimeError:
+            if attempt < _MAX_ATTEMPTS:
+                _t.sleep(attempt)
+                continue
+            raise
+        except Exception as e:
+            if attempt < _MAX_ATTEMPTS:
+                _t.sleep(attempt)
+                continue
+            status = ""
+            try:
+                status = f" HTTP {getattr(e.response, 'status_code', '')}"
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"sign service unreachable: {type(e).__name__}{status} "
+                f"{str(e)[:120]} (url={url})") from e
 
 
 def available() -> bool:

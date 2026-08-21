@@ -553,11 +553,12 @@ async def _create_video(page, cookies: dict, vid: str, creation_id: str,
         signed_params = dict(params)
         url_without_ab = base_url + "?" + urlencode(signed_params)
         # create_v2 a_bogus: 完全云端(远程签名服务, 无本地回退)
-        from .sign_client import remote_abogus
+        from .sign_client import remote_abogus, last_error
         ab = remote_abogus(urlencode(signed_params), ua)
         if not ab:
             raise RuntimeError(
-                "抖音签名服务不可用: remote_abogus 未返回(请检查 SIGN_SERVICE_URL)")
+                f"抖音签名服务不可用: remote_abogus 未返回 ({last_error()})；"
+                f"请检查 SIGN_SERVICE_URL 与网络可达性")
         print(f"[dy-protocol] remote abogus=OK")
         signed_params["a_bogus"] = ab
 
