@@ -21,7 +21,8 @@ from app.auth_setup import (
 )
 from app.config import load_config
 from app.db import get_session, init_db
-from app.models import AdminAccessToken, AdminUser, DouyinAccount, MonitorTarget
+from app.models import (AdminAccessToken, AdminUser, DouyinAccount,
+                        MonitorTarget, RiskAdminAudit)
 from fastapi.testclient import TestClient
 
 
@@ -342,6 +343,110 @@ class OwnerIsolationTests(unittest.TestCase):
 def main_app():
     import app.main as m
     return m.app
+
+
+class AdminPanelTests(unittest.TestCase):
+    """P0.2 后台管理: 用户 CRUD/角色隔离/守卫/操作审计。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._prev_bypass = os.environ.get("CREATORHUB_TEST_AUTH_BYPASS")
+        os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        init_db(str(Path(self.tmp.name) / "admin.db"))
+        with get_session() as s:
+            s.add(AdminUser(username="boss", email="boss@i", role="admin",
+                            is_superuser=True,
+                            hashed_password=hash_password("boss-pass-1")))
+            s.add(AdminUser(username="op", email="op@i", role="operator",
+                            hashed_password=hash_password("op-pass-123")))
+            s.commit()
+        self.client = TestClient(main_app())
+        self.h_admin = self._login("boss", "boss-pass-1")
+        self.h_op = self._login("op", "op-pass-123")
+
+    def tearDown(self):
+        if self._prev_bypass is None:
+            os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        else:
+            os.environ["CREATORHUB_TEST_AUTH_BYPASS"] = self._prev_bypass
+        import app.db as dbm
+        if dbm._engine is not None:
+            try:
+                dbm._engine.dispose()
+            except Exception:
+                pass
+            dbm._engine = None
+
+    def _login(self, name, pw):
+        r = self.client.post("/api/admin/auth/login",
+                             data={"username": name, "password": pw})
+        self.assertEqual(r.status_code, 200, r.text)
+        return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    def test_users_api_admin_only(self):
+        self.assertEqual(self.client.get(
+            "/api/admin/users", headers=self.h_op).status_code, 403)
+        self.assertEqual(self.client.post(
+            "/api/admin/users", headers=self.h_op, json={
+                "username": "x", "password": "pass-1234", "role": "viewer"}
+        ).status_code, 403)
+        self.assertEqual(self.client.get(
+            "/api/admin/users", headers=self.h_admin).status_code, 200)
+
+    def test_user_crud_and_guards(self):
+        # 创建
+        r = self.client.post("/api/admin/users", headers=self.h_admin, json={
+            "username": "v1", "password": "view-pass-1", "role": "viewer"})
+        self.assertEqual(r.status_code, 201, r.text)
+        uid = r.json()["id"]
+        # 重名 409
+        r = self.client.post("/api/admin/users", headers=self.h_admin, json={
+            "username": "v1", "password": "view-pass-1", "role": "viewer"})
+        self.assertEqual(r.status_code, 409)
+        # 停用
+        r = self.client.patch(f"/api/admin/users/{uid}", headers=self.h_admin,
+                              json={"enabled": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json()["enabled"])
+        # 重置新用户密码(旧令牌失效, 不影响 admin)
+        self.client.post(f"/api/admin/users/{uid}/password",
+                         headers=self.h_admin, json={"new_password": "view-pass-2"})
+        # 不能停用自己
+        boss_id = self.client.get("/api/admin/users",
+                                  headers=self.h_admin).json()["users"][0]["id"]
+        r = self.client.patch(f"/api/admin/users/{boss_id}",
+                              headers=self.h_admin, json={"enabled": False})
+        self.assertEqual(r.status_code, 400)
+        # 删除
+        r = self.client.delete(f"/api/admin/users/{uid}", headers=self.h_admin)
+        self.assertEqual(r.status_code, 200, r.text)
+        # 不能删除自己
+        r = self.client.delete(f"/api/admin/users/{boss_id}", headers=self.h_admin)
+        self.assertEqual(r.status_code, 400)
+        # 操作审计落库
+        with get_session() as s:
+            actions = [a.action for a in s.exec(
+                select(RiskAdminAudit).order_by(
+                    RiskAdminAudit.id.desc())).all()]
+        self.assertIn("user.create", actions)
+        self.assertIn("user.update", actions)
+        self.assertIn("user.password_reset", actions)
+        self.assertIn("user.delete", actions)
+
+    def test_audit_views(self):
+        # 产生一些请求审计
+        self.client.get("/api/accounts", headers=self.h_admin)
+        r = self.client.get("/api/admin/audit-requests?limit=10",
+                            headers=self.h_admin)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertGreaterEqual(len(r.json()), 1)
+        r = self.client.get("/api/admin/audit-ops",
+                            headers=self.h_admin)
+        self.assertEqual(r.status_code, 200)
+        # operator 无权限
+        self.assertEqual(self.client.get(
+            "/api/admin/audit-requests", headers=self.h_op).status_code, 403)
 
 
 if __name__ == "__main__":

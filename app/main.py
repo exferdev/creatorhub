@@ -105,6 +105,7 @@ from .auth_setup import (
     token_from_request,
     user_from_token,
 )
+from .admin_api import router as admin_api_router
 
 import json
 import re
@@ -279,6 +280,7 @@ WEB_DIR = Path(__file__).parent / "web"
 # ── 后台用户鉴权(多用户前置; 所有 /api 强制登录, 见 auth_guard_middleware)──
 app.include_router(auth_users.get_auth_router(auth_backend),
                    prefix="/api/admin/auth")
+app.include_router(admin_api_router)   # P0.2 后台管理: 用户管理/审计(admin-only)
 
 
 class MeOut(BaseModel):

@@ -1679,6 +1679,7 @@
     <button class="navitem" data-tab="share-download" onclick="switchTab('share-download', true)"><svg><use href="#i-download"/></svg><span class="nav-label">链接下载</span></button>
     <button class="navitem" data-tab="notifications" onclick="switchTab('notifications', true)"><svg><use href="#i-bell"/></svg><span class="nav-label">通知</span></button>
     <button class="navitem" data-tab="settings" onclick="switchTab('settings', true)"><svg><use href="#i-settings"/></svg><span class="nav-label">设置</span></button>
+    <button class="navitem" data-tab="admin-panel" id="nav-admin" hidden onclick="switchTab('admin-panel', true)"><svg><use href="#i-shield"/></svg><span class="nav-label">后台管理</span></button>
     <div class="nav-sep">安全</div>
     <button class="navitem" data-tab="risk-control" onclick="switchTab('risk-control', true)"><svg><use href="#i-shield"/></svg><span class="nav-label">风控中心</span><span class="nav-badge" id="tb-risk">0</span></button>
   </nav>
@@ -1745,6 +1746,42 @@
   </div>
   </section>
 
+  <section data-panel="admin-panel">
+    <div class="card">
+      <div class="card-head">
+        <span class="card-ic"><svg><use href="#i-user"/></svg></span>
+        <h2>用户管理 <span class="sub">admin 专属</span></h2>
+      </div>
+      <div class="form-grid" style="grid-template-columns: 1fr 180px 130px 100px auto; align-items:end; gap:10px; margin-bottom:14px;">
+        <div class="form-field"><label>用户名</label><input id="au-username" placeholder="新用户" autocomplete="off"></div>
+        <div class="form-field"><label>初始密码</label><input id="au-password" type="password" placeholder="至少 8 位" autocomplete="new-password"></div>
+        <div class="form-field"><label>角色</label>
+          <select id="au-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select>
+        </div>
+        <button class="primary" type="button" onclick="adminCreateUser()">创建用户</button>
+      </div>
+      <table class="table" id="admin-users-table">
+        <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="card-ic"><svg><use href="#i-bell"/></svg></span>
+        <h2>请求审计 <span class="sub">最近 200 条</span></h2></div>
+      <table class="table" id="admin-req-table">
+        <thead><tr><th>时间</th><th>用户</th><th>方法</th><th>路径</th><th>状态</th><th>耗时ms</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="card-ic"><svg><use href="#i-shield"/></svg></span>
+        <h2>操作审计 <span class="sub">最近 200 条</span></h2></div>
+      <table class="table" id="admin-op-table">
+        <thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>详情</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
   <section data-panel="accounts">
     <!-- 登录 / 账号 -->
     <div class="card">
