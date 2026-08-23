@@ -140,10 +140,18 @@ class RiskControlConfig:
 
 
 @dataclass
+class AdminConfig:
+    """后台管理鉴权(用户登录/角色/多用户)。"""
+    enabled: bool = True          # 总开关; false=回到无鉴权旧行为(仅迁移期)
+    token_days: int = 14          # 登录令牌有效期(天)
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     risk_control: RiskControlConfig = field(default_factory=RiskControlConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
     db_path: str = "./data/creatorhub.db"
     proxies: List[str] = field(default_factory=list)  # 代理池;建号时一号一代理 sticky 分配
 
@@ -169,6 +177,9 @@ def load_config(path: str | None = None) -> Config:
         risk_values["mode"] = (
             mode if mode in {"conservative", "custom"} else "conservative")
         cfg.risk_control = RiskControlConfig(**risk_values)
+        a = raw.get("admin", {}) or {}
+        cfg.admin = AdminConfig(**{k: v for k, v in a.items()
+                                   if k in AdminConfig.__dataclass_fields__})
         cfg.db_path = (raw.get("storage", {}) or {}).get("db_path", cfg.db_path)
         px = raw.get("proxies") or []
         cfg.proxies = [str(p).strip() for p in px if str(p).strip()]

@@ -33,11 +33,73 @@ function _barSync() {
 const api = async (path, opts) => {
   _apiActive++; _barSync();
   try {
-    const r = await fetch(path, opts);
+    const r = await _fetchAuth(path, opts);
     if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.status); }
     return await r.json();
   } finally { _apiActive--; _barSync(); }
 };
+
+// ─── 后台用户鉴权(所有 /api 需登录)───
+const AUTH_KEY = "creatorhub_token", USER_KEY = "creatorhub_user";
+const authToken = () => localStorage.getItem(AUTH_KEY) || "";
+const authUser = () => { try { return JSON.parse(localStorage.getItem(USER_KEY) || "null"); } catch (e) { return null; } };
+function setAuth(token, user) {
+  if (token) localStorage.setItem(AUTH_KEY, token); else localStorage.removeItem(AUTH_KEY);
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user)); else localStorage.removeItem(USER_KEY);
+}
+// 统一 fetch: 自动带 Bearer; 401(除登录接口外)清会话并弹登录层
+async function _fetchAuth(path, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const tok = authToken();
+  if (tok && !headers.has("Authorization")) headers.set("Authorization", "Bearer " + tok);
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401 && !path.includes("/api/admin/auth/")) {
+    setAuth("", null);
+    const ov = $("login-overlay"); if (ov) { $("login-msg").textContent = "登录已过期，请重新登录"; ov.classList.add("on"); }
+    throw new Error("未登录或登录已过期");
+  }
+  return r;
+}
+function authedUrl(path) {  // <img>/<video> 无法带请求头, 用 query 令牌
+  const tok = authToken();
+  if (!tok) return path;
+  return path + (path.includes("?") ? "&" : "?") + "access_token=" + encodeURIComponent(tok);
+}
+function renderUserChip() {
+  const chip = $("user-chip"); if (!chip) return;
+  const u = authUser();
+  if (u) {
+    chip.hidden = false;
+    chip.innerHTML = `<span>${esc(u.username)}</span><span class="user-chip-role">${esc(u.role || "")}</span>` +
+      `<button type="button" onclick="doLogout()" title="退出登录" aria-label="退出登录"><svg aria-hidden="true"><use href="#i-x"/></svg></button>`;
+  } else chip.hidden = true;
+}
+async function doLogin(ev) {
+  ev.preventDefault();
+  const msg = $("login-msg"); if (msg) msg.textContent = "";
+  const username = $("login-user").value.trim(), password = $("login-pass").value;
+  try {
+    const body = await api("/api/admin/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ username, password }).toString(),
+    });
+    setAuth(body.access_token, null);
+    const me = await api("/api/admin/me");
+    setAuth(body.access_token, me);
+    const ov = $("login-overlay"); if (ov) ov.classList.remove("on");
+    renderUserChip();
+    toast("欢迎，" + (me.display_name || me.username), "ok");
+  } catch (e) {
+    if (msg) msg.textContent = e.message || "登录失败";
+  }
+}
+async function doLogout() {
+  try { await _fetchAuth("/api/admin/auth/logout", { method: "POST" }); } catch (e) {}
+  setAuth("", null);
+  renderUserChip();
+  location.reload();
+}
 
 // ─── UI helpers ───
 const ic = (id) => `<svg aria-hidden="true"><use href="#${id}"/></svg>`;
@@ -646,7 +708,7 @@ async function exportMonitorReport(explicitBtn = null) {
 
 
 async function _downloadExcelReport(path, fallbackName) {
-  const response = await fetch(path);
+  const response = await _fetchAuth(path);
   if (!response.ok) {
     let message = response.status;
     try {
@@ -1601,7 +1663,7 @@ async function refreshAccounts() {
     return `<tr>
       <td>
         <div class="user-cell">
-          ${a.avatar ? `<img class="avatar" src="/api/avatar/${a.id}" alt="" referrerpolicy="no-referrer">` : ""}
+          ${a.avatar ? `<img class="avatar" src="${authedUrl("/api/avatar/" + a.id)}" alt="" referrerpolicy="no-referrer">` : ""}
           <div>
             <div><b>${esc(a.nickname)}</b> ${pill}</div>
             ${idline ? `<div class="mut" style="font-size:11px;margin-top:2px">${idline}</div>` : ""}
@@ -6336,3 +6398,15 @@ window.addEventListener("scroll", () => {
 }, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loop(); });
 setInterval(loop, 8000);
+
+// ─── 启动: 校验登录态; 未登录/失效则弹登录层 ───
+(function authBoot() {
+  renderUserChip();
+  if (!authToken()) {
+    const ov = $("login-overlay"); if (ov) ov.classList.add("on");
+    return;
+  }
+  api("/api/admin/me")
+    .then(me => { setAuth(authToken(), me); renderUserChip(); })
+    .catch(() => {});
+})();

@@ -1,10 +1,15 @@
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+# 存量 ASGI 用例直调 /api 不走登录(鉴权旁路, 仅测试环境)。
+# 新的鉴权测试(test_admin_auth)会临时清掉该变量并在 tearDown 恢复。
+os.environ["CREATORHUB_TEST_AUTH_BYPASS"] = "1"
 
 from fastapi import HTTPException
 import httpx

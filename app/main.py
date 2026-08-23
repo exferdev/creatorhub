@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from contextlib import asynccontextmanager
@@ -17,10 +18,11 @@ from typing import Any, Dict
 from urllib.parse import urlsplit
 
 from datetime import date, datetime, time, timedelta, timezone
+from time import perf_counter as _perf_counter
 import uuid as _uuid
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy import func, or_, and_
@@ -76,7 +78,8 @@ from .models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                      ShareDownloadRecord, AccountRiskState, RiskEvent,
                      BrowserProfile,
                      KeywordCollectionJob, KeywordCollectionContent,
-                     KeywordCollectionComment, RiskAdminAudit)
+                     KeywordCollectionComment, RiskAdminAudit,
+                     AdminUser, RequestAudit)
 from .notifier import CHANNEL_TYPES, send_one
 from .profiles import (ensure_identity, migrate_identities, assign_proxy_from_pool,
                        release_proxy_reservation, reserve_proxy_from_pool,
@@ -89,6 +92,18 @@ from .risk_admin import (RiskSettingsError, apply_risk_settings,
 from .settings import get_setting, set_setting
 from .windowing import (EXPLORER_WINDOW_CLASSES, bring_window_to_front,
                         capture_window_snapshot)
+from .auth_setup import (
+    AUTH_OPEN_EXACT,
+    AUTH_OPEN_PREFIXES,
+    auth_backend,
+    auth_bypass_enabled,
+    ensure_bootstrap_admin,
+    fastapi_users as auth_users,
+    hash_password,
+    require_roles,
+    token_from_request,
+    user_from_token,
+)
 
 import json
 import re
@@ -171,6 +186,11 @@ async def lifespan(app: FastAPI):
             print(f"[startup-timing] {label}: {(_t.perf_counter() - _t0) * 1000:.0f} ms", flush=True)
         _mark("lifespan+import")
     init_db(cfg.db_path)
+    try:
+        if ensure_bootstrap_admin(cfg):
+            print("[startup] 后台管理用户已初始化(admin), 请用日志中的初始密码登录并尽快修改")
+    except Exception as e:
+        print(f"[startup] 后台用户初始化失败(不影响启动): {e!r}")
     if _T: _mark("init_db")
     if load_persisted_risk_settings(cfg):
         print("[startup] 已加载风控中心保存的运行时规则")
@@ -254,6 +274,86 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="CreatorHub", lifespan=lifespan)
 WEB_DIR = Path(__file__).parent / "web"
+
+# ── 后台用户鉴权(多用户前置; 所有 /api 强制登录, 见 auth_guard_middleware)──
+app.include_router(auth_users.get_auth_router(auth_backend),
+                   prefix="/api/admin/auth")
+
+
+class MeOut(BaseModel):
+    id: int
+    username: str
+    display_name: str = ""
+    role: str
+    is_superuser: bool
+    must_change_password: bool = False
+    created_at: Any = None
+
+
+@app.get("/api/admin/me", response_model=MeOut)
+async def admin_me(user: "AdminUser" = Depends(auth_users.current_user())):
+    return MeOut(id=user.id, username=user.username,
+                 display_name=user.display_name, role=user.role,
+                 is_superuser=user.is_superuser,
+                 must_change_password=user.must_change_password,
+                 created_at=user.created_at)
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/admin/me/password")
+async def admin_change_password(
+        body: ChangePasswordIn,
+        user: "AdminUser" = Depends(auth_users.current_user())):
+    from fastapi_users.password import PasswordHelper
+    ph = PasswordHelper()
+    if not ph.verify_and_update(body.current_password, user.hashed_password)[0]:
+        raise HTTPException(400, "当前密码不正确")
+    if len(body.new_password) < 8:
+        raise HTTPException(400, "新密码至少 8 位")
+    user.hashed_password = ph.hash(body.new_password)
+    user.must_change_password = False
+    with get_session() as s:
+        s.merge(user)   # user 由依赖会话加载, 用 merge 跨会话持久化
+        s.commit()
+    from .auth_setup import revoke_user_tokens
+    await revoke_user_tokens(user.id)   # 改密后吊销旧令牌, 需重新登录
+    return {"ok": True}
+
+
+@app.middleware("http")
+async def auth_guard_middleware(request: Request, call_next):
+    """全局鉴权守卫: 白名单外一律校验 Bearer/query 令牌; 记录请求审计。"""
+    if auth_bypass_enabled() or not cfg.admin.enabled:
+        return await call_next(request)
+    path = request.url.path
+    if (path in AUTH_OPEN_EXACT
+            or path.startswith(AUTH_OPEN_PREFIXES)
+            or path.startswith("/static")):
+        return await call_next(request)
+    token = token_from_request(request)
+    user = await user_from_token(token, cfg)
+    if user is None:
+        return JSONResponse({"detail": "未登录或令牌无效"}, status_code=401)
+    request.state.user = user
+    _t0 = _perf_counter()
+    response = await call_next(request)
+    try:
+        if path.startswith("/api"):
+            with get_session() as s:
+                s.add(RequestAudit(
+                    user_id=user.id, username=user.username,
+                    method=request.method, path=path[:200],
+                    status_code=response.status_code,
+                    client_ip=(request.client.host if request.client else ""),
+                    duration_ms=int((_perf_counter() - _t0) * 1000)))
+                s.commit()
+    except Exception:
+        pass
+    return response
 
 
 async def _collect_true_device_once():

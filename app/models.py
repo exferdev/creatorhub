@@ -105,6 +105,49 @@ class AppSetting(SQLModel, table=True):
     value: str = ""
 
 
+class AdminUser(SQLModel, table=True):
+    """后台管理用户(fastapi-users v15 模型 + 角色/安全扩展)。
+
+    username 为登录标识(fastapi-users 原生 username 登录);
+    email 字段保留框架兼容, 与 username 同值。
+    token_version: 改密/踢人时 +1, 使已签发的旧令牌全部失效。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    email: str = Field(index=True, unique=True)
+    hashed_password: str = ""
+    is_active: bool = Field(default=True)
+    is_superuser: bool = Field(default=False)
+    is_verified: bool = Field(default=True)
+    role: str = Field(default="viewer", index=True)   # admin | operator | viewer
+    display_name: str = ""
+    token_version: int = Field(default=0)
+    must_change_password: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login_at: Optional[datetime] = None
+
+
+class AdminAccessToken(SQLModel, table=True):
+    """fastapi-users DatabaseStrategy 令牌表(存 token 哈希, 可吊销)。"""
+    token: str = Field(primary_key=True)
+    user_id: int = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None
+
+
+class RequestAudit(SQLModel, table=True):
+    """API 请求审计(谁在何时调了哪个接口、结果如何)。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: Optional[int] = Field(default=None, index=True)
+    username: str = ""
+    method: str = ""
+    path: str = Field(index=True)
+    status_code: int = 0
+    client_ip: str = ""
+    duration_ms: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AccountRiskState(SQLModel, table=True):
     """跨功能共享的账号平台风险状态，一账号一行。"""
     account_id: int = Field(primary_key=True)

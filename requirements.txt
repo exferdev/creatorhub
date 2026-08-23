@@ -17,3 +17,8 @@ requests>=2.31             # 发布:抖音 VOD 上传 + msToken API
 websockets>=12
 yt-dlp>=2025.1.15        # 通用分享链接解析/下载（抖音、B站、YouTube 等及通用媒体页）
 imageio-ffmpeg>=0.5.1    # 内置 ffmpeg 兜底：仅音频提取与分离音视频流合并
+
+# ── 后台管理鉴权(多用户/用户管理/请求审计)──
+fastapi-users[sqlalchemy]>=15.0      # 登录/令牌/密码哈希(argon2), DatabaseStrategy 落库可吊销
+argon2-cffi>=23.1                    # OWASP 推荐密码哈希(纯 wheel)
+slowapi>=0.1.9                       # 登录接口限流(防爆破)
