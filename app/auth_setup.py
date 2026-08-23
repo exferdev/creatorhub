@@ -197,8 +197,17 @@ current_superuser = fastapi_users.current_user(active=True, superuser=True)
 
 
 def require_roles(*roles: str):
-    """RBAC 依赖: 角色白名单; admin 恒通过。"""
-    async def dep(user: AdminUser = Depends(current_user)) -> AdminUser:
+    """RBAC 依赖: 角色白名单; admin 恒通过; 测试旁路视为超管。"""
+    async def require_current_user(request: Request) -> AdminUser:
+        u = getattr(request.state, "user", None)
+        if u is not None:
+            return u
+        if auth_bypass_enabled():
+            return AdminUser(id=0, username="__bypass__", role="admin",
+                             is_superuser=True, is_active=True)
+        raise HTTPException(401, "未登录或令牌无效")
+
+    async def dep(user: AdminUser = Depends(require_current_user)) -> AdminUser:
         if user.role not in roles and not user.is_superuser:
             raise HTTPException(403, "权限不足")
         return user

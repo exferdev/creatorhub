@@ -8,8 +8,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import httpx
 
+import os
+
+import os
+import os
+
 import app.db as db
 import app.main as main
+
+# 存量 ASGI 用例直调 /api 不走登录(仅测试环境)
+os.environ["CREATORHUB_TEST_AUTH_BYPASS"] = "1"
 from starlette.requests import Request
 from sqlmodel import select
 from app.config import Config

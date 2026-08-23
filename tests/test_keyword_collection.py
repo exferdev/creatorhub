@@ -26,7 +26,7 @@ from app.browser.fetcher import (
 
 def _req():
     """直调端点函数的假 request(测试旁路环境下视为管理员)。"""
-    return SimpleNamespace(state=SimpleNamespace(user=None))
+    return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id=1, is_superuser=True, role="admin")))
 
 
 from app.config import Config

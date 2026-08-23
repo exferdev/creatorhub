@@ -1380,6 +1380,7 @@ def _risk_account_views(session, accounts: list[DouyinAccount],
 
 @app.get("/api/risk-control/config")
 async def get_risk_control_config():
+    _admin: AdminUser = Depends(require_roles("admin")),
     payload = export_risk_settings(cfg)
     payload["admin_token_required"] = _risk_admin_required()
     return payload
@@ -1391,7 +1392,8 @@ class RiskSettingsIn(BaseModel):
 
 
 @app.put("/api/risk-control/config")
-async def put_risk_control_config(body: RiskSettingsIn, request: Request):
+async def put_risk_control_config(body: RiskSettingsIn, request: Request,
+    _admin: AdminUser = Depends(require_roles("admin"))):
     actor = _require_risk_admin(request)
     before = export_risk_settings(cfg)
     try:
@@ -1411,6 +1413,7 @@ async def put_risk_control_config(body: RiskSettingsIn, request: Request):
 
 @app.get("/api/risk-control/accounts")
 async def list_risk_control_accounts(platform: str | None = None):
+    _admin: AdminUser = Depends(require_roles("admin")),
     now = datetime.utcnow()
     with get_session() as session:
         query = select(DouyinAccount)
@@ -1422,6 +1425,7 @@ async def list_risk_control_accounts(platform: str | None = None):
 
 @app.get("/api/risk-control/summary")
 async def get_risk_control_summary(platform: str | None = None):
+    _admin: AdminUser = Depends(require_roles("admin")),
     now = datetime.utcnow()
     local_now = datetime.now().astimezone()
     today = local_now.replace(hour=0, minute=0, second=0, microsecond=0) \
@@ -1459,6 +1463,7 @@ async def get_risk_control_summary(platform: str | None = None):
 
 @app.get("/api/risk-control/accounts/{account_id}/events")
 async def list_account_risk_events(account_id: int, limit: int = 80):
+    _admin: AdminUser = Depends(require_roles("admin")),
     limit = max(1, min(200, limit))
     with get_session() as session:
         account = session.get(DouyinAccount, account_id)
@@ -1483,7 +1488,8 @@ async def list_account_risk_events(account_id: int, limit: int = 80):
 
 
 @app.post("/api/risk-control/accounts/{account_id}/probe")
-async def probe_account_risk(account_id: int, request: Request):
+async def probe_account_risk(account_id: int, request: Request,
+    _admin: AdminUser = Depends(require_roles("admin"))):
     actor = _require_risk_admin(request)
     result = await refresh_account_profile(account_id)
     woken = 0
@@ -1512,7 +1518,8 @@ class RiskClearIn(BaseModel):
 
 
 @app.post("/api/risk-control/accounts/{account_id}/clear")
-async def clear_account_risk(account_id: int, body: RiskClearIn, request: Request):
+async def clear_account_risk(account_id: int, body: RiskClearIn, request: Request,
+    _admin: AdminUser = Depends(require_roles("admin"))):
     actor = _require_risk_admin(request)
     reason = body.reason.strip()
     if not body.confirmed or len(reason) < 3:
@@ -1537,6 +1544,7 @@ async def clear_account_risk(account_id: int, body: RiskClearIn, request: Reques
 
 @app.get("/api/risk-control/audit")
 async def list_risk_admin_audit(limit: int = 100):
+    _admin: AdminUser = Depends(require_roles("admin")),
     limit = max(1, min(300, limit))
     with get_session() as session:
         rows = session.exec(select(RiskAdminAudit).order_by(
@@ -1736,7 +1744,7 @@ def _fetch_and_cache_avatar(account_id: int, remote_url: str, storage_state: str
 
 
 @app.get("/api/avatar/{account_id}")
-async def get_avatar(account_id: int):
+async def get_avatar(request: Request, account_id: int):
     """代理头像请求:优先本地缓存,miss 时从远程拉取并缓存。"""
     local_path = AVATAR_DIR / f"{account_id}.jpg"
     if local_path.exists():
@@ -1748,6 +1756,7 @@ async def get_avatar(account_id: int):
             return FileResponse(local_path, media_type="image/jpeg",
                                 headers={"Cache-Control": "public, max-age=3600"})
         with get_session() as s:
+            _own_account(request, s, account_id)
             acc = s.get(DouyinAccount, account_id)
             if not acc or not acc.avatar:
                 return _empty_png()
@@ -1816,8 +1825,9 @@ def _work_dict(w: AccountWork) -> dict:
 
 
 @app.get("/api/account-works")
-async def list_account_works(account_id: int, limit: int = 200):
+async def list_account_works(request: Request, account_id: int, limit: int = 200):
     with get_session() as s:
+        _own_account(request, s, account_id)
         q = (select(AccountWork).where(AccountWork.account_id == account_id)
              .order_by(AccountWork.create_time.desc()).limit(limit))
         return [_work_dict(w) for w in s.exec(q).all()]
@@ -1879,11 +1889,12 @@ async def sync_account_works(account_id: int):
 
 # ─────────── 本账号数据分析(B4:粉丝/作品/互动趋势 + 单篇作品表)───────────
 @app.get("/api/account-stats/{account_id}")
-async def account_stats(account_id: int, days: int = 30):
+async def account_stats(request: Request, account_id: int, days: int = 30):
     """返回该账号近 days 天的每日快照趋势 + 当前本账号作品的单篇互动明细。
     快照由引擎在账号体检/作品健康时写入(见 EngineConfig.work_health_*)。"""
     days = max(1, min(days, 180))
     with get_session() as s:
+        _own_account(request, s, account_id)
         acc = s.get(DouyinAccount, account_id)
         if not acc:
             raise HTTPException(404, "账号不存在")
@@ -1984,8 +1995,9 @@ def _follow_dict(f: FollowEdge) -> dict:
 
 
 @app.get("/api/follows")
-async def list_follows(account_id: int, direction: str = "following", limit: int = 500):
+async def list_follows(request: Request, account_id: int, direction: str = "following", limit: int = 500):
     with get_session() as s:
+        _own_account(request, s, account_id)
         q = (select(FollowEdge).where(FollowEdge.account_id == account_id,
                                       FollowEdge.direction == direction)
              .order_by(FollowEdge.id.desc()).limit(limit))
@@ -4984,7 +4996,7 @@ async def target_contents(tid: int):
 
 
 @app.get("/api/contents")
-async def all_contents(limit: int = 100, platform: str | None = None,
+async def all_contents(request: Request, limit: int = 100, platform: str | None = None,
                        target_id: int | None = None, group_name: str = "",
                        tag: str = "", q: str = "", media_type: str = "",
                        download_status: str = "", min_like_count: int = 0,
@@ -5002,9 +5014,14 @@ async def all_contents(limit: int = 100, platform: str | None = None,
     page_size = max(1, min(page_size, 200))
     with get_session() as s:
         stmt = select(ContentRecord)
+        cond = _owner_cond(request, MonitorTarget.owner_id)  # 子记录按父监控归属
+        if cond is not None:
+            owned_tids = s.exec(select(MonitorTarget.id).where(cond)).all()
+            stmt = stmt.where(ContentRecord.target_id.in_([t for t in owned_tids]))
         if platform:
             stmt = stmt.where(ContentRecord.platform == platform)
         if target_id is not None:
+            _own_monitor(request, s, target_id)
             stmt = stmt.where(ContentRecord.target_id == target_id)
         text_query = q.strip()
         if text_query:
@@ -5089,6 +5106,7 @@ async def stats_series(platform: str | None = None, days: int = 7):
 
 @app.get("/api/reports/monitor.xlsx")
 async def export_monitor_report(
+    request: Request,
     platform: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -5096,6 +5114,7 @@ async def export_monitor_report(
     tag: str = "",
     data_types: str = "all",
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     """Export filtered monitoring records as a formatted Excel workbook.
 
     ``start_date`` and ``end_date`` filter by record collection time.  The
@@ -5256,12 +5275,14 @@ def _report_download(payload: bytes, prefix: str):
 
 @app.get("/api/reports/share-download-history.xlsx")
 async def export_share_download_history_report(
+    request: Request,
     platform: str | None = None,
     q: str = "",
     media_type: str = "",
     status: str = "",
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_share_history_report
 
     platform = platform.strip() if platform else None
@@ -5321,12 +5342,14 @@ def _report_filter_pairs(pairs: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
 
 @app.get("/api/reports/monitors.xlsx")
 async def export_monitors_report(
+    request: Request,
     platform: str | None = None,
     q: str = "",
     group_name: str = "",
     tag: str = "",
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_targets_report
 
     platform = platform.strip() if platform else None
@@ -5367,12 +5390,14 @@ async def export_monitors_report(
 
 @app.get("/api/reports/comment-watches.xlsx")
 async def export_comment_watches_report(
+    request: Request,
     platform: str | None = None,
     q: str = "",
     group_name: str = "",
     tag: str = "",
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_watches_report
 
     platform = platform.strip() if platform else None
@@ -5405,12 +5430,14 @@ async def export_comment_watches_report(
 
 @app.get("/api/reports/danmaku-watches.xlsx")
 async def export_danmaku_watches_report(
+    request: Request,
     platform: str | None = None,
     q: str = "",
     group_name: str = "",
     tag: str = "",
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_danmaku_watches_report
 
     platform = platform.strip() if platform else None
@@ -5443,6 +5470,7 @@ async def export_danmaku_watches_report(
 
 @app.get("/api/reports/contents.xlsx")
 async def export_contents_report(
+    request: Request,
     platform: str | None = None,
     target_id: int | None = None,
     group_name: str = "",
@@ -5457,6 +5485,7 @@ async def export_contents_report(
     end_date: date | None = None,
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_contents_report
 
     if full:
@@ -5530,6 +5559,7 @@ async def export_contents_report(
 
 @app.get("/api/reports/comments.xlsx")
 async def export_comments_report(
+    request: Request,
     platform: str | None = None,
     watch_id: int | None = None,
     aweme_id: str | None = None,
@@ -5543,6 +5573,7 @@ async def export_comments_report(
     end_date: date | None = None,
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_comments_report
 
     if full:
@@ -5614,6 +5645,7 @@ async def export_comments_report(
 
 @app.get("/api/reports/danmaku.xlsx")
 async def export_danmaku_report(
+    request: Request,
     platform: str | None = None,
     watch_id: int | None = None,
     aweme_id: str | None = None,
@@ -5628,6 +5660,7 @@ async def export_danmaku_report(
     end_date: date | None = None,
     full: bool = False,
 ):
+    _admin: AdminUser = Depends(require_roles("admin")),
     from .reporting import build_danmaku_report
 
     if full:
@@ -5961,16 +5994,19 @@ def _watch_dict(w: CommentWatch) -> dict:
 
 
 @app.get("/api/comment-watches")
-async def list_watches(platform: str | None = None):
+async def list_watches(request: Request, platform: str | None = None):
     with get_session() as s:
         q = select(CommentWatch)
+        cond = _owner_cond(request, CommentWatch.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(CommentWatch.platform == platform)
         return [_watch_dict(w) for w in s.exec(q).all()]
 
 
 @app.post("/api/comment-watches")
-async def add_watch(body: WatchIn):
+async def add_watch(request: Request, body: WatchIn):
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
     aweme_id = sec_uid = xsec_token = ""
     title = ""
@@ -6055,6 +6091,7 @@ async def add_watch(body: WatchIn):
                           alias=_meta_text(body.alias, 60),
                           group_name=_meta_text(body.group_name, 40),
                           tags=_dump_meta_tags(_meta_tags(body.tags)))
+        _stamp_owner(request, w)
         s.add(w); s.commit(); s.refresh(w)
         return _watch_dict(w)
 
@@ -6141,7 +6178,7 @@ def _comment_dict(c: CommentRecord) -> dict:
 
 
 @app.get("/api/comments")
-async def list_comments(limit: int = 100, watch_id: int | None = None,
+async def list_comments(request: Request, limit: int = 100, watch_id: int | None = None,
                         aweme_id: str | None = None, platform: str | None = None,
                         group_name: str = "", tag: str = "", q: str = "",
                         reply_type: str = "", min_like_count: int = 0,
@@ -6153,9 +6190,14 @@ async def list_comments(limit: int = 100, watch_id: int | None = None,
     page_size = max(1, min(page_size, 200))
     with get_session() as s:
         stmt = select(CommentRecord)
+        cond = _owner_cond(request, CommentWatch.owner_id)  # 子记录按 watch 归属
+        if cond is not None:
+            owned_watch_ids = s.exec(select(CommentWatch.id).where(cond)).all()
+            stmt = stmt.where(CommentRecord.watch_id.in_([w for w in owned_watch_ids]))
         if platform is not None:
             stmt = stmt.where(CommentRecord.platform == platform)
         if watch_id is not None:
+            _owned(request, s, CommentWatch, watch_id, "评论监控不存在")
             stmt = stmt.where(CommentRecord.watch_id == watch_id)
         if aweme_id is not None:
             stmt = stmt.where(CommentRecord.aweme_id == aweme_id)
@@ -6374,16 +6416,19 @@ def _danmaku_dict(row: DanmakuRecord) -> dict:
 
 
 @app.get("/api/danmaku-watches")
-async def list_danmaku_watches(platform: str | None = None):
+async def list_danmaku_watches(request: Request, platform: str | None = None):
     with get_session() as s:
-        q = select(DanmakuWatch).order_by(DanmakuWatch.id.desc())
+        q = select(DanmakuWatch)
+        cond = _owner_cond(request, DanmakuWatch.owner_id)
+        if cond is not None:
+            q = q.where(cond).order_by(DanmakuWatch.id.desc())
         if platform:
             q = q.where(DanmakuWatch.platform == platform)
         return [_danmaku_watch_dict(w) for w in s.exec(q).all()]
 
 
 @app.post("/api/danmaku-watches")
-async def add_danmaku_watch(body: DanmakuWatchIn):
+async def add_danmaku_watch(request: Request, body: DanmakuWatchIn):
     if body.platform != "douyin":
         raise HTTPException(400, "短视频弹幕监控当前仅支持抖音")
     if body.interval_seconds != 0 and not 60 <= body.interval_seconds <= 86400:
@@ -6466,6 +6511,7 @@ async def add_danmaku_watch(body: DanmakuWatchIn):
             alias=_meta_text(body.alias, 60),
             group_name=_meta_text(body.group_name, 40),
             tags=_dump_meta_tags(_meta_tags(body.tags)))
+        _stamp_owner(request, watch)
         s.add(watch)
         s.commit()
         s.refresh(watch)

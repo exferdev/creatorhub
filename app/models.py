@@ -228,6 +228,7 @@ class ContentRecord(SQLModel, table=True):
 class CommentWatch(SQLModel, table=True):
     """独立的评论监控对象(不依赖作品监控)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs
     kind: str = "video"            # video(单条视频/笔记) | user(账号/创作者近期作品)
     aweme_id: str = ""             # video 模式:被盯的视频 / 笔记 note_id
@@ -378,6 +379,7 @@ class KeywordCollectionComment(SQLModel, table=True):
 class DanmakuWatch(SQLModel, table=True):
     """短视频弹幕监控对象。弹幕与评论字段不同，单独建模。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)
     kind: str = "video"             # video(单条视频) | user(账号近期作品)
     aweme_id: str = Field(default="", index=True)

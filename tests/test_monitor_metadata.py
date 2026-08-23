@@ -5,6 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
+def _req():
+    """直调端点函数的假 request(测试旁路环境下视为管理员)。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id=1, is_superuser=True, role="admin")))
+
+
 import app.db as db
 from app.main import (
     _load_meta_tags,
@@ -100,10 +107,10 @@ class MonitorMetadataTests(unittest.TestCase):
             ))
             session.commit()
 
-        contents = asyncio.run(all_contents(
+        contents = asyncio.run(all_contents(_req(),
             platform="douyin", group_name="brand", tag="hot",
         ))
-        comments = asyncio.run(list_comments(
+        comments = asyncio.run(list_comments(_req(),
             platform="douyin", group_name="priority", tag="reply",
         ))
         self.assertEqual([row["aweme_id"] for row in contents], ["a1"])
@@ -136,11 +143,11 @@ class MonitorMetadataTests(unittest.TestCase):
                 ))
             session.commit()
 
-        contents = asyncio.run(all_contents(
+        contents = asyncio.run(all_contents(_req(),
             platform="douyin", q="needle", media_type="video",
             sort="likes_desc", page=2, page_size=1, paginate=True,
         ))
-        comments = asyncio.run(list_comments(
+        comments = asyncio.run(list_comments(_req(),
             platform="douyin", q="needle", reply_type="top",
             min_like_count=1, sort="oldest", page=1, page_size=1,
             paginate=True,
