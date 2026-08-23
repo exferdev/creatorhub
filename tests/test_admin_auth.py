@@ -448,6 +448,43 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(self.client.get(
             "/api/admin/audit-requests", headers=self.h_op).status_code, 403)
 
+    def test_notifications_per_user(self):
+        from app.models import NotificationChannel
+        # admin 建一个; op 建一个; 新用户不可见/不可操作
+        r = self.client.post("/api/notifications", headers=self.h_admin,
+                             json={"name": "boss-n", "type": "bark",
+                                   "config": {"key": "1"}})
+        cid_boss = r.json()["id"]
+        r = self.client.post("/api/notifications", headers=self.h_op,
+                             json={"name": "op-n", "type": "dingtalk",
+                                   "config": {}})
+        self.assertEqual(r.status_code, 200, r.text)
+        cid_op = r.json()["id"]
+        got_op = [c["id"] for c in self.client.get(
+            "/api/notifications", headers=self.h_op).json()]
+        self.assertIn(cid_op, got_op)
+        self.assertNotIn(cid_boss, got_op)  # 看不到 admin 的
+        # 新建 viewer 用户 → 空列表 + 越权 404
+        r = self.client.post("/api/admin/users", headers=self.h_admin, json={
+            "username": "viewx", "password": "viewx-pass", "role": "viewer"})
+        self.assertEqual(r.status_code, 201, r.text)
+        hx = self._login("viewx", "viewx-pass")
+        got_x = [c["id"] for c in self.client.get(
+            "/api/notifications", headers=hx).json()]
+        self.assertEqual(got_x, [])
+        r = self.client.put(f"/api/notifications/{cid_op}", headers=hx,
+                            json={"enabled": False})
+        self.assertEqual(r.status_code, 404)
+        r = self.client.delete(f"/api/notifications/{cid_op}", headers=hx)
+        self.assertEqual(r.status_code, 404)
+        # op 可改自己的, admin 全可见
+        r = self.client.put(f"/api/notifications/{cid_op}", headers=self.h_op,
+                            json={"enabled": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        got_admin = [c["id"] for c in self.client.get(
+            "/api/notifications", headers=self.h_admin).json()]
+        self.assertEqual(set(got_admin), {cid_boss, cid_op})
+
     def test_risk_center_admin_only(self):
         # 风控中心所有端点(含只读)必须是 admin; operator 一律 403
         for path in ("/api/risk-control/config",
@@ -459,6 +496,63 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/api/risk-control/config",
                             headers=self.h_admin).status_code, 200)
+
+
+class LoginRateLimitTests(unittest.TestCase):
+    """登录限流: 每用户名滑动窗口, 超限 429, 成功清零。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._prev_bypass = os.environ.get("CREATORHUB_TEST_AUTH_BYPASS")
+        os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        init_db(str(Path(self.tmp.name) / "ratelimit.db"))
+        with get_session() as s:
+            s.add(AdminUser(username="rl", email="rl@i", role="viewer",
+                            hashed_password=hash_password("rl-pass-123")))
+            s.commit()
+        import app.auth_setup as au
+        self._limit = au._LOGIN_LIMIT
+        au._LOGIN_LIMIT = 3          # 压小窗口便于测试
+        au._login_windows.clear()
+        self.addCleanup(setattr, au, "_LOGIN_LIMIT", self._limit)
+        self.client = TestClient(main_app())
+
+    def tearDown(self):
+        if self._prev_bypass is None:
+            os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        else:
+            os.environ["CREATORHUB_TEST_AUTH_BYPASS"] = self._prev_bypass
+        import app.db as dbm
+        if dbm._engine is not None:
+            try:
+                dbm._engine.dispose()
+            except Exception:
+                pass
+            dbm._engine = None
+
+    def test_login_throttled_after_limit_then_cleared_on_success(self):
+        # 前 3 次失败: 400 (密码错), 第 4 次: 429
+        codes = []
+        for _ in range(4):
+            r = self.client.post("/api/admin/auth/login",
+                                 data={"username": "rl", "password": "wrong-pass"})
+            codes.append(r.status_code)
+        self.assertEqual(codes[:3], [400, 400, 400], codes)
+        self.assertEqual(codes[3], 429, codes)
+        # 换用户名不受影响
+        r = self.client.post("/api/admin/auth/login",
+                             data={"username": "rl2", "password": "x" * 9})
+        self.assertIn(r.status_code, (400, 401))
+        # 正确密码登录成功并清零窗口 → 后续失败重新计窗(不立即429)
+        import app.auth_setup as au
+        au._login_windows.clear()
+        r = self.client.post("/api/admin/auth/login",
+                             data={"username": "rl", "password": "rl-pass-123"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post("/api/admin/auth/login",
+                             data={"username": "rl", "password": "bad"})
+        self.assertEqual(r.status_code, 400, r.text)
 
 
 if __name__ == "__main__":

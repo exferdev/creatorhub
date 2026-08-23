@@ -40,6 +40,29 @@ from .models import AdminAccessToken, AdminUser
 log = logging.getLogger("creatorhub.auth")
 ID = int
 
+# ── 登录限流(防爆破): 每用户名滑动窗口; 失败/尝试计数, 成功清零 ──
+# 说明: SlowAPI 0.1.x 只有端点装饰器(登录路由属 fastapi-users, 无法挂), 故在
+# UserManager.authenticate 内做轻量窗口(标准库, 无新依赖)。
+_LOGIN_LIMIT = 10              # 窗口内最大尝试次数
+_LOGIN_WINDOW_SECONDS = 60.0   # 窗口秒数
+_login_windows: dict = {}      # username -> deque[timestamp]
+
+
+def _login_window_gate(username: str):
+    """滑动窗口检查; 超限抛 HTTPException 429。附加尝试时间戳。"""
+    import time as _t
+    now = _t.time()
+    win = _login_windows.setdefault(username, [])
+    while win and now - win[0] > _LOGIN_WINDOW_SECONDS:
+        win.pop(0)
+    if len(win) >= _LOGIN_LIMIT:
+        raise HTTPException(429, "登录尝试过于频繁, 请稍后再试")
+    win.append(now)
+
+
+def _login_window_clear(username: str):
+    _login_windows.pop(username, None)
+
 # ── 白名单: 无需登录的路径 ──
 AUTH_OPEN_EXACT = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
 AUTH_OPEN_PREFIXES = ("/api/admin/auth/",)
@@ -157,13 +180,21 @@ async def get_user_manager(
 
 
 class AdminUserManager(BaseUserManager[AdminUser, ID]):
-    """校验用 UserManager: 默认密码强度足够本地场景, 登录后记录 last_login_at。"""
+    """校验用 UserManager: 登录限流(每用户名滑动窗口) + 登录后记录 last_login_at。"""
 
     def parse_id(self, value: Any) -> ID:
         try:
             return int(value)
         except (TypeError, ValueError):
             raise InvalidID() from None
+
+    async def authenticate(self, credentials) -> Optional[AdminUser]:
+        name = str(getattr(credentials, "username", "") or "")
+        _login_window_gate(name)
+        user = await super().authenticate(credentials)
+        if user is not None:
+            _login_window_clear(name)  # 仅成功清零; 失败(None/异常)保留尝试计数
+        return user  # None 由路由映射为 LOGIN_BAD_CREDENTIALS(400)
 
     async def on_after_login(self, user: AdminUser, request: Optional[Request] = None,
                              response=None):

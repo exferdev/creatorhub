@@ -7718,23 +7718,29 @@ def _channel_dict(c: NotificationChannel) -> dict:
 
 
 @app.get("/api/notifications")
-async def list_channels():
+async def list_channels(request: Request):
     with get_session() as s:
-        return [_channel_dict(c) for c in s.exec(select(NotificationChannel)).all()]
+        q = select(NotificationChannel)
+        cond = _owner_cond(request, NotificationChannel.owner_id)
+        if cond is not None:
+            q = q.where(cond)
+        return [_channel_dict(c) for c in s.exec(q).all()]
 
 
 @app.post("/api/notifications")
-async def add_channel(body: ChannelIn):
+async def add_channel(request: Request, body: ChannelIn):
     if body.type not in CHANNEL_TYPES:
         raise HTTPException(400, f"渠道类型须为 {CHANNEL_TYPES}")
     with get_session() as s:
         c = NotificationChannel(name=body.name or body.type, type=body.type,
                                 config=json.dumps(body.config), enabled=body.enabled)
+        _stamp_owner(request, c)
         s.add(c); s.commit(); s.refresh(c)
         return _channel_dict(c)
 
 
 @app.put("/api/notifications/{cid}")
+@require_owned(NotificationChannel, "cid", "通知渠道不存在")
 async def update_channel(cid: int, body: ChannelUpdate):
     with get_session() as s:
         c = s.get(NotificationChannel, cid)
@@ -7751,6 +7757,7 @@ async def update_channel(cid: int, body: ChannelUpdate):
 
 
 @app.delete("/api/notifications/{cid}")
+@require_owned(NotificationChannel, "cid", "通知渠道不存在")
 async def del_channel(cid: int):
     with get_session() as s:
         c = s.get(NotificationChannel, cid)
@@ -7760,6 +7767,7 @@ async def del_channel(cid: int):
 
 
 @app.post("/api/notifications/{cid}/test")
+@require_owned(NotificationChannel, "cid", "通知渠道不存在")
 async def test_channel(cid: int):
     with get_session() as s:
         c = s.get(NotificationChannel, cid)

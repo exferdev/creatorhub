@@ -21,4 +21,4 @@ imageio-ffmpeg>=0.5.1    # 内置 ffmpeg 兜底：仅音频提取与分离音视
 # ── 后台管理鉴权(多用户/用户管理/请求审计)──
 fastapi-users[sqlalchemy]>=15.0      # 登录/令牌/密码哈希(argon2), DatabaseStrategy 落库可吊销
 argon2-cffi>=23.1                    # OWASP 推荐密码哈希(纯 wheel)
-slowapi>=0.1.9                       # 登录接口限流(防爆破)
+# 登录限流为内置滑动窗口(app/auth_setup.py), 每用户名 10 次/分, 成功清零

@@ -69,7 +69,7 @@ def build(args) -> None:
     for pkg in ("patchright", "shardx", "curl_cffi", "xhshow",
                 "opencv", "cv2", "sqlmodel", "httpx", "imageio_ffmpeg",
                 "yt_dlp", "bottle", "webview", "app",
-                "fastapi_users", "pwdlib", "argon2", "slowapi", "limits"):
+                "fastapi_users", "pwdlib", "argon2"):
         cmd.append(f"--collect-all={pkg}")
     # app 数据资源
     for d in _collect_app_data():
