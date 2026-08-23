@@ -1,0 +1,10 @@
+# CreatorHub Console 控制面(独立管理后台)依赖
+# 启动: python -m uvicorn console.main:app --host 127.0.0.1 --port 8100
+# 数据: console/data/console.db (独立于 CreatorHub 实例)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlmodel==0.0.22
+pyyaml==6.0.3
+httpx>=0.28
+fastapi-users[sqlalchemy]>=15.0
+argon2-cffi>=23.1

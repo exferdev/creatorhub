@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-cn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CreatorHub Console · 控制面</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --line:#2c3240; --fg:#e6e6e6; --dim:#8a93a6;
+          --ac:#4f8cff; --ok:#34c67a; --warn:#e5a93d; --err:#e5534b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family:'Segoe UI',system-ui,sans-serif; }
+  header { padding:14px 22px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:14px; }
+  header h1 { font-size:16px; margin:0; }
+  .chip { margin-left:auto; display:flex; gap:10px; align-items:center;
+          font-size:12px; color:var(--dim); }
+  .chip button { background:none; border:1px solid var(--line); color:var(--fg);
+                 border-radius:8px; padding:4px 10px; cursor:pointer; }
+  main { max-width:1100px; margin:0 auto; padding:18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:14px; margin:0 0 12px; }
+  .card h2 .sub { color:var(--dim); font-weight:400; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; }
+  .num { font-variant-numeric:tabular-nums; }
+  input, select, textarea { background:rgba(255,255,255,.05); color:var(--fg);
+    border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13px;
+    width:100%; }
+  button.primary { background:var(--ac); color:#fff; border:none; border-radius:8px;
+    padding:8px 14px; font-size:13px; cursor:pointer; }
+  button.ghost { background:none; color:var(--fg); border:1px solid var(--line);
+    border-radius:8px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  button.danger { background:none; color:var(--err); border:1px solid var(--err);
+    border-radius:8px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  .row { display:flex; gap:10px; align-items:end; margin-bottom:12px; flex-wrap:wrap; }
+  .row .f { flex:1; min-width:150px; }
+  .row label { display:block; font-size:11px; color:var(--dim); margin-bottom:4px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+          border:1px solid var(--line); }
+  .pill.ok { color:var(--ok); border-color:var(--ok); }
+  .pill.bad { color:var(--err); border-color:var(--err); }
+  .pill.warn { color:var(--warn); border-color:var(--warn); }
+  .inst-item { cursor:pointer; }
+  .inst-item.active { background:rgba(79,140,255,.08); }
+  code { background:rgba(255,255,255,.06); padding:1px 5px; border-radius:5px; font-size:12px; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button { background:none; border:1px solid var(--line); color:var(--dim);
+    border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .tabs button.active { color:var(--ac); border-color:var(--ac); }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+    background:#232838; border:1px solid var(--line); padding:10px 18px; border-radius:10px;
+    font-size:13px; z-index:50; }
+  .toast.err { border-color:var(--err); }
+  .toast.ok { border-color:var(--ok); }
+  /* 登录层 */
+  #login-overlay { position:fixed; inset:0; background:rgba(10,11,15,.94);
+    display:none; align-items:center; justify-content:center; z-index:100; }
+  #login-overlay.on { display:flex; }
+  .login-card { width:320px; background:var(--card); border:1px solid var(--line);
+    border-radius:14px; padding:26px; }
+  .login-card h2 { margin:0 0 4px; text-align:center; }
+  .login-card p { color:var(--dim); font-size:12px; text-align:center; margin:0 0 16px; }
+  .login-card .f { margin-bottom:12px; }
+  .login-card .f span { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  .login-card button { width:100%; }
+  .login-msg { min-height:16px; color:var(--err); font-size:12px; text-align:center; margin:4px 0; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CreatorHub Console</h1>
+  <span class="chip" id="user-chip" hidden></span>
+</header>
+
+<div id="login-overlay">
+  <form class="login-card" onsubmit="doLogin(event)">
+    <h2>CreatorHub Console</h2>
+    <p>控制面 · 远程管理 CreatorHub 实例</p>
+    <div class="f"><span>用户名</span><input id="login-user" autocomplete="username"></div>
+    <div class="f"><span>密码</span><input id="login-pass" type="password" autocomplete="current-password"></div>
+    <p class="login-msg" id="login-msg"></p>
+    <button class="primary" type="submit">登 录</button>
+  </form>
+</div>
+
+<main id="main" class="hidden">
+  <div class="card">
+    <h2>实例管理 <span class="sub">注册的 CreatorHub 实例(凭据仅存令牌)</span></h2>
+    <div class="row">
+      <div class="f"><label>名称</label><input id="inst-name" placeholder="如：本机实例"></div>
+      <div class="f"><label>地址</label><input id="inst-url" placeholder="http://127.0.0.1:8000"></div>
+      <div class="f"><label>实例 admin 用户名</label><input id="inst-user" value="admin"></div>
+      <div class="f"><label>实例 admin 密码(不落盘)</label><input id="inst-pass" type="password"></div>
+      <button class="primary" onclick="addInstance()">注册实例</button>
+    </div>
+    <table>
+      <thead><tr><th>名称</th><th>地址</th><th>在线</th><th>令牌</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="inst-table"></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="detail-card" hidden>
+    <h2 id="detail-title">—</h2>
+    <div class="tabs">
+      <button data-vi="status" class="active" onclick="vt('status')">状态</button>
+      <button data-vi="users" onclick="vt('users')">用户</button>
+      <button data-vi="risk" onclick="vt('risk')">风控</button>
+      <button data-vi="areq" onclick="vt('areq')">请求审计</button>
+      <button data-vi="aop" onclick="vt('aop')">操作审计</button>
+    </div>
+    <div id="vi-status">
+      <table id="status-table"><tbody></tbody></table>
+    </div>
+    <div id="vi-users" class="hidden">
+      <div class="row" style="margin-top:10px">
+        <div class="f"><input id="ru-name" placeholder="新用户名"></div>
+        <div class="f"><input id="ru-pass" type="password" placeholder="初始密码(≥8)"></div>
+        <div class="f"><select id="ru-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></div>
+        <button class="primary" onclick="remoteCreateUser()">远端建号</button>
+      </div>
+      <table id="users-table"><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div id="vi-risk" class="hidden">
+      <div class="row" style="margin-top:10px">
+        <textarea id="risk-json" rows="10" style="font-family:monospace;font-size:12px"></textarea>
+      </div>
+      <button class="primary" onclick="remotePutRisk()">应用风控配置</button>
+    </div>
+    <div id="vi-areq" class="hidden"><table id="areq-table"><thead><tr><th>时间</th><th>用户</th><th>方法</th><th>路径</th><th>状态</th></tr></thead><tbody></tbody></table></div>
+    <div id="vi-aop" class="hidden"><table id="aop-table"><thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>详情</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</main>
+
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
