@@ -26,6 +26,12 @@ from app.platforms.xhs.publish import creator_check, creator_profile
 from app.risk import OperationKind
 
 
+def _req():
+    """直调端点函数的假 request(测试旁路环境下视为管理员)。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(user=None))
+
+
 class _Identity:
     timezone_id = "Asia/Shanghai"
 
@@ -159,7 +165,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_xhs_notes", fetch_notes), \
                 patch("app.browser.fetch_creator_published", fetch_creator):
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(caught.exception.status_code, 400)
         fetch_creator.assert_not_awaited()
@@ -174,7 +180,7 @@ class RiskApiGateTests(unittest.TestCase):
             client_cls.return_value.self_info = AsyncMock(return_value={})
             api_cls.return_value.my_info.side_effect = error
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(caught.exception.status_code, 400)
         fetch_notes.assert_not_called()
@@ -195,7 +201,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_creator_published") as fetch_creator:
             client_cls.return_value.self_info = AsyncMock(return_value={})
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertIn(caught.exception.status_code, (400, 500))
         fetch_notes.assert_not_called()
@@ -246,7 +252,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_creator_published") as fetch_creator:
             account_uid.return_value = ""
             fetch_creator.return_value = ([], "")
-            result = asyncio.run(main.list_published_notes(self.account_id))
+            result = asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(result["notes"], [])
         self.assertEqual(result["total"], 0)
@@ -301,7 +307,7 @@ class RiskApiGateTests(unittest.TestCase):
 
         with patch("app.main._xhs_account_uid", no_public_uid), \
                 patch("app.browser.fetch_creator_published", creator_fallback):
-            result = asyncio.run(main.list_published_notes(self.account_id))
+            result = asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(result, {
             "notes": [{
@@ -688,7 +694,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_creator_published") as fetch_creator:
             client_cls.return_value.self_info = AsyncMock(side_effect=error)
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(caught.exception.status_code, 400)
         creator_profile.assert_not_called()
@@ -729,7 +735,7 @@ class RiskApiGateTests(unittest.TestCase):
         with patch("app.main._xhs_account_uid", account_uid), \
                 patch("app.browser.fetch_xhs_notes", fetch_notes), \
                 patch("app.browser.fetch_creator_published", fetch_creator):
-            result = asyncio.run(main.list_published_notes(self.account_id))
+            result = asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(result["notes"][0]["note_id"], "note-1")
         self.assertEqual(result["total"], 1)
@@ -744,7 +750,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_creator_published", AsyncMock(
                     return_value=([], "logged_out:创作平台未登录"))):
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(caught.exception.status_code, 400)
         self.assertEqual(
@@ -756,7 +762,7 @@ class RiskApiGateTests(unittest.TestCase):
             side_effect=RuntimeError("identity fixture failure"))
         try:
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
         finally:
             self.browser.identity_for = original_identity_for
 
@@ -774,7 +780,7 @@ class RiskApiGateTests(unittest.TestCase):
                 patch("app.browser.fetch_creator_published", AsyncMock(
                     side_effect=RuntimeError("SECRET_PUBLISHED_MARKER"))):
             with self.assertRaises(HTTPException) as caught:
-                asyncio.run(main.list_published_notes(self.account_id))
+                asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(caught.exception.status_code, 500)
         self.assertEqual(caught.exception.detail, "读取已发布作品失败")
@@ -789,7 +795,7 @@ class RiskApiGateTests(unittest.TestCase):
         with patch("app.main._xhs_account_uid", no_uid), \
                 patch("app.browser.fetch_creator_published", AsyncMock(
                     return_value=([], "creator endpoint unavailable"))):
-            result = asyncio.run(main.list_published_notes(self.account_id))
+            result = asyncio.run(main.list_published_notes(_req(), self.account_id))
 
         self.assertEqual(result, {
             "notes": [],

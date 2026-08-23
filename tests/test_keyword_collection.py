@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import tempfile
 import unittest
@@ -22,6 +22,13 @@ from app.browser.fetcher import (
     extract_search_awemes,
     fetch_douyin_search,
 )
+
+
+def _req():
+    """直调端点函数的假 request(测试旁路环境下视为管理员)。"""
+    return SimpleNamespace(state=SimpleNamespace(user=None))
+
+
 from app.config import Config
 from app.engine.collection import KeywordCollector
 from app.main import (
@@ -436,7 +443,7 @@ class KeywordCollectionEditTests(unittest.TestCase):
 
     def test_xhs_collection_creation_is_deferred(self):
         with self.assertRaises(HTTPException) as caught:
-            asyncio.run(create_keyword_collection(self._body(platform="xhs")))
+            asyncio.run(create_keyword_collection(_req(), self._body(platform="xhs")))
         self.assertEqual(caught.exception.status_code, 400)
         self.assertIn("仅支持抖音", caught.exception.detail)
 

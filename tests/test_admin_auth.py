@@ -21,7 +21,8 @@ from app.auth_setup import (
 )
 from app.config import load_config
 from app.db import get_session, init_db
-from app.models import AdminAccessToken, AdminUser
+from app.models import AdminAccessToken, AdminUser, DouyinAccount, MonitorTarget
+from fastapi.testclient import TestClient
 
 
 class AuthUnitTests(unittest.TestCase):
@@ -207,6 +208,140 @@ class AuthUnitTests(unittest.TestCase):
         r = client.post("/api/admin/auth/login",
                         data={"username": "cp", "password": "new-pass-2"})
         self.assertEqual(r.status_code, 200, r.text)
+
+
+class OwnerIsolationTests(unittest.TestCase):
+    """P0.1 多租户隔离: 列表过滤 / 详情 404 / admin 全可见 / NULL 归管理员 / 创建打 owner。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._prev_bypass = os.environ.get("CREATORHUB_TEST_AUTH_BYPASS")
+        os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        init_db(str(Path(self.tmp.name) / "iso.db"))
+        self.u1, self.u2, self.admin = self._mk_users()
+        self.client = TestClient(main_app())
+        self.tok1 = self._login("u1", "pass-1234")
+        self.tok2 = self._login("u2", "pass-1234")
+        self.tokadmin = self._login("admin", "pass-1234")
+        self.a1, self.a2, self.a0 = self._mk_accounts()
+        self.m1, self.m2, self.m0 = self._mk_monitors()
+
+    def tearDown(self):
+        if self._prev_bypass is None:
+            os.environ.pop("CREATORHUB_TEST_AUTH_BYPASS", None)
+        else:
+            os.environ["CREATORHUB_TEST_AUTH_BYPASS"] = self._prev_bypass
+        import app.db as dbm
+        if dbm._engine is not None:
+            try:
+                dbm._engine.dispose()
+            except Exception:
+                pass
+            dbm._engine = None
+
+    def _mk_users(self):
+        with get_session() as s:
+            u1 = AdminUser(username="u1", email="u1@i", role="operator",
+                           hashed_password=hash_password("pass-1234"))
+            u2 = AdminUser(username="u2", email="u2@i", role="operator",
+                           hashed_password=hash_password("pass-1234"))
+            ad = AdminUser(username="admin", email="a@i", role="admin", is_superuser=True,
+                           hashed_password=hash_password("pass-1234"))
+            s.add_all([u1, u2, ad]); s.commit()
+            for u in (u1, u2, ad): s.refresh(u)
+            return u1, u2, ad
+
+    def _login(self, name, pw):
+        r = self.client.post("/api/admin/auth/login",
+                             data={"username": name, "password": pw})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["access_token"]
+
+    def _h(self, token):
+        return {"Authorization": f"Bearer {token}"}
+
+    def _mk_accounts(self):
+        with get_session() as s:
+            a1 = DouyinAccount(nickname="A1", platform="douyin", status="active", owner_id=self.u1.id)
+            a2 = DouyinAccount(nickname="A2", platform="douyin", status="active", owner_id=self.u2.id)
+            a0 = DouyinAccount(nickname="A0", platform="douyin", status="active", owner_id=None)
+            s.add_all([a1, a2, a0]); s.commit()
+            for a in (a1, a2, a0): s.refresh(a)
+            return a1, a2, a0
+
+    def _mk_monitors(self):
+        with get_session() as s:
+            m1 = MonitorTarget(platform="douyin", target_kind="creator", sec_uid="s1",
+                               nickname="M1", account_id=self.a1.id, owner_id=self.u1.id)
+            m2 = MonitorTarget(platform="douyin", target_kind="creator", sec_uid="s2",
+                               nickname="M2", account_id=self.a2.id, owner_id=self.u2.id)
+            m0 = MonitorTarget(platform="douyin", target_kind="creator", sec_uid="s0",
+                               nickname="M0", account_id=self.a0.id, owner_id=None)
+            s.add_all([m1, m2, m0]); s.commit()
+            for m in (m1, m2, m0): s.refresh(m)
+            return m1, m2, m0
+
+    def test_account_list_and_detail_isolation(self):
+        ids_u1 = {a["id"] for a in self.client.get(
+            "/api/accounts", headers=self._h(self.tok1)).json()}
+        self.assertEqual(ids_u1, {self.a1.id})
+        ids_u2 = {a["id"] for a in self.client.get(
+            "/api/accounts", headers=self._h(self.tok2)).json()}
+        self.assertEqual(ids_u2, {self.a2.id})
+        ids_admin = {a["id"] for a in self.client.get(
+            "/api/accounts", headers=self._h(self.tokadmin)).json()}
+        self.assertEqual(ids_admin, {self.a1.id, self.a2.id, self.a0.id})
+        # 详情/操作: 越权 404
+        r = self.client.get(f"/api/accounts/{self.a2.id}/environment",
+                            headers=self._h(self.tok1))
+        self.assertEqual(r.status_code, 404)
+        r = self.client.get(f"/api/accounts/{self.a2.id}/environment",
+                            headers=self._h(self.tokadmin))
+        self.assertIn(r.status_code, (200, 503))  # 管理员可达(可能 503 浏览器未就绪)
+        r = self.client.delete(f"/api/accounts/{self.a1.id}",
+                               headers=self._h(self.tok2))
+        self.assertEqual(r.status_code, 404)
+        # NULL 归属: 普通用户看不到, 管理员可见
+        r = self.client.get(f"/api/accounts/{self.a0.id}/environment",
+                            headers=self._h(self.tok1))
+        self.assertEqual(r.status_code, 404)
+
+    def test_monitor_isolation(self):
+        ids_u1 = {m["id"] for m in self.client.get(
+            "/api/monitors", headers=self._h(self.tok1)).json()}
+        self.assertEqual(ids_u1, {self.m1.id})
+        ids_admin = {m["id"] for m in self.client.get(
+            "/api/monitors", headers=self._h(self.tokadmin)).json()}
+        self.assertEqual(ids_admin, {self.m1.id, self.m2.id, self.m0.id})
+        r = self.client.post(f"/api/monitors/{self.m2.id}/toggle",
+                             headers=self._h(self.tok1))
+        self.assertEqual(r.status_code, 404)
+        r = self.client.post(f"/api/monitors/{self.m2.id}/toggle",
+                             headers=self._h(self.tok2))
+        self.assertEqual(r.status_code, 200)
+
+    def test_login_cookie_stamps_owner(self):
+        r = self.client.post("/api/login/cookie", headers=self._h(self.tok1),
+                             json={"platform": "douyin",
+                                   "cookie": "sessionid=abc123; x=1",
+                                   "nickname": "N1"})
+        self.assertEqual(r.status_code, 200, r.text)
+        new_id = r.json()["account_id"]
+        ids_u1 = {a["id"] for a in self.client.get(
+            "/api/accounts", headers=self._h(self.tok1)).json()}
+        self.assertIn(new_id, ids_u1)
+        ids_u2 = {a["id"] for a in self.client.get(
+            "/api/accounts", headers=self._h(self.tok2)).json()}
+        self.assertNotIn(new_id, ids_u2)
+        with get_session() as s:
+            acc = s.get(DouyinAccount, new_id)
+            self.assertEqual(acc.owner_id, self.u1.id)
+
+
+def main_app():
+    import app.main as m
+    return m.app
 
 
 if __name__ == "__main__":

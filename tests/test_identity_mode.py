@@ -16,6 +16,12 @@ from app.profiles import ensure_identity
 from app.risk import OperationKind
 
 
+def _req():
+    """直调端点函数的假 request(测试旁路环境下视为管理员)。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(user=None))
+
+
 class _ContextStub:
     def __init__(self):
         self.header_calls = []
@@ -156,7 +162,7 @@ class IdentityModeTests(unittest.TestCase):
         previous_cfg = main.cfg
         main.cfg = self.cfg
         try:
-            result = asyncio.run(main.login_cookie(main.CookieIn(
+            result = asyncio.run(main.login_cookie(_req(), main.CookieIn(
                 platform="douyin", nickname="fixture", cookie="sid=fixture")))
         finally:
             main.cfg = previous_cfg

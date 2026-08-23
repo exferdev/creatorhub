@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import secrets
 import subprocess
@@ -354,6 +355,99 @@ async def auth_guard_middleware(request: Request, call_next):
     except Exception:
         pass
     return response
+
+
+# ── 多租户所有权助手 (P0.1) ──
+# 语义: admin/超管全可见; 普通用户只见/只操作自己的数据; owner_id=NULL 的历史
+# 数据仅管理员可见; 测试旁路(env)时视为管理员。越权一律 404 防泄露存在性。
+def _req_user(request: Request | None):
+    if request is None:
+        return None  # 直调(测试)视为管理员
+    u = getattr(request.state, "user", None)
+    if u is not None:
+        return u
+    if auth_bypass_enabled():
+        return None
+    raise HTTPException(401, "未登录或令牌无效")
+
+
+def _is_admin(user) -> bool:
+    return user is None or user.is_superuser or user.role == "admin"
+
+
+def _owner_cond(request, column):
+    """返回 SQLAlchemy owner 过滤条件; 管理员/旁路/直调返回 None=不过滤。"""
+    user = _req_user(request)
+    if _is_admin(user):
+        return None
+    return column == user.id
+
+
+def _owned(request, session, model, row_id, not_found="记录不存在"):
+    """按 owner 取一行(带所有权校验, 越权=404)。"""
+    row = session.get(model, row_id)
+    if row is None:
+        raise HTTPException(404, not_found)
+    user = _req_user(request)
+    if not _is_admin(user) and getattr(row, "owner_id", None) != user.id:
+        raise HTTPException(404, not_found)
+    return row
+
+
+def _own_account(request, session, account_id):
+    return _owned(request, session, DouyinAccount, account_id, "账号不存在")
+
+
+def _own_monitor(request, session, tid):
+    return _owned(request, session, MonitorTarget, tid, "监控目标不存在")
+
+
+def _stamp_owner(request, obj):
+    """创建时写入归属用户(旁路/无用户= NULL, 归管理员可见)。"""
+    u = getattr(getattr(request, "state", None), "user", None) if request is not None else None
+    obj.owner_id = u.id if u is not None else None
+    return obj
+
+
+def require_owned(model, id_param: str, not_found: str = "记录不存在"):
+    """装饰器: 进入 handler 前校验 <id_param> 指向的行属当前用户(admin 放行)。
+
+    用法: @require_owned(PublishTask, "tid")  —— handler 内仍按原样用 session.get。
+    """
+    def deco(fn):
+        import inspect as _inspect
+        sig = _inspect.signature(fn)
+        params = list(sig.parameters.values())
+        if not any(p.name == "request" for p in params):
+            # 追加到末尾(带默认值), 避免"非默认参数跟在默认参数后"; FastAPI 按名注入
+            params.append(_inspect.Parameter(
+                "request", _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=Request, default=None))
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            sig_names = [p.name for p in sig.parameters.values()]
+            request = None
+            if "request" in kwargs:                      # FastAPI 按名注入
+                request = kwargs.pop("request")
+            elif "request" in sig_names:                 # 原函数自带 request 且按位置传
+                pos = sig_names.index("request")
+                if len(args) > pos:
+                    request = args[pos]
+            row_id = kwargs.get(id_param)
+            if row_id is None and id_param in sig_names:
+                pos = sig_names.index(id_param)
+                if len(args) > pos:
+                    row_id = args[pos]
+            if row_id is None and request is not None:
+                row_id = request.path_params.get(id_param)
+            if row_id is None:
+                raise HTTPException(400, f"缺少参数 {id_param}")
+            with get_session() as s:
+                _owned(request, s, model, int(row_id), not_found)
+            return await fn(*args, **kwargs)
+        wrapper.__signature__ = sig.replace(parameters=params)  # FastAPI 按此签名注入
+        return wrapper
+    return deco
 
 
 async def _collect_true_device_once():
@@ -780,6 +874,12 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
                             timezone_id=new_fields["timezone_id"], locale=new_fields["locale"],
                             fp_seed=new_fields["fp_seed"])
                     s.add(acc); s.commit(); s.refresh(acc); acc_id = acc.id
+                    # 归属登录发起用户(多租户); 无发起人(旁路/旧流程)则 NULL=归管理员
+                    try:
+                        acc.owner_id = login_tasks.get(task_id, {}).get("owner_id")
+                        s.add(acc); s.commit()
+                    except Exception:
+                        pass
                     # 绑定后清 fp_seed 由 profile 接管 (已有 fp_seed 的绑定场景)
                     if bind_profile is not None and bind_profile.fp_seed:
                         acc.fp_seed = ""
@@ -883,18 +983,32 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
 
 
 @app.post("/api/login/browser/start")
-async def login_browser_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_browser_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
     login_tasks[task_id] = {"status": "opening"}
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
+    login_tasks[task_id]["owner_id"] = getattr(getattr(request, "state", None) and getattr(request.state, "user", None), "id", None)
+
     asyncio.create_task(_run_login(task_id, proxy_choice=proxy, profile_id=profile_id))
     return {"task_id": task_id, "status": "opening",
             "hint": "已打开浏览器窗口,请在其中点击“登录”并用抖音 App 扫码"}
 
 
 @app.post("/api/login/creator/start")
-async def login_creator_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_creator_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """创作中心登录(用于自有账号评论模式;其登录态同样可用于公开抓取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -907,7 +1021,7 @@ async def login_creator_start(proxy: str = "auto", profile_id: int | None = None
 
 
 @app.post("/api/login/xhs/start")
-async def login_xhs_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_xhs_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """小红书扫码登录(用于监控/读取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -920,7 +1034,7 @@ async def login_xhs_start(proxy: str = "auto", profile_id: int | None = None):
 
 
 @app.post("/api/login/xhs-creator/start")
-async def login_xhs_creator_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_xhs_creator_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """小红书「创作服务平台」登录(用于发布/已发布列表)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -933,7 +1047,7 @@ async def login_xhs_creator_start(proxy: str = "auto", profile_id: int | None = 
 
 
 @app.post("/api/login/kuaishou/start")
-async def login_ks_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_ks_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """快手扫码登录(用于监控/读取)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -946,7 +1060,7 @@ async def login_ks_start(proxy: str = "auto", profile_id: int | None = None):
 
 
 @app.post("/api/login/kuaishou-creator/start")
-async def login_ks_creator_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_ks_creator_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """快手「创作者服务平台」登录(用于发布)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -959,7 +1073,7 @@ async def login_ks_creator_start(proxy: str = "auto", profile_id: int | None = N
 
 
 @app.post("/api/login/shipinhao/start")
-async def login_channels_start(proxy: str = "auto", profile_id: int | None = None):
+async def login_channels_start(request: Request, proxy: str = "auto", profile_id: int | None = None):
     """视频号扫码登录(读取/发布共用,微信扫码)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -989,7 +1103,7 @@ class CookieIn(BaseModel):
 
 
 @app.post("/api/login/cookie")
-async def login_cookie(body: CookieIn):
+async def login_cookie(request: Request, body: CookieIn):
     """Cookie 粘贴兜底登录:转成浏览器登录态。"""
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
     state = cookie_string_to_state(body.cookie, platform)
@@ -997,6 +1111,7 @@ async def login_cookie(body: CookieIn):
         acc = DouyinAccount(
             nickname=body.nickname or "Cookie账号", platform=platform,
             identity_mode="native", cookie=body.cookie.strip(), storage_state=state)
+        _stamp_owner(request, acc)
         s.add(acc); s.commit(); s.refresh(acc)
         # 分配画像(profile/UA/指纹/代理):Cookie 会在首次开持久 profile 时桥接注入
         ensure_identity(acc, cfg, session=s, assign_proxy=True)
@@ -1005,10 +1120,13 @@ async def login_cookie(body: CookieIn):
 
 
 @app.get("/api/accounts")
-async def list_accounts(platform: str | None = None):
+async def list_accounts(request: Request, platform: str | None = None):
     risk_controller = engine.risk if engine else RiskController(cfg)
     with get_session() as s:
         q = select(DouyinAccount)
+        cond = _owner_cond(request, DouyinAccount.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(DouyinAccount.platform == platform)
         accs = s.exec(q).all()
@@ -1431,6 +1549,7 @@ async def list_risk_admin_audit(limit: int = 100):
 
 
 @app.get("/api/accounts/{account_id}/environment")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def account_browser_environment(account_id: int):
     """Return redacted browser-backend diagnostics for one account."""
     if browser is None:
@@ -1459,6 +1578,7 @@ def _mask_proxy(proxy: str) -> str:
 
 
 @app.delete("/api/accounts/{account_id}")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def del_account(account_id: int):
     import shutil
     pdir = ""
@@ -1488,6 +1608,7 @@ async def del_account(account_id: int):
 
 
 @app.post("/api/accounts/{account_id}/refresh-profile")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def refresh_account_profile(account_id: int):
     with get_session() as s:
         acc = s.get(DouyinAccount, account_id)
@@ -1522,7 +1643,9 @@ async def refresh_account_profile(account_id: int):
                 "douyin_id": acc.douyin_id, "sec_uid": acc.sec_uid}
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/relogin/start")
+
 async def relogin_start(account_id: int):
     """重新登录:更新原账号的登录态(账号是创作者号则走创作中心)。"""
     if browser is None:
@@ -1542,6 +1665,7 @@ async def relogin_start(account_id: int):
 
 
 @app.post("/api/accounts/{account_id}/check-health")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def check_account_health_endpoint(account_id: int):
     """探活指定账号的创作者 cookie 有效性。"""
     from .engine.cookie_health import check_cookie_health as _chk
@@ -1641,7 +1765,9 @@ def _empty_png():
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/refresh-avatar")
+
 async def refresh_avatar(account_id: int):
     """触发重新下载头像(到本地缓存)。"""
     with get_session() as s:
@@ -1697,7 +1823,9 @@ async def list_account_works(account_id: int, limit: int = 200):
         return [_work_dict(w) for w in s.exec(q).all()]
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/works/sync")
+
 async def sync_account_works(account_id: int):
     """打开账号自己的主页,拦截抓取本账号已发布作品,落库(upsert)。"""
     if browser is None:
@@ -1864,7 +1992,9 @@ async def list_follows(account_id: int, direction: str = "following", limit: int
         return [_follow_dict(f) for f in s.exec(q).all()]
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/follows/sync")
+
 async def sync_follows(account_id: int, direction: str = "following"):
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -1942,8 +2072,9 @@ def _conv_dict(c: DmConversation) -> dict:
 
 
 @app.get("/api/dm/conversations")
-async def list_dm_conversations(account_id: int, limit: int = 200):
+async def list_dm_conversations(request: Request, account_id: int, limit: int = 200):
     with get_session() as s:
+        _own_account(request, s, account_id)
         q = (select(DmConversation).where(DmConversation.account_id == account_id)
              .order_by(DmConversation.last_time.desc()).limit(limit))
         return [_conv_dict(c) for c in s.exec(q).all()]
@@ -1969,7 +2100,9 @@ async def list_dm_messages(account_id: int, conv_id: str, limit: int = 200):
                 for m in s.exec(q).all()]
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/dm/sync")
+
 async def sync_dm(account_id: int):
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -2073,6 +2206,7 @@ async def dm_stream(account_id: int):
 
 
 @app.post("/api/accounts/{account_id}/dm/conversations/{conv_id:path}/mark-read")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def mark_dm_read(account_id: int, conv_id: str):
     """标记会话已读:清本地未读计数(红点)。"""
     with get_session() as s:
@@ -2086,6 +2220,7 @@ async def mark_dm_read(account_id: int, conv_id: str):
 
 
 @app.post("/api/accounts/{account_id}/dm/conversations/{conv_id:path}/fetch-history")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def fetch_dm_conversation_history(account_id: int, conv_id: str,
                                         cursor: int = 0, debug: bool = False):
     """无头抓单个会话历史消息(imapi get_by_conversation,纯 cookie),落库 DmMessage。"""
@@ -2295,7 +2430,9 @@ async def dm_protocol_messages(account_id: int, conv_id: str, cursor: int = 0,
     return {"messages": msgs, "has_more": has_more, "next_cursor": next_cursor}
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/dm/protocol/send")
+
 async def dm_protocol_send(account_id: int, body: SendDmIn):
     """协议模式:发送私信。HTTP+guard headers ECDH签名投递。"""
     client = await _get_im_client(account_id)
@@ -2330,7 +2467,9 @@ async def dm_protocol_send(account_id: int, body: SendDmIn):
     return result
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/dm/protocol/ws")
+
 async def dm_protocol_ws_start(account_id: int):
     """启动协议 WebSocket 实时接收。先初始化获取 UID,再连接 WS。"""
     from app.platforms.douyin.im_protocol import DouyinIMClient
@@ -2429,9 +2568,12 @@ async def _exec_action(task_id: int) -> tuple[bool, str]:
 
 
 @app.get("/api/account-actions")
-async def list_account_actions(account_id: int | None = None, limit: int = 100):
+async def list_account_actions(request: Request, account_id: int | None = None, limit: int = 100):
     with get_session() as s:
         q = select(AccountActionTask)
+        cond = _owner_cond(request, AccountActionTask.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if account_id:
             q = q.where(AccountActionTask.account_id == account_id)
         q = q.order_by(AccountActionTask.id.desc()).limit(limit)
@@ -2439,7 +2581,7 @@ async def list_account_actions(account_id: int | None = None, limit: int = 100):
 
 
 @app.post("/api/account-actions")
-async def create_account_action(body: ActionIn):
+async def create_account_action(request: Request, body: ActionIn):
     if body.action not in ("follow", "unfollow", "send_dm"):
         raise HTTPException(400, "action 仅支持 follow | unfollow | send_dm")
     if body.action == "send_dm" and not body.content.strip():
@@ -2455,6 +2597,7 @@ async def create_account_action(body: ActionIn):
             target_uid=body.target_uid, target_sec_uid=body.target_sec_uid,
             target_nick=body.target_nick, conv_id=body.conv_id,
             content=body.content.strip(), status="pending")
+        _stamp_owner(request, t)
         s.add(t); s.commit(); s.refresh(t)
         task_id = t.id
     if body.run_now:
@@ -2466,6 +2609,7 @@ async def create_account_action(body: ActionIn):
 
 
 @app.post("/api/account-actions/{task_id}/run-now")
+@require_owned(AccountActionTask, "task_id", "任务不存在")
 async def run_account_action(task_id: int):
     ok, detail = await _exec_action(task_id)
     if not ok:
@@ -2474,6 +2618,7 @@ async def run_account_action(task_id: int):
 
 
 @app.post("/api/account-actions/{task_id}/cancel")
+@require_owned(AccountActionTask, "task_id", "任务不存在")
 async def cancel_account_action(task_id: int):
     with get_session() as s:
         t = s.get(AccountActionTask, task_id)
@@ -2502,7 +2647,9 @@ def _platform_url_allowed(platform: str, value: str) -> bool:
     )
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/open-browser")
+
 async def open_account_browser(account_id: int, url: str = ""):
     """用该账号登录态弹出一个真实浏览器窗口。默认停在平台首页;传 url 则停在该地址
     (仅允许本平台域名,用于「查看」视频号作品/管理页等需登录态才能打开的页面)。
@@ -2644,6 +2791,7 @@ class ProxyIn(BaseModel):
 
 
 @app.put("/api/accounts/{account_id}/proxy")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def set_account_proxy(account_id: int, body: ProxyIn):
     """手动设置/清空账号专属代理。改后会关掉该账号常驻 context,下次用新代理重开。"""
     from .browser.manager import _parse_proxy, normalize_proxy
@@ -2667,6 +2815,7 @@ async def set_account_proxy(account_id: int, body: ProxyIn):
 
 
 @app.post("/api/accounts/{account_id}/clear-write-pause")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def clear_account_write_pause(account_id: int, body: RiskClearIn,
                                     request: Request):
     """Compatibility alias for the audited risk-center clear action."""
@@ -2674,6 +2823,7 @@ async def clear_account_write_pause(account_id: int, body: RiskClearIn,
 
 
 @app.post("/api/accounts/{account_id}/assign-proxy")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def assign_account_proxy(account_id: int):
     """从代理池(config.proxies)给该账号分配一条占用最少的代理。"""
     with get_session() as s:
@@ -2881,6 +3031,7 @@ async def assign_proxies_all():
 
 
 @app.post("/api/accounts/{account_id}/test-proxy")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def test_account_proxy(account_id: int):
     """通过该账号代理验证出口，并维护出口基线。
 
@@ -3711,7 +3862,7 @@ async def parse_share_links(body: ShareLinksIn):
 
 
 @app.post("/api/share-download")
-async def share_download(body: ShareDownloadIn):
+async def share_download(request: Request, body: ShareDownloadIn):
     """解析分享文案，并下载媒体/封面/字幕/元数据，或只读取作品信息。"""
     text = _share_input(body.share_text)
     try:
@@ -3818,10 +3969,13 @@ async def share_download(body: ShareDownloadIn):
 
 
 @app.get("/api/share-download/history")
-async def get_share_download_history(limit: int = 100, platform: str = ""):
+async def get_share_download_history(request: Request, limit: int = 100, platform: str = ""):
     limit = max(1, min(int(limit or 100), 500))
     with get_session() as s:
         query = select(ShareDownloadRecord)
+        cond = _owner_cond(request, ShareDownloadRecord.owner_id)
+        if cond is not None:
+            query = query.where(cond)
         if platform.strip():
             query = query.where(ShareDownloadRecord.platform == platform.strip())
         rows = s.exec(
@@ -3919,6 +4073,7 @@ def _require_local_action(request: Request, action: str = "reveal") -> None:
 
 
 @app.get("/api/share-download/history/{record_id}/media/{media_index}")
+@require_owned(ShareDownloadRecord, "record_id", "下载记录不存在")
 async def share_download_history_media(record_id: int, media_index: int):
     """返回链接下载历史中的本地媒体，供作品预览复用。"""
     with get_session() as s:
@@ -3937,6 +4092,7 @@ async def share_download_history_media(record_id: int, media_index: int):
 
 
 @app.get("/api/share-download/history/{record_id}/preview")
+@require_owned(ShareDownloadRecord, "record_id", "下载记录不存在")
 async def share_download_history_preview(record_id: int):
     """返回链接下载历史的本地媒体地址，供前端复用作品预览弹窗。"""
     with get_session() as s:
@@ -3974,6 +4130,7 @@ async def share_download_history_preview(record_id: int):
 
 
 @app.post("/api/share-download/history/{record_id}/reveal")
+@require_owned(ShareDownloadRecord, "record_id", "下载记录不存在")
 async def reveal_share_download_history(record_id: int, request: Request):
     """在服务所在电脑的文件管理器中打开链接下载目录或定位文件。"""
     _require_local_action(request)
@@ -3992,6 +4149,7 @@ async def reveal_share_download_history(record_id: int, request: Request):
 
 
 @app.delete("/api/share-download/history/{record_id}")
+@require_owned(ShareDownloadRecord, "record_id", "下载记录不存在")
 async def delete_share_download_history(record_id: int):
     """只删除历史行，不删除磁盘里的媒体文件。"""
     with get_session() as s:
@@ -4300,7 +4458,7 @@ def _collection_comment_dict(row: KeywordCollectionComment) -> dict:
 
 
 @app.post("/api/collections")
-async def create_keyword_collection(body: KeywordCollectionIn):
+async def create_keyword_collection(request: Request, body: KeywordCollectionIn):
     platform, keywords, quality, download_dir, options = _validated_collection_input(body)
     with get_session() as session:
         account = session.get(DouyinAccount, body.account_id)
@@ -4317,6 +4475,7 @@ async def create_keyword_collection(body: KeywordCollectionIn):
             download_media=body.download_media,
             video_quality=quality, download_dir=download_dir,
         )
+        _stamp_owner(request, job)
         session.add(job); session.commit(); session.refresh(job)
         payload = _collection_job_dict(job)
     if engine:
@@ -4325,6 +4484,7 @@ async def create_keyword_collection(body: KeywordCollectionIn):
 
 
 @app.put("/api/collections/{job_id}")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def update_keyword_collection(job_id: int, body: KeywordCollectionIn):
     """修改已结束任务的配置；历史作品/评论保留，续跑时按任务去重。"""
     platform, keywords, quality, download_dir, options = _validated_collection_input(body)
@@ -4359,10 +4519,13 @@ async def update_keyword_collection(job_id: int, body: KeywordCollectionIn):
 
 
 @app.get("/api/collections")
-async def list_keyword_collections(platform: str | None = None, limit: int = 100):
+async def list_keyword_collections(request: Request,platform: str | None = None, limit: int = 100):
     limit = max(1, min(limit, 300))
     with get_session() as session:
         stmt = select(KeywordCollectionJob)
+        cond = _owner_cond(request, KeywordCollectionJob.owner_id)
+        if cond is not None:
+            stmt = stmt.where(cond)
         if platform in {"douyin", "xhs"}:
             stmt = stmt.where(KeywordCollectionJob.platform == platform)
         rows = session.exec(
@@ -4380,6 +4543,7 @@ async def get_keyword_collection(job_id: int):
 
 
 @app.get("/api/collections/{job_id}/contents")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def list_keyword_collection_contents(job_id: int, keyword: str = "",
                                            page: int = 1, page_size: int = 20):
     page = max(1, page)
@@ -4413,6 +4577,7 @@ def _get_collection_content(session, job_id: int,
 
 
 @app.get("/api/collections/{job_id}/contents/{content_id}/media")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def keyword_collection_content_media(job_id: int, content_id: int):
     """Return local-first media URLs for the collection result preview."""
     with get_session() as session:
@@ -4460,6 +4625,7 @@ async def keyword_collection_local_media(job_id: int, content_id: int,
 
 
 @app.post("/api/collections/{job_id}/contents/{content_id}/reveal")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def reveal_keyword_collection_content(job_id: int, content_id: int,
                                             request: Request):
     """Reveal a downloaded collection file (or its gallery directory)."""
@@ -4477,6 +4643,7 @@ async def reveal_keyword_collection_content(job_id: int, content_id: int,
 
 
 @app.post("/api/collections/{job_id}/contents/{content_id}/open")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def open_keyword_collection_content(job_id: int, content_id: int,
                                           request: Request):
     """Open the downloaded media in the operating system's default application."""
@@ -4495,6 +4662,7 @@ async def open_keyword_collection_content(job_id: int, content_id: int,
 
 
 @app.get("/api/collections/{job_id}/comments")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def list_keyword_collection_comments(job_id: int, content_id: int,
                                            limit: int = 300):
     limit = max(1, min(limit, 1000))
@@ -4513,6 +4681,7 @@ async def list_keyword_collection_comments(job_id: int, content_id: int,
 
 
 @app.post("/api/collections/{job_id}/cancel")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def cancel_keyword_collection(job_id: int):
     with get_session() as session:
         job = session.get(KeywordCollectionJob, job_id)
@@ -4532,6 +4701,7 @@ async def cancel_keyword_collection(job_id: int):
 
 
 @app.post("/api/collections/{job_id}/retry")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def retry_keyword_collection(job_id: int):
     with get_session() as session:
         job = session.get(KeywordCollectionJob, job_id)
@@ -4575,6 +4745,7 @@ async def delete_keyword_collection(job_id: int):
 
 
 @app.get("/api/collections/{job_id}/export.xlsx")
+@require_owned(KeywordCollectionJob, "job_id", "采集任务不存在")
 async def export_keyword_collection(job_id: int):
     with get_session() as session:
         job = session.get(KeywordCollectionJob, job_id)
@@ -4624,7 +4795,7 @@ class TargetUpdate(BaseModel):
     tags: list[str] | None = None
 
 @app.post("/api/monitors")
-async def add_monitor(body: TargetIn):
+async def add_monitor(request: Request, body: TargetIn):
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
     sec_uid = keyword = xsec_token = ""
     kind = "creator"
@@ -4698,11 +4869,13 @@ async def add_monitor(body: TargetIn):
                           initial_backfill_count=backfill_count, video_quality=q,
                           download_enabled=body.download_enabled,
                           media_filter=body.media_filter)
+        _stamp_owner(request, t)
         s.add(t); s.commit(); s.refresh(t)
         return _target_dict(t)
 
 
 @app.put("/api/monitors/{tid}")
+@require_owned(MonitorTarget, "tid", "监控目标不存在")
 async def update_monitor(tid: int, body: TargetUpdate):
     with get_session() as s:
         t = s.get(MonitorTarget, tid)
@@ -4753,9 +4926,12 @@ async def update_monitor(tid: int, body: TargetUpdate):
 
 
 @app.get("/api/monitors")
-async def list_monitors(platform: str | None = None):
+async def list_monitors(request: Request, platform: str | None = None):
     with get_session() as s:
         q = select(MonitorTarget)
+        cond = _owner_cond(request, MonitorTarget.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(MonitorTarget.platform == platform)
         ts = s.exec(q).all()
@@ -4769,6 +4945,7 @@ async def list_monitors(platform: str | None = None):
 
 
 @app.post("/api/monitors/{tid}/toggle")
+@require_owned(MonitorTarget, "tid", "监控目标不存在")
 async def toggle_monitor(tid: int):
     with get_session() as s:
         t = s.get(MonitorTarget, tid)
@@ -4780,6 +4957,7 @@ async def toggle_monitor(tid: int):
 
 
 @app.post("/api/monitors/{tid}/run-now")
+@require_owned(MonitorTarget, "tid", "监控目标不存在")
 async def run_now(tid: int):
     if not engine:
         raise HTTPException(503, "引擎未就绪")
@@ -4796,6 +4974,7 @@ async def del_monitor(tid: int):
 
 
 @app.get("/api/monitors/{tid}/contents")
+@require_owned(MonitorTarget, "tid", "监控目标不存在")
 async def target_contents(tid: int):
     with get_session() as s:
         rows = s.exec(select(ContentRecord)
@@ -6595,9 +6774,12 @@ def _parse_when(s: str | None) -> datetime | None:
 
 
 @app.get("/api/publish")
-async def list_publish(platform: str | None = None):
+async def list_publish(request: Request, platform: str | None = None):
     with get_session() as s:
         q = select(PublishTask)
+        cond = _owner_cond(request, PublishTask.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(PublishTask.platform == platform)
         rows = s.exec(q.order_by(PublishTask.id.desc())).all()
@@ -6605,7 +6787,7 @@ async def list_publish(platform: str | None = None):
 
 
 @app.post("/api/publish")
-async def add_publish(body: PublishIn):
+async def add_publish(request: Request, body: PublishIn):
     if body.media_type not in ("images", "video"):
         raise HTTPException(400, "media_type 须为 images 或 video")
     paths = [p for p in body.media_paths if Path(p).exists()]
@@ -6633,11 +6815,13 @@ async def add_publish(body: PublishIn):
             visibility=vis, allow_save=bool(body.allow_save),
             media_json=json.dumps(paths), scheduled_at=_parse_when(body.scheduled_at),
         )
+        _stamp_owner(request, t)
         s.add(t); s.commit(); s.refresh(t)
         return _publish_dict(t)
 
 
 @app.put("/api/publish/{tid}")
+@require_owned(PublishTask, "tid", "发布任务不存在")
 async def update_publish(tid: int, body: PublishUpdate):
     with get_session() as s:
         t = s.get(PublishTask, tid)
@@ -6676,6 +6860,7 @@ async def update_publish(tid: int, body: PublishUpdate):
 
 
 @app.post("/api/publish/{tid}/run-now")
+@require_owned(PublishTask, "tid", "发布任务不存在")
 async def run_publish(tid: int):
     if not engine:
         raise HTTPException(503, "引擎未就绪")
@@ -6745,13 +6930,14 @@ def _imgs_of(n: dict) -> list:
 
 
 @app.get("/api/publish/published")
-async def list_published_notes(account_id: int):
+async def list_published_notes(request: Request, account_id: int):
     """拉取「已发布作品列表」。
     优先用「读取登录态」打开自己的 www 主页(token 对预览/评论有效);
     没有读取态时回退创作平台「笔记管理」(能显示,但视频预览/评论可能不可用)。"""
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     with get_session() as s:
+        _own_account(request, s, account_id)
         acc = s.get(DouyinAccount, account_id)
         if not acc or acc.platform != "xhs":
             raise HTTPException(400, "请选择一个已登录的小红书账号")
@@ -7191,16 +7377,19 @@ def _task_dict(t: CommentTask) -> dict:
 
 
 @app.get("/api/comment-rules")
-async def list_comment_rules(platform: str | None = None):
+async def list_comment_rules(request: Request,platform: str | None = None):
     with get_session() as s:
         q = select(CommentRule)
+        cond = _owner_cond(request, CommentRule.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(CommentRule.platform == platform)
         return [_rule_dict(r) for r in s.exec(q.order_by(CommentRule.id.desc())).all()]
 
 
 @app.post("/api/comment-rules")
-async def add_comment_rule(body: CommentRuleIn):
+async def add_comment_rule(request: Request, body: CommentRuleIn):
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
     mode = body.mode if body.mode in ("auto_reply", "auto_comment") else "auto_reply"
     templates = [t.strip() for t in body.templates if t.strip()]
@@ -7228,11 +7417,13 @@ async def add_comment_rule(body: CommentRuleIn):
             daily_cap=max(0, body.daily_cap), min_gap_seconds=max(1, body.min_gap_seconds),
             max_per_run=max(1, body.max_per_run),
             interval_seconds=max(60, body.interval_seconds), enabled=body.enabled)
+        _stamp_owner(request, r)
         s.add(r); s.commit(); s.refresh(r)
         return _rule_dict(r)
 
 
 @app.put("/api/comment-rules/{rid}")
+@require_owned(CommentRule, "rid", "评论规则不存在")
 async def update_comment_rule(rid: int, body: CommentRuleUpdate):
     with get_session() as s:
         r = s.get(CommentRule, rid)
@@ -7310,6 +7501,7 @@ async def del_comment_rule(rid: int, with_tasks: bool = True):
 
 
 @app.post("/api/comment-rules/{rid}/run-now")
+@require_owned(CommentRule, "rid", "评论规则不存在")
 async def run_comment_rule_now(rid: int):
     if not engine:
         raise HTTPException(503, "引擎未就绪")
@@ -7317,10 +7509,13 @@ async def run_comment_rule_now(rid: int):
 
 
 @app.get("/api/comment-tasks")
-async def list_comment_tasks(platform: str | None = None, rule_id: int | None = None,
+async def list_comment_tasks(request: Request,platform: str | None = None, rule_id: int | None = None,
                              status: str | None = None, limit: int = 200):
     with get_session() as s:
         q = select(CommentTask)
+        cond = _owner_cond(request, CommentTask.owner_id)
+        if cond is not None:
+            q = q.where(cond)
         if platform:
             q = q.where(CommentTask.platform == platform)
         if rule_id is not None:
@@ -7332,6 +7527,7 @@ async def list_comment_tasks(platform: str | None = None, rule_id: int | None = 
 
 
 @app.post("/api/comment-tasks/{tid}/run-now")
+@require_owned(CommentTask, "tid", "评论任务不存在")
 async def run_comment_task_now(tid: int):
     if not engine:
         raise HTTPException(503, "引擎未就绪")
@@ -7347,6 +7543,7 @@ async def run_comment_task_now(tid: int):
 
 
 @app.post("/api/comment-tasks/{tid}/cancel")
+@require_owned(CommentTask, "tid", "评论任务不存在")
 async def cancel_comment_task(tid: int):
     with get_session() as s:
         t = s.get(CommentTask, tid)
@@ -7367,6 +7564,7 @@ class TaskContentIn(BaseModel):
 
 
 @app.put("/api/comment-tasks/{tid}")
+@require_owned(CommentTask, "tid", "评论任务不存在")
 async def edit_comment_task(tid: int, body: TaskContentIn):
     """编辑草稿/待发任务的文案(草稿审核时人工微调用)。"""
     content = (body.content or "").strip()
@@ -7393,6 +7591,7 @@ def _approve_one(s, t) -> bool:
 
 
 @app.post("/api/comment-tasks/{tid}/approve")
+@require_owned(CommentTask, "tid", "评论任务不存在")
 async def approve_comment_task(tid: int):
     """通过单条草稿:draft -> pending,引擎随后按节流自动发出。"""
     with get_session() as s:
@@ -7578,14 +7777,17 @@ def _profile_dict(p: BrowserProfile) -> dict:
 
 
 @app.get("/api/browser-profiles")
-async def list_browser_profiles():
+async def list_browser_profiles(request: Request,):
     with get_session() as s:
         rows = s.exec(select(BrowserProfile).order_by(BrowserProfile.id.desc())).all()
+        cond = _owner_cond(request, BrowserProfile.owner_id)
+        if cond is not None:
+            rows = [r for r in rows if getattr(r, "owner_id", None) == request.state.user.id]
         return [_profile_dict(p) for p in rows]
 
 
 @app.post("/api/browser-profiles")
-async def create_browser_profile(body: ProfileIn):
+async def create_browser_profile(request: Request, body: ProfileIn):
     fp_seed = body.fp_seed or uuid.uuid4().hex
     fingerprint_name = body.fingerprint_name or ""
     # 未指定 GPU 时,按 fp_seed 预解析指纹,让列表直接显示将选中的 GPU 型号
@@ -7612,6 +7814,7 @@ async def create_browser_profile(body: ProfileIn):
             timezone=body.timezone, language=body.language,
             webrtc_mode=body.webrtc_mode or "auto",
             overrides=json.dumps(body.overrides or {}, ensure_ascii=False))
+        _stamp_owner(request, prof)
         s.add(prof); s.commit(); s.refresh(prof)
         return _profile_dict(prof)
 
@@ -7623,6 +7826,7 @@ async def reuse_check(fingerprint_name: str):
 
 
 @app.get("/api/browser-profiles/{profile_id}")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def get_browser_profile(profile_id: int):
     with get_session() as s:
         p = s.get(BrowserProfile, profile_id)
@@ -7671,6 +7875,7 @@ async def delete_browser_profile(profile_id: int):
 
 
 @app.post("/api/browser-profiles/{profile_id}/start")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def start_browser_profile(profile_id: int, headless: bool = False):
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
@@ -7713,6 +7918,7 @@ async def start_browser_profile(profile_id: int, headless: bool = False):
 
 
 @app.post("/api/browser-profiles/{profile_id}/stop")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def stop_browser_profile(profile_id: int):
     old = profile_browsers.pop(profile_id, None)
     if old is not None and browser is not None:
@@ -7737,7 +7943,9 @@ def _reuse_candidates(fingerprint_name: str, exclude_id: int | None = None) -> l
                 for p in rows]
 
 
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 @app.post("/api/accounts/{account_id}/create-profile")
+
 async def create_profile_from_account(account_id: int, body: ProfileIn | None = None):
     """反向生成: 从账号生成独立 profile, 含复用检测。
 
@@ -7780,6 +7988,7 @@ async def create_profile_from_account(account_id: int, body: ProfileIn | None = 
 
 
 @app.post("/api/accounts/{account_id}/bind-profile")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def bind_account_profile(account_id: int, body: BindProfileIn):
     """账号绑定已有 profile (复用路径)。写 browser_profile_id + shardx_id, 清 fp_seed。"""
     with get_session() as s:
@@ -7799,6 +8008,7 @@ async def bind_account_profile(account_id: int, body: BindProfileIn):
 
 
 @app.post("/api/accounts/{account_id}/unbind-profile")
+@require_owned(DouyinAccount, "account_id", "账号不存在")
 async def unbind_account_profile(account_id: int):
     """解绑: 清 browser_profile_id + shardx_id, 恢复 fp_seed 回退。"""
     from .profiles import seed_from_id
@@ -7814,6 +8024,7 @@ async def unbind_account_profile(account_id: int):
 
 
 @app.post("/api/browser-profiles/{profile_id}/bind-account")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def bind_profile_account(profile_id: int, account_id: int):
     """profile 侧绑定账号 (等价 bind-account-profile, 方向相反)。"""
     return await bind_account_profile(account_id, BindProfileIn(profile_id=profile_id))
@@ -7821,6 +8032,7 @@ async def bind_profile_account(profile_id: int, account_id: int):
 
 # ─────────── 独立 profile cookie 导入导出 (Playwright storage_state, 不碰 SQLite 解密) ───────────
 @app.post("/api/browser-profiles/{profile_id}/cookies/import")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def import_profile_cookies(profile_id: int, body: CookieImportIn):
     """导入 Cookie 数组到运行中的独立 profile (需先 start)。"""
     ctx = profile_browsers.get(profile_id)
@@ -7838,6 +8050,7 @@ async def import_profile_cookies(profile_id: int, body: CookieImportIn):
 
 
 @app.get("/api/browser-profiles/{profile_id}/cookies/export")
+@require_owned(BrowserProfile, "profile_id", "指纹 profile 不存在")
 async def export_profile_cookies(profile_id: int):
     """导出运行中独立 profile 的 Cookie 数组 (storage_state)。"""
     ctx = profile_browsers.get(profile_id)

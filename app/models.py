@@ -10,6 +10,7 @@ from sqlmodel import Field, SQLModel
 class DouyinAccount(SQLModel, table=True):
     """登录得到的平台账号(浏览器会话持有者)。表名沿用历史,实际承载多平台账号。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs
     nickname: str = ""
     sec_uid: str = ""              # 抖音 sec_uid / 小红书 user_id
@@ -58,6 +59,7 @@ class DouyinAccount(SQLModel, table=True):
 class MonitorTarget(SQLModel, table=True):
     """被监控的对象。抖音=用户;小红书=创作者(creator)或搜索关键词(keyword)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs
     target_kind: str = "creator"   # creator(账号/创作者) | keyword(小红书搜索词)
     keyword: str = ""              # target_kind=keyword 时的搜索词
@@ -192,6 +194,7 @@ class RiskAdminAudit(SQLModel, table=True):
 class NotificationChannel(SQLModel, table=True):
     """通知渠道。对应逆向 model.NotificationChannel。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     name: str = ""
     type: str = "bark"             # bark | dingtalk | telegram
     config: str = ""              # JSON: 各渠道所需字段
@@ -251,6 +254,7 @@ class CommentWatch(SQLModel, table=True):
 class PublishTask(SQLModel, table=True):
     """多平台发布任务(可定时、可来自跨平台作品转发)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="xhs", index=True)   # xhs | douyin | kuaishou | shipinhao
     publish_type: str = "simulation"                   # simulation(浏览器模拟) | protocol(协议直发)
     account_id: Optional[int] = None                   # 用哪个已登录账号发布
@@ -296,6 +300,7 @@ class CommentRecord(SQLModel, table=True):
 class KeywordCollectionJob(SQLModel, table=True):
     """一次性的关键词批量采集任务。与持续轮询的 MonitorTarget 分开建模。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs
     account_id: int = Field(index=True)
     keywords: str = "[]"                 # JSON 字符串数组
@@ -429,6 +434,7 @@ class CommentRule(SQLModel, table=True):
     auto_reply  = 回复「自己作品」收到的评论(内容目标较温和,但仍属于高敏感写操作)。
     auto_comment= 去「别人帖子」下评论(高风险,需节流+去重护着)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)   # douyin | xhs
     name: str = ""                       # 备注名
     mode: str = "auto_reply"             # auto_reply | auto_comment
@@ -460,6 +466,7 @@ class CommentRule(SQLModel, table=True):
 class CommentTask(SQLModel, table=True):
     """一条待发评论动作(由规则生成,或手动创建)。状态机同 PublishTask。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)   # douyin | xhs
     rule_id: Optional[int] = Field(default=None, index=True)   # 来源规则(手动=None)
     account_id: Optional[int] = None
@@ -580,6 +587,7 @@ class DmMessage(SQLModel, table=True):
 class AccountActionTask(SQLModel, table=True):
     """本账号写操作队列(取关/回关/发私信)。状态机同 CommentTask,带节流。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs | kuaishou
     account_id: int = Field(index=True)
     action: str = Field(default="follow", index=True)  # follow | unfollow | send_dm
@@ -610,6 +618,7 @@ class BrowserProfile(SQLModel, table=True):
     fingerprint_name 非空 = 固定 fingerprint-db profile; 空 = 按 fp_seed 确定性选。
     """
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     name: str = ""                          # 展示名
     fingerprint_name: str = ""              # fingerprint-db profile 名(空=按 fp_seed 选)
     fp_seed: str = ""                       # 指纹种子(确定性选择用)
@@ -633,6 +642,7 @@ class BrowserProfile(SQLModel, table=True):
 class ShareDownloadRecord(SQLModel, table=True):
     """分享链接下载历史。只读作品信息不会写入，实际下载成功或失败都会记录。"""
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_id: Optional[int] = Field(default=None, index=True)  # 归属后台用户(NULL=历史数据, 仅管理员可见)
     platform: str = Field(default="generic", index=True)
     source_url: str = ""
     account_id: Optional[int] = Field(default=None, index=True)
