@@ -1381,8 +1381,8 @@ def _risk_account_views(session, accounts: list[DouyinAccount],
 
 
 @app.get("/api/risk-control/config")
-async def get_risk_control_config():
-    _admin: AdminUser = Depends(require_roles("admin")),
+async def get_risk_control_config(
+    _admin: AdminUser = Depends(require_roles("admin"))):
     payload = export_risk_settings(cfg)
     payload["admin_token_required"] = _risk_admin_required()
     return payload
@@ -1414,8 +1414,9 @@ async def put_risk_control_config(body: RiskSettingsIn, request: Request,
 
 
 @app.get("/api/risk-control/accounts")
-async def list_risk_control_accounts(platform: str | None = None):
+async def list_risk_control_accounts(
     _admin: AdminUser = Depends(require_roles("admin")),
+    platform: str | None = None):
     now = datetime.utcnow()
     with get_session() as session:
         query = select(DouyinAccount)
@@ -1426,8 +1427,9 @@ async def list_risk_control_accounts(platform: str | None = None):
 
 
 @app.get("/api/risk-control/summary")
-async def get_risk_control_summary(platform: str | None = None):
+async def get_risk_control_summary(
     _admin: AdminUser = Depends(require_roles("admin")),
+    platform: str | None = None):
     now = datetime.utcnow()
     local_now = datetime.now().astimezone()
     today = local_now.replace(hour=0, minute=0, second=0, microsecond=0) \
@@ -1464,8 +1466,9 @@ async def get_risk_control_summary(platform: str | None = None):
 
 
 @app.get("/api/risk-control/accounts/{account_id}/events")
-async def list_account_risk_events(account_id: int, limit: int = 80):
-    _admin: AdminUser = Depends(require_roles("admin")),
+async def list_account_risk_events(
+    account_id: int, limit: int = 80,
+    _admin: AdminUser = Depends(require_roles("admin"))):
     limit = max(1, min(200, limit))
     with get_session() as session:
         account = session.get(DouyinAccount, account_id)
@@ -1545,8 +1548,9 @@ async def clear_account_risk(account_id: int, body: RiskClearIn, request: Reques
 
 
 @app.get("/api/risk-control/audit")
-async def list_risk_admin_audit(limit: int = 100):
-    _admin: AdminUser = Depends(require_roles("admin")),
+async def list_risk_admin_audit(
+    limit: int = 100,
+    _admin: AdminUser = Depends(require_roles("admin"))):
     limit = max(1, min(300, limit))
     with get_session() as session:
         rows = session.exec(select(RiskAdminAudit).order_by(

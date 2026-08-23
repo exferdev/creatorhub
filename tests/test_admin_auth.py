@@ -448,6 +448,18 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(self.client.get(
             "/api/admin/audit-requests", headers=self.h_op).status_code, 403)
 
+    def test_risk_center_admin_only(self):
+        # 风控中心所有端点(含只读)必须是 admin; operator 一律 403
+        for path in ("/api/risk-control/config",
+                     "/api/risk-control/summary",
+                     "/api/risk-control/accounts?platform=douyin",
+                     "/api/risk-control/audit"):
+            r = self.client.get(path, headers=self.h_op)
+            self.assertEqual(r.status_code, 403, f"{path}: {r.text}")
+        self.assertEqual(
+            self.client.get("/api/risk-control/config",
+                            headers=self.h_admin).status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
