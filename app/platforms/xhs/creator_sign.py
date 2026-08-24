@@ -29,14 +29,31 @@ _AVAILABLE_AT = 0.0
 _AVAILABLE_TTL = 60.0
 
 
+def _api_key() -> str:
+    """M4: 服务端强制 X-Api-Key。SIGN_API_KEY 环境变量优先, 否则读 config sign.api_key。"""
+    import os as _os
+    key = _os.environ.get("SIGN_API_KEY", "") or ""
+    if key:
+        return key
+    try:
+        from app.config import load_config
+        return (load_config().sign.api_key or "").strip()
+    except Exception:
+        return ""
+
+
 def _post(algorithm: str, payload: dict) -> dict:
     """调远程签名服务；失败重试 _MAX_ATTEMPTS 次，仍失败抛 RuntimeError(含明细)。"""
     import curl_cffi.requests as cr
     import time as _t
     url = f"{_BASE_URL}/sign/xhs/{algorithm}"
+    headers = {"X-Api-Key": _api_key()} if _api_key() else {}
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            resp = cr.post(url, json=payload, timeout=_TIMEOUT)
+            resp = cr.post(url, json=payload, timeout=_TIMEOUT, headers=headers)
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    "sign service 401: X-Api-Key 无效或未配置(SIGN_API_KEY)")
             data = resp.json()
             if not isinstance(data, dict) or not data.get("ok"):
                 raise RuntimeError(

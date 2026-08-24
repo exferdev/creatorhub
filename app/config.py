@@ -161,12 +161,19 @@ class ConsoleConfig:
 
 
 @dataclass
+class SignConfig:
+    """远程签名服务(exferdev/js, js.faryi.com)接入。M4 起服务端强制 X-Api-Key。"""
+    api_key: str = ""        # SIGN_API_KEY 环境变量优先; 未配置时服务端将拒绝签名
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     risk_control: RiskControlConfig = field(default_factory=RiskControlConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     console: ConsoleConfig = field(default_factory=ConsoleConfig)
+    sign: SignConfig = field(default_factory=SignConfig)
     db_path: str = "./data/creatorhub.db"
     proxies: List[str] = field(default_factory=list)  # 代理池;建号时一号一代理 sticky 分配
 
@@ -198,6 +205,9 @@ def load_config(path: str | None = None) -> Config:
         cc = raw.get("console", {}) or {}
         cfg.console = ConsoleConfig(**{k: v for k, v in cc.items()
                                        if k in ConsoleConfig.__dataclass_fields__})
+        sg = raw.get("sign", {}) or {}
+        cfg.sign = SignConfig(**{k: v for k, v in sg.items()
+                                 if k in SignConfig.__dataclass_fields__})
         cfg.db_path = (raw.get("storage", {}) or {}).get("db_path", cfg.db_path)
         px = raw.get("proxies") or []
         cfg.proxies = [str(p).strip() for p in px if str(p).strip()]

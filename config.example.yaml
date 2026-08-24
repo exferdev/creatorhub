@@ -130,6 +130,11 @@ console:
   password: ""                   # 账号密码
   poll_interval_seconds: 30      # 轮询/心跳间隔
 
+# 远程签名服务(exferdev/js, Cloudflare Worker @ js.faryi.com)
+# M4 起服务端强制 X-Api-Key 鉴权: 未配置将无法签名。
+sign:
+  api_key: ""            # 由算法中心(控制台)签发的客户端密钥; 也可用环境变量 SIGN_API_KEY
+
 storage:
   db_path: ./data/creatorhub.db
 

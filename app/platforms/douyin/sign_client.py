@@ -21,6 +21,18 @@ _BASE_URL = os.environ.get("SIGN_SERVICE_URL", "https://js.faryi.com")
 _TIMEOUT = 10          # 单次请求超时(秒); Worker 冷启动可达数秒
 _MAX_ATTEMPTS = 3      # 最大尝试次数(含首试)
 
+
+def _api_key() -> str:
+    """M4: 服务端强制 X-Api-Key。SIGN_API_KEY 环境变量优先, 否则读 config sign.api_key。"""
+    key = os.environ.get("SIGN_API_KEY", "") or ""
+    if key:
+        return key
+    try:
+        from app.config import load_config
+        return (load_config().sign.api_key or "").strip()
+    except Exception:
+        return ""
+
 _LAST_ERROR = ""       # 最近一次失败明细(空=上次调用成功)
 
 
@@ -39,10 +51,14 @@ def _post(algorithm: str, payload: dict) -> dict:
     global _LAST_ERROR
     import curl_cffi.requests as cr
     url = f"{_BASE_URL}/sign/douyin/{algorithm}"
+    headers = {"X-Api-Key": _api_key()} if _api_key() else {}
     detail = ""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            resp = cr.post(url, json=payload, timeout=_TIMEOUT)
+            resp = cr.post(url, json=payload, timeout=_TIMEOUT, headers=headers)
+            if resp.status_code == 401:
+                detail = "签名服务返回 401: X-Api-Key 无效或未配置(SIGN_API_KEY)"
+                raise SignServiceError(detail)
             data = resp.json()
             if not data.get("ok"):
                 detail = f"服务返回错误: {data.get('error', resp.status_code)}"
