@@ -43,8 +43,8 @@
   .pill.ok { color:var(--ok); border-color:var(--ok); }
   .pill.bad { color:var(--err); border-color:var(--err); }
   .pill.warn { color:var(--warn); border-color:var(--warn); }
-  .inst-item { cursor:pointer; }
-  .inst-item.active { background:rgba(79,140,255,.08); }
+  .clk { cursor:pointer; }
+  .clk.active { background:rgba(79,140,255,.08); }
   code { background:rgba(255,255,255,.06); padding:1px 5px; border-radius:5px; font-size:12px; }
   .tabs { display:flex; gap:8px; margin-bottom:12px; }
   .tabs button { background:none; border:1px solid var(--line); color:var(--dim);
@@ -55,7 +55,6 @@
     font-size:13px; z-index:50; }
   .toast.err { border-color:var(--err); }
   .toast.ok { border-color:var(--ok); }
-  /* 登录层 */
   #login-overlay { position:fixed; inset:0; background:rgba(10,11,15,.94);
     display:none; align-items:center; justify-content:center; z-index:100; }
   #login-overlay.on { display:flex; }
@@ -79,7 +78,7 @@
 <div id="login-overlay">
   <form class="login-card" onsubmit="doLogin(event)">
     <h2>CreatorHub Console</h2>
-    <p>控制面 · 远程管理 CreatorHub 实例</p>
+    <p>控制面 · 集中管理 CreatorHub 客户端</p>
     <div class="f"><span>用户名</span><input id="login-user" autocomplete="username"></div>
     <div class="f"><span>密码</span><input id="login-pass" type="password" autocomplete="current-password"></div>
     <p class="login-msg" id="login-msg"></p>
@@ -89,17 +88,10 @@
 
 <main id="main" class="hidden">
   <div class="card">
-    <h2>实例管理 <span class="sub">注册的 CreatorHub 实例(凭据仅存令牌)</span></h2>
-    <div class="row">
-      <div class="f"><label>名称</label><input id="inst-name" placeholder="如：本机实例"></div>
-      <div class="f"><label>地址</label><input id="inst-url" placeholder="http://127.0.0.1:8000"></div>
-      <div class="f"><label>实例 admin 用户名</label><input id="inst-user" value="admin"></div>
-      <div class="f"><label>实例 admin 密码(不落盘)</label><input id="inst-pass" type="password"></div>
-      <button class="primary" onclick="addInstance()">注册实例</button>
-    </div>
+    <h2>客户端 <span class="sub">一台 CreatorHub = 一个账号; 客户端主动注册并轮询(内网友好)</span></h2>
     <table>
-      <thead><tr><th>名称</th><th>地址</th><th>在线</th><th>令牌</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody id="inst-table"></tbody>
+      <thead><tr><th>账号</th><th>在线</th><th>状态</th><th>版本</th><th>心跳</th><th>待办指令</th><th>操作</th></tr></thead>
+      <tbody id="client-table"></tbody>
     </table>
   </div>
 
@@ -107,31 +99,31 @@
     <h2 id="detail-title">—</h2>
     <div class="tabs">
       <button data-vi="status" class="active" onclick="vt('status')">状态</button>
-      <button data-vi="users" onclick="vt('users')">用户</button>
-      <button data-vi="risk" onclick="vt('risk')">风控</button>
-      <button data-vi="areq" onclick="vt('areq')">请求审计</button>
-      <button data-vi="aop" onclick="vt('aop')">操作审计</button>
+      <button data-vi="audit" onclick="vt('audit')">客户端审计</button>
+      <button data-vi="cmds" onclick="vt('cmds')">指令记录</button>
     </div>
     <div id="vi-status">
+      <div class="row" style="margin-top:10px">
+        <div class="f"><label>停用 / 启用(客户端将在下次轮询自锁)</label>
+          <button class="danger" onclick="toggleClient()" id="toggle-btn">停用</button>
+        </div>
+        <div class="f"><label>重置密码(客户端下次登录/注册失效)</label>
+          <input id="rp-pass" type="password" placeholder="新密码(≥6)">
+        </div>
+        <button class="primary" onclick="resetPass()">重置</button>
+      </div>
       <table id="status-table"><tbody></tbody></table>
     </div>
-    <div id="vi-users" class="hidden">
+    <div id="vi-audit" class="hidden"><table id="audit-table"><thead><tr><th>时间</th><th>类型</th><th>动作</th><th>用户</th><th>结果</th></tr></thead><tbody></tbody></table></div>
+    <div id="vi-cmds" class="hidden">
       <div class="row" style="margin-top:10px">
-        <div class="f"><input id="ru-name" placeholder="新用户名"></div>
-        <div class="f"><input id="ru-pass" type="password" placeholder="初始密码(≥8)"></div>
-        <div class="f"><select id="ru-role"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select></div>
-        <button class="primary" onclick="remoteCreateUser()">远端建号</button>
+        <div class="f"><label>下发风控配置(risk.set)</label>
+          <textarea id="cmd-params" rows="4" placeholder='{"risk_control":{"enabled":true,...},"schedule":{...}}'></textarea>
+        </div>
+        <button class="primary" onclick="sendRiskCommand()">下发指令</button>
       </div>
-      <table id="users-table"><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+      <table id="cmds-table"><thead><tr><th>ID</th><th>指令</th><th>状态</th><th>结果</th><th>时间</th></tr></thead><tbody></tbody></table>
     </div>
-    <div id="vi-risk" class="hidden">
-      <div class="row" style="margin-top:10px">
-        <textarea id="risk-json" rows="10" style="font-family:monospace;font-size:12px"></textarea>
-      </div>
-      <button class="primary" onclick="remotePutRisk()">应用风控配置</button>
-    </div>
-    <div id="vi-areq" class="hidden"><table id="areq-table"><thead><tr><th>时间</th><th>用户</th><th>方法</th><th>路径</th><th>状态</th></tr></thead><tbody></tbody></table></div>
-    <div id="vi-aop" class="hidden"><table id="aop-table"><thead><tr><th>时间</th><th>动作</th><th>操作人</th><th>详情</th></tr></thead><tbody></tbody></table></div>
   </div>
 </main>
 

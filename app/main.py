@@ -105,6 +105,8 @@ from .auth_setup import (
     token_from_request,
     user_from_token,
 )
+from . import auth_setup
+from .client_registry import registry_enabled
 from .admin_api import router as admin_api_router
 
 import json
@@ -261,6 +263,10 @@ async def lifespan(app: FastAPI):
         print(f"[startup] 中断任务恢复失败(不影响启动): {e!r}")
     if _T: _mark("housekeeping (sync)")
     engine.start()
+    # 接入控制面: 启动注册 + 轮询(状态/审计上报、取令执行)
+    if cfg.console.enabled and registry_enabled(cfg):
+        from .client_registry import run as _registry_run
+        asyncio.create_task(_registry_run(cfg))
     if _T:
         _mark("startup-ready (yield)")
     from .engine.im_receiver import ImReceiverManager
@@ -278,8 +284,64 @@ app = FastAPI(title="CreatorHub", lifespan=lifespan)
 WEB_DIR = Path(__file__).parent / "web"
 
 # ── 后台用户鉴权(多用户前置; 所有 /api 强制登录, 见 auth_guard_middleware)──
-app.include_router(auth_users.get_auth_router(auth_backend),
-                   prefix="/api/admin/auth")
+# 登录走自定义端点: 接入控制面(console)时由控制面验证账号(严格版), 否则本地校验。
+from fastapi.security import OAuth2PasswordRequestForm
+
+
+@app.post("/api/admin/auth/login")
+async def admin_login(
+        request: Request,
+        form: OAuth2PasswordRequestForm = Depends(),
+        user_manager=Depends(auth_setup.get_user_manager),
+        strategy=Depends(auth_setup.get_strategy)):
+    from .auth_setup import _login_window_gate, _login_window_clear
+    if cfg.console.enabled and registry_enabled(cfg):
+        # ---- 控制面委派(严格): 账号密码由控制面统一校验 ----
+        _login_window_gate(form.username or "")
+        from .client_registry import client_disabled, verify_login as _reg_verify
+        if client_disabled():
+            raise HTTPException(403, "客户端已被控制面停用")
+        ok = await _reg_verify(cfg, form.username, form.password)
+        if not ok:
+            raise HTTPException(401, "账号或密码错误(由控制面校验)")
+        with get_session() as s:
+            u = s.exec(select(AdminUser).where(
+                AdminUser.username == form.username)).first()
+            if u is None:
+                u = AdminUser(
+                    username=form.username,
+                    email=f"{form.username}@creatorhub.local",
+                    hashed_password=hash_password(secrets.token_urlsafe(16)),
+                    role="operator", is_active=True, is_superuser=False,
+                    is_verified=True)
+                s.add(u)
+                s.commit()
+                s.refresh(u)
+        _login_window_clear(form.username)
+        token_str = await strategy.write_token(u)
+        return {"access_token": token_str, "token_type": "bearer"}
+    # ---- 本地校验(未接入控制面时; 滑动窗口由 user_manager.authenticate 负责) ----
+    user = await user_manager.authenticate(form)
+    if user is None or not user.is_active:
+        raise HTTPException(400, "LOGIN_BAD_CREDENTIALS")
+    token_str = await strategy.write_token(user)
+    return {"access_token": token_str, "token_type": "bearer"}
+
+
+@app.post("/api/admin/auth/logout")
+async def admin_logout(request: Request):
+    from .models import AdminAccessToken as _AT
+    auth = request.headers.get("Authorization", "")
+    token_str = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if token_str:
+        with get_session() as s:
+            row = s.get(_AT, token_str)
+            if row is not None:
+                s.delete(row)
+                s.commit()
+    return {"ok": True}
+
+
 app.include_router(admin_api_router)   # P0.2 后台管理: 用户管理/审计(admin-only)
 
 

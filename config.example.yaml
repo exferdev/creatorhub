@@ -120,6 +120,16 @@ admin:
   enabled: true     # 总开关; false=回到无鉴权旧行为(仅迁移期,不建议)
   token_days: 14    # 登录令牌有效期(天)
 
+# 接入控制面(独立管理后台 console/, 一台客户端=一个账号)。
+# enabled=true 后: 启动主动注册并轮询(状态/审计上报、取令执行), 本机登录只以
+# 控制面验证为准(严格版: 控制面不可达将无法登录)。账号由控制面分配/重置。
+console:
+  enabled: false
+  url: http://127.0.0.1:8100     # 控制面地址
+  username: ""                   # 本客户端账号
+  password: ""                   # 账号密码
+  poll_interval_seconds: 30      # 轮询/心跳间隔
+
 storage:
   db_path: ./data/creatorhub.db
 

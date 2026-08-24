@@ -147,11 +147,26 @@ class AdminConfig:
 
 
 @dataclass
+class ConsoleConfig:
+    """接入控制面(远程管理): 一台客户端 = 一个账号(username)。
+
+    enabled=true 时: 客户端启动主动注册并轮询(内网友好), 本机登录一律走控制面
+    验证(严格版: 控制面不可达将无法登录)。建议在控制台(console/)注册分配账号后启用。
+    """
+    enabled: bool = False
+    url: str = ""            # 控制面地址, 如 http://127.0.0.1:8100
+    username: str = ""       # 本客户端的账号(控制面登记)
+    password: str = ""       # 账号密码(本机登录也用它)
+    poll_interval_seconds: int = 30
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
     risk_control: RiskControlConfig = field(default_factory=RiskControlConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
+    console: ConsoleConfig = field(default_factory=ConsoleConfig)
     db_path: str = "./data/creatorhub.db"
     proxies: List[str] = field(default_factory=list)  # 代理池;建号时一号一代理 sticky 分配
 
@@ -180,6 +195,9 @@ def load_config(path: str | None = None) -> Config:
         a = raw.get("admin", {}) or {}
         cfg.admin = AdminConfig(**{k: v for k, v in a.items()
                                    if k in AdminConfig.__dataclass_fields__})
+        cc = raw.get("console", {}) or {}
+        cfg.console = ConsoleConfig(**{k: v for k, v in cc.items()
+                                       if k in ConsoleConfig.__dataclass_fields__})
         cfg.db_path = (raw.get("storage", {}) or {}).get("db_path", cfg.db_path)
         px = raw.get("proxies") or []
         cfg.proxies = [str(p).strip() for p in px if str(p).strip()]

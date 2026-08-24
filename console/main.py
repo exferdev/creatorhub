@@ -1,38 +1,39 @@
-"""控制面(独立网页管理后台)主服务。
+"""控制面(独立管理后台)主服务 — 客户端主动上报/轮询模型。
 
 独立部署:  python -m uvicorn console.main:app --host 127.0.0.1 --port 8100
-(异地访问请自行反代 TLS)。数据: console/data/console.db(独立于 CreatorHub)。
-功能: 实例注册/健康/凭据续期 + 远端用户管理 + 远端风控查看调整 + 审计查看;
-      控制面自身用户(admin/operator/viewer)登录, 每次操作落 ConsoleAudit。
+架构: 一台 CreatorHub 客户端 = 一个 ClientAccount(username); 客户端主动注册并向
+本服务轮询(内网无入口): 上报状态/推送审计/取走指令; 本机登录验证也集中于本服务。
+流量方向只有 客户端→控制面, 控制面永不主动连客户端。
+v1 指令: risk.set(下发风控配置); 停用/启用与重置密码直接作用于账号状态。
 """
 from __future__ import annotations
 
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field as PydanticField
 from sqlmodel import select
 
-from .client import InstanceClient, InstanceError
 from .console_auth import (auth_backend, auth_bypass_enabled, current_user,
                            ensure_bootstrap_console_admin, fastapi_users,
                            hash_password, require_roles)
 from .db import get_session
-from .models import ConsoleAccessToken, ConsoleAudit, ConsoleInstance, ConsoleUser
+from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
+                     ConsoleUser)
 
 CONSOLE_DB = os.environ.get(
     "CONSOLE_DB_PATH",
     str(Path(__file__).resolve().parent.parent / "console" / "data" / "console.db"))
 WEB_DIR = Path(__file__).resolve().parent / "web"
-
-_admin_only = require_roles("admin")
-_any_user = require_roles("admin", "operator", "viewer")
+POLL_INTERVAL = 30          # 建议轮询间隔(秒), 客户端可覆盖心跳
+AUDIT_BATCH_LIMIT = 500     # 单次轮询审计增量上限
 
 
 @asynccontextmanager
@@ -48,6 +49,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CreatorHub Console", lifespan=lifespan)
 app.include_router(fastapi_users.get_auth_router(auth_backend),
                    prefix="/api/console/auth")
+
+manage_roles = Depends(require_roles("admin", "operator"))
+view_roles = Depends(require_roles("admin", "operator", "viewer"))
 
 
 class MeOut(BaseModel):
@@ -90,22 +94,11 @@ async def console_change_password(body: ChangePasswordIn,
     return {"ok": True}
 
 
-# ── 全局守卫: 除白名单外必须携带控制台令牌 ──
+# ── 全局守卫: 白名单外必须携带控制台令牌 ──
 OPEN_EXACT = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
-OPEN_PREFIX = ("/static", "/api/console/auth/")
-
-
-async def _resolve_console_user(token: str):
-    if not token:
-        return None
-    with get_session() as s:
-        row = s.get(ConsoleAccessToken, token)
-        if row is None:
-            return None
-        # 有效期内(14 天)
-        if datetime.utcnow() - row.created_at > timedelta(days=14):
-            return None
-        return s.get(ConsoleUser, row.user_id)
+OPEN_PREFIX = ("/static",
+               "/api/console/auth/",
+               "/api/clients/",)   # 客户端注册/轮询/验证: 免控制台登录(自有认证)
 
 
 @app.middleware("http")
@@ -117,7 +110,14 @@ async def console_guard(request: Request, call_next):
         return await call_next(request)
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    user = await _resolve_console_user(token)
+    from .models import ConsoleAccessToken as _CAT
+    user = None
+    if token:
+        with get_session() as s:
+            row = s.get(_CAT, token)
+            if row is not None and \
+                    datetime.utcnow() - row.created_at <= timedelta(days=14):
+                user = s.get(ConsoleUser, row.user_id)
     if user is None or not user.is_active:
         return JSONResponse({"detail": "未登录或令牌无效"}, status_code=401)
     request.state.user = user
@@ -125,359 +125,333 @@ async def console_guard(request: Request, call_next):
 
 
 # ── 审计助手 ──
-def _audit(request: Request, instance: ConsoleInstance | None, action: str,
+def _audit(request: Request, client, action: str,
            ok: bool = True, detail: str = ""):
+    # client 可为模型或含 id/username 的对象; 值须在调用前读取(防分离实例过期)
     u = getattr(request.state, "user", None)
     try:
         with get_session() as s:
             s.add(ConsoleAudit(
                 user_id=getattr(u, "id", None),
                 username=getattr(u, "username", "") or "",
-                instance_id=instance.id if instance else None,
-                instance_name=instance.name if instance else "",
+                client_id=getattr(client, "id", None),
+                client_name=getattr(client, "username", "") or "",
                 action=action, ok=ok, detail=detail[:500]))
             s.commit()
     except Exception:
         pass
 
 
-def _instance_or_404(session, instance_id: int) -> ConsoleInstance:
-    inst = session.get(ConsoleInstance, instance_id)
-    if inst is None:
-        raise HTTPException(404, "实例不存在")
-    return inst
+def _client_by_username(session, username: str) -> ClientAccount:
+    acc = session.exec(select(ClientAccount).where(
+        ClientAccount.username == username)).first()
+    if acc is None:
+        raise HTTPException(404, "客户端不存在")
+    return acc
 
 
-def _client_for(inst: ConsoleInstance) -> InstanceClient:
-    return InstanceClient(inst.base_url, inst.token)
+def _client_out(acc: ClientAccount) -> dict:
+    online = acc.last_seen_at is not None and \
+        datetime.utcnow() - acc.last_seen_at <= timedelta(seconds=POLL_INTERVAL * 3)
+    return {
+        "id": acc.id, "username": acc.username, "note": acc.note,
+        "disabled": acc.disabled, "online": online,
+        "version": acc.version,
+        "last_seen_at": acc.last_seen_at.isoformat() if acc.last_seen_at else None,
+        "last_error": acc.last_error,
+        "status": json.loads(acc.status_json or "{}"),
+        "pending_commands": _pending_count(acc.id),
+    }
 
 
-def _require_valid_token(request: Request, inst: ConsoleInstance):
-    """令牌过期则先给"重新授权"信号, 不发出请求。"""
-    if not inst.token or InstanceClient.token_expired(inst.token_expires_at):
-        _audit(request, inst, "instance.token_expired", ok=False,
-               detail="凭据已过期, 需重新授权")
-        raise HTTPException(401, "实例凭据已过期, 请重新授权")
-    return _client_for(inst)
-
-
-def _map_instance_error(request: Request, inst: ConsoleInstance,
-                        e: InstanceError) -> HTTPException:
+def _pending_count(client_id: int) -> int:
     with get_session() as s:
-        inst2 = s.get(ConsoleInstance, inst.id)
-        if inst2:
-            inst2.last_error = str(e)[:300]
-            s.add(inst2)
-            s.commit()
-    _audit(request, inst, "instance.error", ok=False, detail=str(e)[:300])
-    if e.kind == "auth_expired":
-        return HTTPException(401, str(e))
-    if e.kind == "offline":
-        return HTTPException(502, str(e))
-    return HTTPException(502, str(e))
+        return len(s.exec(select(ClientCommand).where(
+            ClientCommand.client_id == client_id,
+            ClientCommand.status == "pending")).all())
 
 
-# ── 实例注册 / 管理(admin)──
-class InstanceIn(BaseModel):
-    name: str
-    base_url: str
-    admin_username: str = "admin"
-    admin_password: str = ""
+# ═══════════════════ 客户端侧接口(免控制台登录)═══════════════════
+
+class RegisterIn(BaseModel):
+    username: str
+    password: str
+    version: str = ""
     note: str = ""
 
 
-class ReauthIn(BaseModel):
-    username: str = "admin"
-    password: str
-
-
-@app.get("/api/instances")
-async def list_instances(request: Request,
-                         _u: ConsoleUser = Depends(_any_user)):
+@app.post("/api/clients/register")
+async def client_register(body: RegisterIn):
+    """客户端启动注册: 首次创建账号并签发轮询令牌; 已存在则校验密码。"""
+    from fastapi_users.password import PasswordHelper
+    username = body.username.strip()
+    if not username or len(username) > 40:
+        raise HTTPException(400, "用户名须为 1~40 字符")
+    if len(body.password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    ph = PasswordHelper()
     with get_session() as s:
-        insts = s.exec(select(ConsoleInstance).order_by(ConsoleInstance.id)).all()
-        out = []
-        for inst in insts:
-            client = InstanceClient(inst.base_url, inst.token)
-            online = await client.health()
-            out.append({
-                "id": inst.id, "name": inst.name, "base_url": inst.base_url,
-                "admin_username": inst.admin_username, "note": inst.note,
-                "enabled": inst.enabled, "online": online,
-                "token_ok": bool(inst.token)
-                and not InstanceClient.token_expired(inst.token_expires_at),
-                "last_error": inst.last_error,
-                "last_ok_at": inst.last_ok_at.isoformat() if inst.last_ok_at else None,
-            })
-        _audit(request, None, "instance.list")
-        return {"count": len(out), "instances": out}
-
-
-@app.post("/api/instances", status_code=201)
-async def add_instance(request: Request, body: InstanceIn,
-                       _admin: ConsoleUser = Depends(_admin_only)):
-    name = body.name.strip()
-    base = body.base_url.strip().rstrip("/")
-    if not name or not base:
-        raise HTTPException(400, "名称与地址必填")
-    if not body.admin_password:
-        raise HTTPException(400, "请输入实例 admin 密码以换取令牌(密码不落盘)")
-    client = InstanceClient(base)
-    try:
-        token = await client.auth_login(body.admin_username.strip() or "admin",
-                                        body.admin_password)
-    except InstanceError as e:
-        raise HTTPException(400, f"实例登录失败: {e}")
-    with get_session() as s:
-        if s.exec(select(ConsoleInstance).where(
-                ConsoleInstance.name == name)).first():
-            raise HTTPException(409, "实例名称已存在")
-        if s.exec(select(ConsoleInstance).where(
-                ConsoleInstance.base_url == base)).first():
-            raise HTTPException(409, "实例地址已存在")
-        inst = ConsoleInstance(
-            name=name, base_url=base, admin_username=body.admin_username.strip(),
-            token=token, token_expires_at=datetime.utcnow() + timedelta(days=14),
-            note=body.note.strip()[:200])
-        s.add(inst)
-        s.commit()
-        s.refresh(inst)
-        iid = inst.id
-        iname = inst.name
-    _audit(request, inst, "instance.add", detail=f"注册实例 {name}")
-    return {"id": iid, "name": iname, "token_ok": True}
-
-
-@app.delete("/api/instances/{instance_id}")
-async def delete_instance(request: Request, instance_id: int,
-                          _admin: ConsoleUser = Depends(_admin_only)):
-    with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-        s.delete(inst)
-        s.commit()
-        iname = inst.name
-    _audit(request, inst, "instance.delete", detail=f"删除实例 {iname}")
-    return {"ok": True}
-
-
-@app.post("/api/instances/{instance_id}/reauth")
-async def reauth_instance(request: Request, instance_id: int, body: ReauthIn,
-                          _admin: ConsoleUser = Depends(_admin_only)):
-    with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-        base = inst.base_url
-    client = InstanceClient(base)
-    try:
-        token = await client.auth_login(body.username.strip() or "admin",
-                                        body.password)
-    except InstanceError as e:
-        raise HTTPException(400, f"实例登录失败: {e}")
-    with get_session() as s:
-        inst2 = s.get(ConsoleInstance, instance_id)
-        inst2.token = token
-        inst2.token_expires_at = datetime.utcnow() + timedelta(days=14)
-        inst2.last_error = ""
-        s.add(inst2)
-        s.commit()
-    _audit(request, inst2, "instance.reauth", detail=f"实例 {inst2.name} 重新授权")
-    return {"ok": True, "token_ok": True}
-
-
-# ── 实例状态 ──
-@app.get("/api/instances/{instance_id}/status")
-async def instance_status(request: Request, instance_id: int,
-                          _u: ConsoleUser = Depends(_any_user)):
-    with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        online = await client.health()
-        accounts = await client.list_accounts()
-        monitors = await client.list_monitors()
-        users = await client.list_users()
-        with get_session() as s:
-            i2 = s.get(ConsoleInstance, instance_id)
-            if online:
-                i2.last_ok_at = datetime.utcnow()
-                i2.last_error = ""
-            s.add(i2)
+        acc = s.exec(select(ClientAccount).where(
+            ClientAccount.username == username)).first()
+        if acc is None:
+            acc = ClientAccount(
+                username=username,
+                password_hash=ph.hash(body.password),
+                client_token=secrets.token_urlsafe(32),
+                version=body.version[:40], note=body.note.strip()[:200])
+            s.add(acc)
             s.commit()
-            last_error = i2.last_error  # 会话内取值, 防分离实例回读
-        _audit(request, inst, "instance.status", detail=f"实例 {inst.name}")
-        return {
-            "id": inst.id, "name": inst.name, "base_url": inst.base_url,
-            "online": online, "account_count": len(accounts),
-            "monitor_count": len(monitors),
-            "user_count": (users or {}).get("count", 0),
-            "last_error": last_error,
-        }
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+            print(f"[console] 客户端主动注册: {username}")
+        else:
+            if acc.disabled:
+                raise HTTPException(403, "客户端已被停用")
+            ok, _ = ph.verify_and_update(body.password, acc.password_hash)
+            if not ok:
+                raise HTTPException(401, "客户端账号或密码错误")
+            acc.version = body.version[:40] or acc.version
+            if not acc.client_token:
+                acc.client_token = secrets.token_urlsafe(32)
+            s.add(acc)
+            s.commit()
+        token = acc.client_token
+        cid, cname = acc.id, acc.username
+    return {"ok": True, "client_token": token, "poll_interval": POLL_INTERVAL,
+            "id": cid, "username": cname}
 
 
-# ── 远端用户管理 ──
-@app.get("/api/instances/{instance_id}/users")
-async def instance_users(request: Request, instance_id: int,
-                         _u: ConsoleUser = Depends(_any_user)):
+class PollIn(BaseModel):
+    status: dict | None = None
+    audit: list[dict] = PydanticField(default_factory=list)
+    receipts: list[dict] = PydanticField(default_factory=list)
+
+
+@app.post("/api/clients/poll")
+async def client_poll(request: Request, body: PollIn):
+    """客户端心跳轮询: 上报状态/审计增量/指令回执, 取走待办指令。"""
+    token = request.headers.get("X-Client-Token", "").strip()
+    if not token:
+        raise HTTPException(401, "缺少 X-Client-Token")
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        data = await client.list_users()
-        _audit(request, inst, "user.list", detail=f"实例 {inst.name}")
-        return data
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = s.exec(select(ClientAccount).where(
+            ClientAccount.client_token == token)).first()
+        if acc is None:
+            raise HTTPException(401, "客户端令牌无效, 请重新注册")
+        if acc.disabled:
+            acc.last_seen_at = datetime.utcnow()
+            s.add(acc)
+            s.commit()
+            return {"ok": True, "disabled": True,
+                    "commands": [], "poll_interval": POLL_INTERVAL}
+        acc.last_seen_at = datetime.utcnow()
+        if body.status:
+            acc.status_json = json.dumps(body.status, ensure_ascii=False)[:4000]
+            acc.version = str(body.status.get("version") or acc.version)[:40]
+        acc.last_error = ""
+        s.add(acc)
+        s.commit()
+        cid, cname = acc.id, acc.username
+    # 审计增量入库(封顶防滥用)
+    batch = (body.audit or [])[:AUDIT_BATCH_LIMIT]
+    if batch:
+        with get_session() as s:
+            for item in batch:
+                if not isinstance(item, dict):
+                    continue
+                s.add(ClientAudit(
+                    client_id=cid, client_name=cname,
+                    kind=str(item.get("kind") or "request")[:20],
+                    action=str(item.get("action") or "")[:200],
+                    username=str(item.get("username") or "")[:64],
+                    detail=str(item.get("detail") or "")[:500],
+                    ok=bool(item.get("ok", True))))
+            s.commit()
+    # 指令回执
+    receipts = (body.receipts or [])[:200]
+    if receipts:
+        with get_session() as s:
+            for rec in receipts:
+                cmd = s.get(ClientCommand, int(rec.get("command_id") or 0)) \
+                    if str(rec.get("command_id") or "").isdigit() else None
+                if cmd is None or cmd.client_id != cid:
+                    continue
+                cmd.status = "done" if rec.get("status") == "done" else "failed"
+                cmd.result = str(rec.get("result") or "")[:500]
+                cmd.done_at = datetime.utcnow()
+                s.add(cmd)
+            s.commit()
+    # 取出待办指令
+    with get_session() as s:
+        cmds = s.exec(select(ClientCommand).where(
+            ClientCommand.client_id == cid,
+            ClientCommand.status == "pending").order_by(
+            ClientCommand.id).limit(20)).all()
+        out = [{"id": c.id, "op": c.op,
+                "params": json.loads(c.params or "{}")} for c in cmds]
+    return {"ok": True, "disabled": False, "commands": out,
+            "poll_interval": POLL_INTERVAL}
 
 
-class RemoteUserIn(BaseModel):
+class VerifyIn(BaseModel):
     username: str
     password: str
-    role: str = "viewer"
 
 
-@app.post("/api/instances/{instance_id}/users", status_code=201)
-async def remote_create_user(request: Request, instance_id: int, body: RemoteUserIn,
-                             _admin: ConsoleUser = Depends(_admin_only)):
+@app.post("/api/clients/verify")
+async def client_verify(body: VerifyIn):
+    """客户端本机登录验证(严格版: 一律走控制面; 停用则拒绝)。"""
+    from fastapi_users.password import PasswordHelper
+    ph = PasswordHelper()
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        out = await client.create_user(body.username, body.password, body.role)
-        _audit(request, inst, "user.create",
-               detail=f"实例 {inst.name} 建号 {body.username} ({body.role})")
-        return out
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = s.exec(select(ClientAccount).where(
+            ClientAccount.username == body.username.strip())).first()
+        if acc is None:
+            return JSONResponse({"ok": False, "detail": "账号不存在"}, status_code=401)
+        if acc.disabled:
+            return JSONResponse({"ok": False, "detail": "客户端已被停用"},
+                                status_code=403)
+        ok, _ = ph.verify_and_update(body.password, acc.password_hash)
+        if not ok:
+            return JSONResponse({"ok": False, "detail": "账号或密码错误"},
+                                status_code=401)
+    return {"ok": True, "username": acc.username}
 
 
-class RemoteUserPatch(BaseModel):
-    enabled: bool | None = None
-    role: str | None = None
+# ═══════════════════ 控制台管理接口(Console 用户)═══════════════════
 
-
-@app.patch("/api/instances/{instance_id}/users/{user_id}")
-async def remote_patch_user(request: Request, instance_id: int, user_id: int,
-                            body: RemoteUserPatch,
-                            _admin: ConsoleUser = Depends(_admin_only)):
+@app.get("/api/admin/clients")
+async def list_clients(_u: ConsoleUser = view_roles):
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        out = await client.patch_user(user_id, body.model_dump(exclude_none=True))
-        _audit(request, inst, "user.update", detail=f"实例 {inst.name} 用户 #{user_id}")
-        return out
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        accs = s.exec(select(ClientAccount).order_by(
+            ClientAccount.id)).all()
+        return {"count": len(accs), "clients": [_client_out(a) for a in accs]}
 
 
-class RemotePasswordIn(BaseModel):
+@app.get("/api/admin/clients/{username}")
+async def client_detail(username: str,
+                        _u: ConsoleUser = view_roles):
+    with get_session() as s:
+        acc = _client_by_username(s, username)
+        return _client_out(acc)
+
+
+@app.post("/api/admin/clients/{username}/disable")
+async def disable_client(request: Request, username: str,
+                         _admin: ConsoleUser = manage_roles):
+    with get_session() as s:
+        acc = _client_by_username(s, username)
+        acc.disabled = True
+        s.add(acc)
+        s.commit()
+        _cid, _cname = acc.id, acc.username
+    _audit(request, type("C", (), {"id": _cid, "username": _cname})(),
+           "client.disable", detail=f"停用客户端 {username}")
+    return {"ok": True, "disabled": True}
+
+
+@app.post("/api/admin/clients/{username}/enable")
+async def enable_client(request: Request, username: str,
+                        _admin: ConsoleUser = manage_roles):
+    with get_session() as s:
+        acc = _client_by_username(s, username)
+        acc.disabled = False
+        s.add(acc)
+        s.commit()
+        _cid, _cname = acc.id, acc.username
+    _audit(request, type("C", (), {"id": _cid, "username": _cname})(),
+           "client.enable", detail=f"启用客户端 {username}")
+    return {"ok": True, "disabled": False}
+
+
+class ResetPasswordIn(BaseModel):
     new_password: str
 
 
-@app.post("/api/instances/{instance_id}/users/{user_id}/password")
-async def remote_reset_password(request: Request, instance_id: int, user_id: int,
-                                body: RemotePasswordIn,
-                                _admin: ConsoleUser = Depends(_admin_only)):
+@app.post("/api/admin/clients/{username}/reset-password")
+async def reset_client_password(request: Request, username: str,
+                                body: ResetPasswordIn,
+                                _admin: ConsoleUser = manage_roles):
+    from fastapi_users.password import PasswordHelper
+    if len(body.new_password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    ph = PasswordHelper()
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        out = await client.reset_password(user_id, body.new_password)
-        _audit(request, inst, "user.password_reset",
-               detail=f"实例 {inst.name} 用户 #{user_id}")
-        return out
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = _client_by_username(s, username)
+        acc.password_hash = ph.hash(body.new_password)
+        s.add(acc)
+        s.commit()
+        _cid, _cname = acc.id, acc.username
+    _audit(request, type("C", (), {"id": _cid, "username": _cname})(),
+           "client.password_reset", detail=f"重置客户端 {username} 密码")
+    return {"ok": True}
 
 
-@app.delete("/api/instances/{instance_id}/users/{user_id}")
-async def remote_delete_user(request: Request, instance_id: int, user_id: int,
-                             _admin: ConsoleUser = Depends(_admin_only)):
+class CommandIn(BaseModel):
+    op: str
+    params: dict = PydanticField(default_factory=dict)
+
+
+@app.post("/api/admin/clients/{username}/command")
+async def send_client_command(request: Request, username: str, body: CommandIn,
+                              _admin: ConsoleUser = manage_roles):
+    if body.op not in ("risk.set",):
+        raise HTTPException(400, f"暂不支持指令: {body.op}")
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        out = await client.delete_user(user_id)
-        _audit(request, inst, "user.delete",
-               detail=f"实例 {inst.name} 用户 #{user_id}")
-        return out
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = _client_by_username(s, username)
+        cmd = ClientCommand(
+            client_id=acc.id, client_name=acc.username, op=body.op,
+            params=json.dumps(body.params, ensure_ascii=False)[:4000])
+        s.add(cmd)
+        s.commit()
+        cid = cmd.id
+        _cname = acc.username
+    _audit(request, type("C", (), {"id": acc.id, "username": _cname})(),
+           "client.command", detail=f"下发 {body.op} 至 {username}")
+    return {"ok": True, "command_id": cid, "status": "pending"}
 
 
-# ── 远端风控(查看/调整)──
-@app.get("/api/instances/{instance_id}/risk")
-async def remote_risk_get(request: Request, instance_id: int,
-                          _u: ConsoleUser = Depends(_any_user)):
+@app.get("/api/admin/clients/{username}/audit")
+async def client_audit(username: str, limit: int = 200,
+                       _u: ConsoleUser = view_roles):
+    limit = max(1, min(limit, 1000))
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        data = await client.get_risk_config()
-        _audit(request, inst, "risk.get", detail=f"实例 {inst.name}")
-        return data
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = _client_by_username(s, username)
+        rows = s.exec(select(ClientAudit).where(
+            ClientAudit.client_id == acc.id).order_by(
+            ClientAudit.id.desc()).limit(limit)).all()
+        return [{
+            "id": r.id, "kind": r.kind, "action": r.action, "username": r.username,
+            "detail": r.detail, "ok": r.ok,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]
 
 
-@app.put("/api/instances/{instance_id}/risk")
-async def remote_risk_put(request: Request, instance_id: int, body: dict,
-                          _admin: ConsoleUser = Depends(_admin_only)):
-    if not isinstance(body, dict):
-        raise HTTPException(400, "配置必须是 JSON 对象")
+@app.get("/api/admin/clients/{username}/commands")
+async def client_commands(username: str, limit: int = 100,
+                          _u: ConsoleUser = view_roles):
+    limit = max(1, min(limit, 500))
     with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        out = await client.put_risk_config(body)
-        _audit(request, inst, "risk.put", detail=f"实例 {inst.name} 风控配置更新")
-        return out
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
+        acc = _client_by_username(s, username)
+        rows = s.exec(select(ClientCommand).where(
+            ClientCommand.client_id == acc.id).order_by(
+            ClientCommand.id.desc()).limit(limit)).all()
+        return [{
+            "id": r.id, "op": r.op, "params": json.loads(r.params or "{}"),
+            "status": r.status, "result": r.result,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "done_at": r.done_at.isoformat() if r.done_at else None,
+        } for r in rows]
 
 
-# ── 远端审计查看 ──
-@app.get("/api/instances/{instance_id}/audit-requests")
-async def remote_audit_requests(request: Request, instance_id: int, limit: int = 100,
-                                _u: ConsoleUser = Depends(_any_user)):
-    with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        data = await client.audit_requests(limit=limit)
-        _audit(request, inst, "audit.requests", detail=f"实例 {inst.name}")
-        return data
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
-
-
-@app.get("/api/instances/{instance_id}/audit-ops")
-async def remote_audit_ops(request: Request, instance_id: int, limit: int = 100,
-                           _u: ConsoleUser = Depends(_any_user)):
-    with get_session() as s:
-        inst = _instance_or_404(s, instance_id)
-    client = _require_valid_token(request, inst)
-    try:
-        data = await client.audit_ops(limit=limit)
-        _audit(request, inst, "audit.ops", detail=f"实例 {inst.name}")
-        return data
-    except InstanceError as e:
-        raise _map_instance_error(request, inst, e)
-
-
-# ── 控制台操作审计查看(本控制台自己的)──
 @app.get("/api/console/audit")
 async def console_audit(limit: int = 200,
-                        _admin: ConsoleUser = Depends(_admin_only)):
+                        _admin: ConsoleUser = Depends(require_roles("admin"))):
     limit = max(1, min(limit, 1000))
     with get_session() as s:
         rows = s.exec(select(ConsoleAudit).order_by(
             ConsoleAudit.id.desc()).limit(limit)).all()
         return [{
-            "id": r.id, "username": r.username,
-            "instance_name": r.instance_name, "action": r.action,
-            "ok": r.ok, "detail": r.detail,
+            "id": r.id, "username": r.username, "client_name": r.client_name,
+            "action": r.action, "ok": r.ok, "detail": r.detail,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in rows]
 

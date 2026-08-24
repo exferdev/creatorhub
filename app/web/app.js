@@ -68,109 +68,13 @@ function authedUrl(path) {  // <img>/<video> 无法带请求头, 用 query 令�
 function renderUserChip() {
   const chip = $("user-chip"); if (!chip) return;
   const u = authUser();
-  const navAdmin = $("nav-admin");
-  if (navAdmin) navAdmin.hidden = !(u && (u.role === "admin" || u.is_superuser));
   if (u) {
     chip.hidden = false;
     chip.innerHTML = `<span>${esc(u.username)}</span><span class="user-chip-role">${esc(u.role || "")}</span>` +
       `<button type="button" onclick="doLogout()" title="退出登录" aria-label="退出登录"><svg aria-hidden="true"><use href="#i-x"/></svg></button>`;
   } else chip.hidden = true;
 }
-// ─── 后台管理(admin) ───
-let ADMIN_USERS = [];
-async function refreshAdminPanel() {
-  if (!(authUser() && (authUser().role === "admin" || authUser().is_superuser))) {
-    toast("仅管理员可用", "err");
-    switchTab("overview");
-    return;
-  }
-  try {
-    const [users, reqs, ops] = await Promise.all([
-      api("/api/admin/users"),
-      api("/api/admin/audit-requests?limit=200"),
-      api("/api/admin/audit-ops?limit=200"),
-    ]);
-    ADMIN_USERS = users.users || [];
-    const me = authUser();
-    const tb = $("admin-users-table").querySelector("tbody");
-    tb.innerHTML = ADMIN_USERS.map(u => {
-      const self = u.id === (me && me.id);
-      const roleSel = ["viewer", "operator", "admin"].map(r =>
-        `<option value="${r}"${r === u.role ? " selected" : ""}>${r}</option>`).join("");
-      return `<tr>
-        <td class="num">${u.id}</td>
-        <td>${esc(u.username)}${u.display_name ? ` <span class="meta-chip">${esc(u.display_name)}</span>` : ""}</td>
-        <td><select data-uid="${u.id}" onchange="adminRoleChange(${u.id}, this.value)">${roleSel}</select></td>
-        <td>${u.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
-        <td class="num">${u.last_login_at ? new Date(u.last_login_at).toLocaleString() : "—"}</td>
-        <td class="ops">
-          <button class="ghost" type="button" onclick="adminToggleUser(${u.id})">${u.enabled ? "停用" : "启用"}</button>
-          <button class="ghost" type="button" onclick="adminResetPassword(${u.id}, '${esc(u.username)}')">重置密码</button>
-          ${self ? "" : `<button class="ghost" type="button" onclick="adminDeleteUser(${u.id})">删除</button>`}
-        </td>
-      </tr>`;
-    }).join("");
-    const rt = $("admin-req-table").querySelector("tbody");
-    rt.innerHTML = (reqs || []).map(r => `<tr>
-      <td class="num">${new Date(r.created_at).toLocaleString()}</td>
-      <td>${esc(r.username || "—")}</td>
-      <td>${esc(r.method)}</td>
-      <td><code>${esc(r.path)}</code></td>
-      <td class="num">${r.status_code}</td>
-      <td class="num">${r.duration_ms}</td></tr>`).join("");
-    const ot = $("admin-op-table").querySelector("tbody");
-    ot.innerHTML = (ops || []).map(o => `<tr>
-      <td class="num">${new Date(o.created_at).toLocaleString()}</td>
-      <td>${esc(o.action)}</td>
-      <td>${esc(o.actor)}</td>
-      <td>${esc((o.detail || "").slice(0, 80))}</td></tr>`).join("");
-  } catch (e) { toast("后台数据加载失败: " + e.message, "err"); }
-}
-function adminRoleChange(uid, role) {
-  api(`/api/admin/users/${uid}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role }) })
-    .then(() => { toast("角色已更新", "ok"); refreshAdminPanel(); })
-    .catch(e => toast("更新失败: " + e.message, "err"));
-}
-async function adminCreateUser() {
-  const username = $("au-username").value.trim(), password = $("au-password").value,
-        role = $("au-role").value;
-  if (!username || password.length < 8) { toast("用户名必填, 密码至少 8 位", "err"); return; }
-  try {
-    await api("/api/admin/users", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password, role }) });
-    $("au-username").value = ""; $("au-password").value = "";
-    toast("用户已创建", "ok");
-    refreshAdminPanel();
-  } catch (e) { toast("创建失败: " + e.message, "err"); }
-}
-async function adminToggleUser(uid) {
-  const u = ADMIN_USERS.find(x => x.id === uid);
-  if (!u) return;
-  try {
-    await api(`/api/admin/users/${uid}`, { method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: !u.enabled }) });
-    toast(u.enabled ? "已停用" : "已启用", "ok");
-    refreshAdminPanel();
-  } catch (e) { toast("操作失败: " + e.message, "err"); }
-}
-async function adminResetPassword(uid, name) {
-  const v = await uiPrompt({ title: `重置 ${name} 的密码`, placeholder: "新密码(至少 8 位)" });
-  if (!v) return;
-  try {
-    await api(`/api/admin/users/${uid}/password`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ new_password: v }) });
-    toast("密码已重置(该用户旧令牌全部失效)", "ok");
-  } catch (e) { toast("重置失败: " + e.message, "err"); }
-}
-async function adminDeleteUser(uid) {
-  if (!confirm("确认删除该用户？")) return;
-  try {
-    await api(`/api/admin/users/${uid}`, { method: "DELETE" });
-    toast("用户已删除", "ok");
-    refreshAdminPanel();
-  } catch (e) { toast("删除失败: " + e.message, "err"); }
-}
+
 async function doLogin(ev) {
   ev.preventDefault();
   const msg = $("login-msg"); if (msg) msg.textContent = "";
@@ -1178,7 +1082,6 @@ function switchTab(name, pushHistory = false) {
   }
   if (name === "collections") { populateCollectionAccount(); refreshCollections(); }
   if (name === "risk-control") refreshRiskCenter();
-  if (name === "admin-panel") refreshAdminPanel();
 }
 
 // ─── 扫码登录(真实浏览器窗口) ───
@@ -6029,7 +5932,7 @@ if ($("collection-job-table")) $("collection-job-table").innerHTML = collectionT
 if ($("collection-content-list")) $("collection-content-list").innerHTML = collectionResultSkeleton(4);
 
 // restore last-selected section (default: 总览);旧版四个独立页已并入「账号管理」
-const VALID_TABS = ["overview", "accounts", "risk-control", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "collections", "notifications", "browser", "settings", "admin-panel"];
+const VALID_TABS = ["overview", "accounts", "risk-control", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "collections", "notifications", "browser", "settings"];
 const LEGACY_HUB_TABS = ["myworks", "following", "fans", "dm"];
 switchTab((() => {
   try {

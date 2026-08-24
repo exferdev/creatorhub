@@ -1,4 +1,4 @@
-/* CreatorHub Console 前端(原生, 无构建链) */
+/* CreatorHub Console 前端(原生) — 客户端集中管理 */
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -50,7 +50,7 @@ async function doLogin(ev) {
     $("login-overlay").classList.remove("on");
     renderChip();
     $("main").classList.remove("hidden");
-    refreshInstances();
+    refreshClients();
   } catch (e) { if (msg) msg.textContent = e.message; }
 }
 async function doLogout() {
@@ -67,189 +67,126 @@ function renderChip() {
     `<button onclick="doLogout()">退出</button>`;
 }
 
-// ── 实例 ──
-let INSTANCES = [];
-async function refreshInstances() {
-  try {
-    const data = await api("/api/instances");
-    INSTANCES = data.instances || [];
-    $("inst-table").innerHTML = INSTANCES.map(i => `
-      <tr class="inst-item ${i.id === CURRENT_INST ? "active" : ""}" data-id="${i.id}" onclick="selectInstance(${i.id})">
-        <td>${esc(i.name)}</td><td><code>${esc(i.base_url)}</code></td>
-        <td><span class="pill ${i.online ? "ok" : "bad"}">${i.online ? "在线" : "离线"}</span></td>
-        <td><span class="pill ${i.token_ok ? "ok" : "warn"}">${i.token_ok ? "有效" : "待授权"}</span></td>
-        <td style="font-size:12px;color:var(--dim)">${esc(i.last_error || "")}</td>
-        <td>
-          <button class="ghost" type="button" onclick="event.stopPropagation();reauthInstance(${i.id})">重新授权</button>
-          <button class="danger" type="button" onclick="event.stopPropagation();deleteInstance(${i.id})">删除</button>
-        </td>
-      </tr>`).join("");
-  } catch (e) { toast(e.message, "err"); }
-}
-async function addInstance() {
-  const payload = {
-    name: $("inst-name").value.trim(), base_url: $("inst-url").value.trim(),
-    admin_username: $("inst-user").value.trim() || "admin",
-    admin_password: $("inst-pass").value,
-  };
-  if (!payload.name || !payload.base_url || !payload.admin_password) {
-    toast("名称/地址/实例密码必填", "err"); return;
-  }
-  try {
-    const out = await api("/api/instances", { method: "POST",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    $("inst-pass").value = "";
-    toast("实例已注册: " + out.name, "ok");
-    refreshInstances();
-  } catch (e) { toast(e.message, "err"); }
-}
-async function reauthInstance(id) {
-  const pass = prompt(`输入实例的 admin 密码（${INSTANCES.find(i => i.id === id)?.name}）`);
-  if (!pass) return;
-  try {
-    await api(`/api/instances/${id}/reauth`, { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: "admin", password: pass }) });
-    toast("已重新授权", "ok");
-    refreshInstances();
-  } catch (e) { toast(e.message, "err"); }
-}
-async function deleteInstance(id) {
-  if (!confirm("确认删除该实例注册？")) return;
-  try {
-    await api(`/api/instances/${id}`, { method: "DELETE" });
-    if (CURRENT_INST === id) { CURRENT_INST = null; $("detail-card").hidden = true; }
-    toast("已删除", "ok");
-    refreshInstances();
-  } catch (e) { toast(e.message, "err"); }
-}
+let CL = [], CURRENT = null;
+const canManage = () => { const u = authUser(); return u && (u.role === "admin" || u.role === "operator" || u.is_superuser); };
 
-// ── 实例详情视图 ──
-let CURRENT_INST = null;
-function selectInstance(id) {
-  CURRENT_INST = id;
-  document.querySelectorAll(".inst-item").forEach(el =>
-    el.classList.toggle("active", Number(el.dataset && el.dataset.id) === id));
+async function refreshClients() {
+  try {
+    const data = await api("/api/admin/clients");
+    CL = data.clients || [];
+    $("client-table").innerHTML = CL.length ? CL.map(c => `
+      <tr class="clk ${c.id === CURRENT ? "active" : ""}" data-id="${c.id}" onclick="selectClient(${c.id})">
+        <td>${esc(c.username)}</td>
+        <td><span class="pill ${c.online ? "ok" : "bad"}">${c.online ? "在线" : "离线"}</span></td>
+        <td><span class="pill ${c.disabled ? "bad" : "ok"}">${c.disabled ? "已停用" : "运行中"}</span></td>
+        <td>${esc(c.version || "—")}</td>
+        <td class="num">${c.last_seen_at ? new Date(c.last_seen_at).toLocaleTimeString() : "—"}</td>
+        <td class="num">${c.pending_commands}</td>
+        <td><button class="ghost" onclick="event.stopPropagation();selectClient(${c.id})">管理</button></td>
+      </tr>`).join("")
+      : `<tr><td colspan="7" style="color:var(--dim)">暂无客户端 — 客户端配置填入本控制台地址与账号密码后会自动出现</td></tr>`;
+  } catch (e) { toast(e.message, "err"); }
+}
+function selectClient(id) {
+  CURRENT = id;
+  document.querySelectorAll(".clk").forEach(el =>
+    el.classList.toggle("active", Number(el.dataset.id) === id));
   $("detail-card").hidden = false;
-  const inst = INSTANCES.find(i => i.id === id);
-  $("detail-title").textContent = `实例：${inst ? inst.name : id}`;
+  const c = CL.find(x => x.id === id);
+  $("detail-title").textContent = "客户端：" + (c ? c.username : id);
+  $("toggle-btn").textContent = c && c.disabled ? "启用" : "停用";
   vt("status");
-  refreshStatus();
 }
 function vt(name) {
   document.querySelectorAll(".tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.vi === name));
-  ["status", "users", "risk", "areq", "aop"].forEach(v =>
+  ["status", "audit", "cmds"].forEach(v =>
     $(`vi-${v}`).classList.toggle("hidden", v !== name));
-  if (name === "status") refreshStatus();
-  if (name === "users") refreshRemoteUsers();
-  if (name === "risk") refreshRemoteRisk();
-  if (name === "areq") refreshRemoteAudit("areq");
-  if (name === "aop") refreshRemoteAudit("aop");
+  if (name === "status") loadStatus();
+  if (name === "audit") loadAudit();
+  if (name === "cmds") loadCmds();
 }
-function cur() { return CURRENT_INST; }
-async function refreshStatus() {
+function cur() { const c = CL.find(x => x.id === CURRENT); return c ? c.username : ""; }
+async function loadStatus() {
   try {
-    const st = await api(`/api/instances/${cur()}/status`);
-    $("status-table").innerHTML = `
-      <tr><td>在线</td><td><span class="pill ${st.online ? "ok" : "bad"}">${st.online ? "在线" : "离线"}</span></td></tr>
-      <tr><td>账号数</td><td class="num">${st.account_count}</td></tr>
-      <tr><td>监控目标</td><td class="num">${st.monitor_count}</td></tr>
-      <tr><td>实例用户数</td><td class="num">${st.user_count}</td></tr>
-      <tr><td>最近错误</td><td style="font-size:12px;color:var(--dim)">${esc(st.last_error || "—")}</td></tr>`;
+    const c = await api(`/api/admin/clients/${encodeURIComponent(cur())}`);
+    const rows = [
+      ["在线", c.online ? "在线" : "离线"],
+      ["状态", c.disabled ? "已停用" : "运行中"],
+      ["上次心跳", c.last_seen_at ? new Date(c.last_seen_at).toLocaleString() : "—"],
+      ["版本", c.version || "—"],
+      ["账号数", (c.status && c.status.accounts) ?? "—"],
+      ["监控目标", (c.status && c.status.monitors) ?? "—"],
+      ["最近错误", c.last_error || "—"],
+    ];
+    $("status-table").innerHTML = rows.map(r =>
+      `<tr><td style="color:var(--dim)">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("");
   } catch (e) { toast(e.message, "err"); }
 }
-async function refreshRemoteUsers() {
+async function loadAudit() {
   try {
-    const data = await api(`/api/instances/${cur()}/users`);
-    const self = authUser();
-    $("users-table").querySelector("tbody").innerHTML = (data.users || []).map(u => `
-      <tr>
-        <td class="num">${u.id}</td>
-        <td>${esc(u.username)}</td>
-        <td><select onchange="remoteRole(${u.id}, this.value)">${["viewer", "operator", "admin"].map(r =>
-        `<option value="${r}"${r === u.role ? " selected" : ""}>${r}</option>`).join("")}</select></td>
-        <td><span class="pill ${u.enabled ? "ok" : "bad"}">${u.enabled ? "启用" : "停用"}</span></td>
-        <td>
-          <button class="ghost" onclick="remoteToggle(${u.id}, ${u.enabled})">${u.enabled ? "停用" : "启用"}</button>
-          <button class="ghost" onclick="remoteReset(${u.id})">重置密码</button>
-          <button class="danger" onclick="remoteDelete(${u.id}, '${esc(u.username)}')">删除</button>
-        </td>
-      </tr>`).join("");
+    const rows = await api(`/api/admin/clients/${encodeURIComponent(cur())}/audit?limit=100`) || [];
+    $("audit-table").querySelector("tbody").innerHTML = rows.map(r =>
+      `<tr><td class="num">${new Date(r.created_at).toLocaleString()}</td>
+        <td>${esc(r.kind)}</td><td><code>${esc(r.action)}</code></td>
+        <td>${esc(r.username || "—")}</td>
+        <td><span class="pill ${r.ok ? "ok" : "bad"}">${r.ok ? "正常" : "失败"}</span></td></tr>`).join("");
   } catch (e) { toast(e.message, "err"); }
 }
-async function remoteCreateUser() {
-  const name = $("ru-name").value.trim(), pass = $("ru-pass").value, role = $("ru-role").value;
-  if (!name || pass.length < 8) { toast("用户名必填, 密码至少 8 位", "err"); return; }
+async function loadCmds() {
   try {
-    await api(`/api/instances/${cur()}/users`, { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: name, password: pass, role }) });
-    $("ru-name").value = ""; $("ru-pass").value = "";
-    toast("已在实例建号", "ok");
-    refreshRemoteUsers();
+    const rows = await api(`/api/admin/clients/${encodeURIComponent(cur())}/commands?limit=50`) || [];
+    $("cmds-table").querySelector("tbody").innerHTML = rows.map(r =>
+      `<tr><td class="num">${r.id}</td><td>${esc(r.op)}</td>
+        <td><span class="pill ${r.status === "done" ? "ok" : r.status === "failed" ? "bad" : "warn"}">${esc(r.status)}</span></td>
+        <td>${esc((r.result || "").slice(0, 60))}</td>
+        <td class="num">${r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</td></tr>`).join("");
   } catch (e) { toast(e.message, "err"); }
 }
-async function remoteRole(uid, role) {
-  try { await api(`/api/instances/${cur()}/users/${uid}`, { method: "PATCH",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) });
-    toast("角色已更新", "ok"); refreshRemoteUsers();
-  } catch (e) { toast(e.message, "err"); }
-}
-async function remoteToggle(uid, enabled) {
-  try { await api(`/api/instances/${cur()}/users/${uid}`, { method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled: !enabled }) });
-    toast(enabled ? "已停用" : "已启用", "ok"); refreshRemoteUsers();
-  } catch (e) { toast(e.message, "err"); }
-}
-async function remoteReset(uid) {
-  const pw = prompt("新密码(至少 8 位)");
-  if (!pw || pw.length < 8) return;
-  try { await api(`/api/instances/${cur()}/users/${uid}/password`, { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ new_password: pw }) });
-    toast("密码已重置", "ok");
-  } catch (e) { toast(e.message, "err"); }
-}
-async function remoteDelete(uid, name) {
-  if (!confirm(`确认在实例上删除用户 ${name}？`)) return;
-  try { await api(`/api/instances/${cur()}/users/${uid}`, { method: "DELETE" });
-    toast("已删除", "ok"); refreshRemoteUsers();
-  } catch (e) { toast(e.message, "err"); }
-}
-async function refreshRemoteRisk() {
+async function toggleClient() {
+  if (!canManage()) { toast("权限不足", "err"); return; }
+  const c = CL.find(x => x.id === CURRENT);
+  const action = c && c.disabled ? "enable" : "disable";
+  if (action === "disable" && !confirm(`确认停用客户端 ${c.username}？`)) return;
   try {
-    const cfg = await api(`/api/instances/${cur()}/risk`);
-    $("risk-json").value = JSON.stringify(cfg, null, 2);
+    await api(`/api/admin/clients/${encodeURIComponent(cur())}/${action}`, { method: "POST" });
+    toast(action === "disable" ? "已停用(客户端下次轮询生效)" : "已启用", "ok");
+    refreshClients();
+    setTimeout(loadStatus, 400);
   } catch (e) { toast(e.message, "err"); }
 }
-async function remotePutRisk() {
-  let payload;
-  try { payload = JSON.parse($("risk-json").value); }
+async function resetPass() {
+  if (!canManage()) { toast("权限不足", "err"); return; }
+  const pw = $("rp-pass").value;
+  if (pw.length < 6) { toast("密码至少 6 位", "err"); return; }
+  try {
+    await api(`/api/admin/clients/${encodeURIComponent(cur())}/reset-password`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_password: pw }) });
+    $("rp-pass").value = "";
+    toast("已重置(客户端本机登录将按新密码验证)", "ok");
+  } catch (e) { toast(e.message, "err"); }
+}
+async function sendRiskCommand() {
+  if (!canManage()) { toast("权限不足", "err"); return; }
+  let params;
+  try { params = JSON.parse($("cmd-params").value); }
   catch (e) { toast("JSON 解析失败: " + e.message, "err"); return; }
-  try { await api(`/api/instances/${cur()}/risk`, { method: "PUT",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    toast("风控配置已应用", "ok");
-  } catch (e) { toast(e.message, "err"); }
-}
-async function refreshRemoteAudit(kind) {
-  const t = kind === "areq" ? "areq-table" : "aop-table";
-  const path = kind === "areq" ? "audit-requests" : "audit-ops";
   try {
-    const rows = await api(`/api/instances/${cur()}/${path}?limit=100`) || [];
-    $(t).querySelector("tbody").innerHTML = rows.map(r => kind === "areq"
-      ? `<tr><td class="num">${new Date(r.created_at).toLocaleString()}</td><td>${esc(r.username || "—")}</td><td>${esc(r.method)}</td><td><code>${esc(r.path)}</code></td><td class="num">${r.status_code}</td></tr>`
-      : `<tr><td class="num">${new Date(r.created_at).toLocaleString()}</td><td>${esc(r.action)}</td><td>${esc(r.actor)}</td><td>${esc((r.detail || "").slice(0, 80))}</td></tr>`).join("");
+    const out = await api(`/api/admin/clients/${encodeURIComponent(cur())}/command`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "risk.set", params }) });
+    toast(`指令已下发 (#${out.command_id}), 客户端下次轮询执行`, "ok");
+    setTimeout(loadCmds, 400);
   } catch (e) { toast(e.message, "err"); }
 }
 
-// ── 启动 ──
 (function boot() {
   if (!authToken()) { $("login-overlay").classList.add("on"); return; }
   api("/api/console/me").then(me => {
     setAuth(authToken(), me);
     renderChip();
     $("main").classList.remove("hidden");
-    refreshInstances();
+    refreshClients();
   }).catch(() => { $("login-overlay").classList.add("on"); });
 })();
