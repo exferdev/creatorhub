@@ -264,7 +264,7 @@ async def lifespan(app: FastAPI):
     if _T: _mark("housekeeping (sync)")
     engine.start()
     # 接入控制面: 启动注册 + 轮询(状态/审计上报、取令执行)
-    if cfg.console.enabled and registry_enabled(cfg):
+    if console_control_enabled(cfg):
         from .client_registry import run as _registry_run
         asyncio.create_task(_registry_run(cfg))
     if _T:
@@ -288,6 +288,12 @@ WEB_DIR = Path(__file__).parent / "web"
 from fastapi.security import OAuth2PasswordRequestForm
 
 
+def console_control_enabled(cfg: Config) -> bool:
+    """控制面接入生效与否: 配置开启且未被测试进程关闭(CREATORHUB_CONSOLE_OFF)。"""
+    return (cfg.console.enabled and registry_enabled(cfg)
+            and not os.environ.get("CREATORHUB_CONSOLE_OFF", "") == "1")
+
+
 @app.post("/api/admin/auth/login")
 async def admin_login(
         request: Request,
@@ -295,7 +301,7 @@ async def admin_login(
         user_manager=Depends(auth_setup.get_user_manager),
         strategy=Depends(auth_setup.get_strategy)):
     from .auth_setup import _login_window_gate, _login_window_clear
-    if cfg.console.enabled and registry_enabled(cfg):
+    if console_control_enabled(cfg):
         # ---- 控制面委派(严格): 账号密码由控制面统一校验 ----
         _login_window_gate(form.username or "")
         from .client_registry import client_disabled, verify_login as _reg_verify

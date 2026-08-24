@@ -1,10 +1,13 @@
-# CreatorHub Console 控制面(独立管理后台)依赖
-# 启动: python -m uvicorn console.main:app --host 127.0.0.1 --port 8100
+# CreatorHub Console 控制面(独立管理后台)依赖 —— 独立依赖栈(可高于客户端版本)
+# 启动: .venv-console\Scripts\python -m uvicorn console.main:app --host 127.0.0.1 --port 8100
+# 后台管理: http://<host>:8100/admin (starlette-admin, Django Admin 式)
 # 数据: console/data/console.db (独立于 CreatorHub 实例)
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-sqlmodel==0.0.22
-pyyaml==6.0.3
+fastapi>=0.140            # 新版与 starlette 1.x 配套(不受客户端 0.115 钉子约束)
+uvicorn[standard]>=0.30
+sqlmodel>=0.0.22
+pyyaml>=6.0
 httpx>=0.28
+starlette-admin>=0.17     # 服务端渲染管理台(数据浏览/筛选/编辑自动生成)
+itsdangerous>=2.0         # starlette-admin 会话签名
 fastapi-users[sqlalchemy]>=15.0
 argon2-cffi>=23.1

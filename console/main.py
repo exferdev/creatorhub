@@ -28,9 +28,12 @@ from .db import get_session
 from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
                      ConsoleUser)
 
-CONSOLE_DB = os.environ.get(
-    "CONSOLE_DB_PATH",
-    str(Path(__file__).resolve().parent.parent / "console" / "data" / "console.db"))
+_DEFAULT_DB = str(Path(__file__).resolve().parent.parent / "console" / "data" / "console.db")
+
+
+def console_db_path() -> str:
+    """实时取数据库路径(测试可随时换库, 不受 import 时点影响)。"""
+    return os.environ.get("CONSOLE_DB_PATH") or _DEFAULT_DB
 WEB_DIR = Path(__file__).resolve().parent / "web"
 POLL_INTERVAL = 30          # 建议轮询间隔(秒), 客户端可覆盖心跳
 AUDIT_BATCH_LIMIT = 500     # 单次轮询审计增量上限
@@ -39,14 +42,35 @@ AUDIT_BATCH_LIMIT = 500     # 单次轮询审计增量上限
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        if ensure_bootstrap_console_admin(CONSOLE_DB):
+        if ensure_bootstrap_console_admin(console_db_path()):
             print("[console] 控制台管理员已初始化(admin), 初始密码见上")
     except Exception as e:
         print(f"[console] 初始化失败(不影响启动): {e!r}")
+    # 挂载 starlette-admin 后台(引擎已就绪; starlette-admin 缺省时跳过)
+    try:
+        from .db import _engine
+        if _engine is not None and _HAS_ADMIN_DEPS \
+                and not getattr(app, "_console_admin_mounted", False):
+            from .admin import build_admin
+            build_admin(_engine).mount_to(app)
+            app._console_admin_mounted = True
+            print("[console] 后台管理 /admin 已挂载(starlette-admin)")
+    except Exception as e:
+        print(f"[console] 后台管理挂载跳过(需要 starlette-admin): {e!r}")
     yield
 
 
 app = FastAPI(title="CreatorHub Console", lifespan=lifespan)
+
+# ── 后台会话(条件依赖: 主 venv 无 starlette-admin 时跳过, 不影响 API)──
+try:
+    from starlette.middleware.sessions import SessionMiddleware
+    from .admin import ADMIN_SECRET
+    app.add_middleware(SessionMiddleware, secret_key=ADMIN_SECRET,
+                       https_only=False)
+    _HAS_ADMIN_DEPS = True
+except Exception:  # 无 starlette-admin/itsdangerous 环境: 仅无 /admin
+    _HAS_ADMIN_DEPS = False
 app.include_router(fastapi_users.get_auth_router(auth_backend),
                    prefix="/api/console/auth")
 
@@ -98,7 +122,8 @@ async def console_change_password(body: ChangePasswordIn,
 OPEN_EXACT = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
 OPEN_PREFIX = ("/static",
                "/api/console/auth/",
-               "/api/clients/",)   # 客户端注册/轮询/验证: 免控制台登录(自有认证)
+               "/api/clients/",    # 客户端注册/轮询/验证: 免控制台登录(自有认证)
+               "/admin",)          # starlette-admin 后台: 自带会话鉴权(admin/operator)
 
 
 @app.middleware("http")
@@ -468,3 +493,4 @@ async def index():
 
 
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="console-static")
+# (starlette-admin 后台与 SessionMiddleware 在 lifespan 内挂载, 缺依赖时跳过)
