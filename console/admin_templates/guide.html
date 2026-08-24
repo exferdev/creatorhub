@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header d-print-none mb-3"><h1>客户端接入指引</h1></div>
+  <div class="card">
+    <div class="card-header"><h3 class="card-title">新客户端接入(一台客户端 = 一个账号)</h3></div>
+    <div class="card-body">
+      <ol class="list-group list-group-numbered mb-3">
+        <li class="list-group-item">在客户端机器上安装/更新 CreatorHub(保持与控制面同版本)。</li>
+        <li class="list-group-item">在下方控制台创建或直接使用已有「控制台用户」登录本后台;
+            <b>客户端账号由客户端首次注册自动创建</b>(无需预建)。</li>
+        <li class="list-group-item">打开客户端 config.yaml, 填入 <code>console:</code> 段(见下), 重启客户端。</li>
+        <li class="list-group-item">客户端启动即主动注册并轮询 —— 本页面「客户端账号」列表将自动出现, 无需任何网络入口。</li>
+      </ol>
+      <h4>config.yaml 配置示例</h4>
+      <pre class="bg-dark text-light p-3 rounded"><code># 接入控制面(独立管理后台): 一台客户端 = 一个账号; 本机登录以控制面验证为准
+console:
+  enabled: true
+  url: http://控制面地址:8100
+  username: srv-1          # 本客户端账号(注册时自动创建)
+  password: 强密码          # 账号密码(本机登录也用它)
+  poll_interval_seconds: 30  # 轮询/心跳间隔; 越小操控越实时
+</code></pre>
+      <h4>之后您可以在本后台</h4>
+      <ul>
+        <li><b>客户端账号</b>：查看在线/状态、停用/启用、重置密码、下发风控指令(行内按钮)。</li>
+        <li><b>客户端审计 / 指令记录</b>：远程查看推送来的请求/操作审计与指令执行回执。</li>
+        <li><b>安全</b>：停用后该客户端本机登录被拒(严格验证); 重置密码立即生效。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

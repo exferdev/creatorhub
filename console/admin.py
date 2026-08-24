@@ -12,12 +12,13 @@ import secrets
 from typing import Any, Optional
 
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from starlette_admin import BaseAdmin
 from starlette_admin.actions import row_action
 from starlette_admin.auth import AdminUser, AuthProvider
 from starlette_admin.contrib.sqla import ModelView
 from starlette_admin.exceptions import ActionFailed, LoginFailed
+from starlette_admin.views import CustomView
 
 from .db import get_session
 from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
@@ -68,6 +69,7 @@ class ClientAccountView(ModelView):
     name = "客户端账号"
     label = "客户端账号"
     identity = "client"
+    icon = "fa-solid fa-laptop"
     fields = ["id", "username", "note", "disabled", "version",
               "registered_at", "last_seen_at", "last_error", "status_json"]
     exclude_fields_from_list = ["status_json"]
@@ -203,6 +205,7 @@ class ClientAuditView(ModelView):
     name = "客户端审计"
     label = "客户端审计"
     identity = "clientaudit"
+    icon = "fa-solid fa-scroll"
     fields = ["id", "client_name", "kind", "action", "username",
               "detail", "ok", "created_at"]
     exclude_fields_from_edit = list(fields)
@@ -218,6 +221,7 @@ class ClientCommandView(ModelView):
     name = "指令记录"
     label = "指令记录"
     identity = "clientcmd"
+    icon = "fa-solid fa-paper-plane"
     fields = ["id", "client_name", "op", "params", "status", "result",
               "created_at", "done_at"]
     exclude_fields_from_edit = list(fields)
@@ -227,11 +231,28 @@ class ClientCommandView(ModelView):
     page_size = 50
 
 
+class ConsoleAuditView(ModelView):
+    """控制台自身操作审计(谁对哪台客户端做了什么, 只读)。"""
+    name = "操作审计"
+    label = "操作审计"
+    identity = "consoleaudit"
+    icon = "fa-solid fa-user-shield"
+    fields = ["id", "username", "client_name", "action", "ok", "detail",
+              "created_at"]
+    exclude_fields_from_edit = list(fields)
+    exclude_fields_from_create = list(fields)
+    exclude_fields_from_detail = ["id"]
+    searchable_fields = ["username", "client_name", "action"]
+    sortable_fields = ["id", "username", "client_name", "created_at"]
+    page_size = 50
+
+
 class ConsoleUserView(ModelView):
     """控制台用户(只读浏览; 建号/改密走现有 /api/admin/users)。"""
     name = "控制台用户"
     label = "控制台用户"
     identity = "consoleuser"
+    icon = "fa-solid fa-users"
     fields = ["id", "username", "display_name", "role", "is_active",
               "is_superuser", "created_at", "last_login_at"]
     exclude_fields_from_edit = list(fields)
@@ -241,20 +262,115 @@ class ConsoleUserView(ModelView):
     page_size = 25
 
 
+class DashboardView(CustomView):
+    """仪表盘: 总览统计 + 最近动态。"""
+
+    def __init__(self):
+        super().__init__(label="仪表盘", icon="fa-solid fa-gauge-high",
+                         path="/", template_path="dashboard.html",
+                         name="index")
+
+    async def render(self, request: Request, templates) -> Response:
+        from sqlalchemy import func, select
+        session = request.state.session
+        total = session.execute(select(func.count()).select_from(
+            ClientAccount)).scalar_one()
+        disabled = session.execute(select(func.count()).select_from(
+            ClientAccount).where(ClientAccount.disabled.is_(True))).scalar_one()
+        pending = session.execute(select(func.count()).select_from(
+            ClientCommand).where(ClientCommand.status == "pending")).scalar_one()
+        online = session.execute(select(func.count()).select_from(
+            ClientAccount).where(ClientAccount.last_seen_at.is_not(None),
+                                 ClientAccount.disabled.is_(False))).scalar_one()
+        audits = session.execute(select(ConsoleAudit).order_by(
+            ConsoleAudit.id.desc()).limit(10)).scalars().all()
+        client_audits = session.execute(select(ClientAudit).order_by(
+            ClientAudit.id.desc()).limit(8)).scalars().all()
+        return templates.TemplateResponse(request=request,
+                                          name=self.template_path,
+                                          context={
+            "title": self.title(request),
+            "stats": {"clients": int(total), "online": int(online),
+                      "disabled": int(disabled),
+                      "pending_cmds": int(pending)},
+            "audits": audits, "client_audits": client_audits,
+        })
+
+
+class GuideView(CustomView):
+    """客户端接入指引(静态说明页)。"""
+
+    def __init__(self):
+        super().__init__(label="接入指引", icon="fa-solid fa-book",
+                         path="/guide", template_path="guide.html")
+
+
+class PasswordView(CustomView):
+    """修改自身密码(GET 表单 / POST 处理, 成功后吊销旧令牌)。"""
+
+    def __init__(self):
+        super().__init__(label="修改密码", icon="fa-solid fa-key",
+                         path="/password", template_path="password.html",
+                         methods=["GET", "POST"])
+
+    async def render(self, request: Request, templates) -> Response:
+        from fastapi_users.password import PasswordHelper
+        from sqlmodel import select as _select
+        ctx = {"title": self.title(request), "msg": None, "ok": False}
+        if request.method == "POST":
+            form = await request.form()
+            cur = str(form.get("current_password") or "")
+            new = str(form.get("new_password") or "")
+            confirm = str(form.get("confirm_password") or "")
+            name = request.session.get("console_user", "")
+            if len(new) < 8:
+                ctx.update(msg="新密码至少 8 位")
+            elif new != confirm:
+                ctx.update(msg="两次输入的新密码不一致")
+            elif new == cur:
+                ctx.update(msg="新密码不能与当前密码相同")
+            else:
+                ph = PasswordHelper()
+                with get_session() as s:
+                    u = s.exec(_select(ConsoleUser).where(
+                        ConsoleUser.username == name)).first()
+                    if u is None or not ph.verify_and_update(
+                            cur, u.hashed_password)[0]:
+                        ctx.update(msg="当前密码不正确")
+                    else:
+                        u.hashed_password = ph.hash(new)
+                        s.add(u)
+                        s.commit()
+                        # 吊销该用户全部登录令牌(需重新登录)
+                        from .console_auth import SyncAccessTokenDatabase
+                        await SyncAccessTokenDatabase(s).delete_all_for_user(u.id)
+                        ctx.update(msg="密码已修改, 请用新密码重新登录", ok=True)
+        return templates.TemplateResponse(request=request,
+                                          name=self.template_path,
+                                          context=ctx)
+
+
 def build_admin(engine) -> BaseAdmin:
+    from pathlib import Path
     from starlette.middleware import Middleware
     from starlette.middleware.sessions import SessionMiddleware
     from starlette_admin.contrib.sqla import Admin as SqlaAdmin
     # 注意: 必须用 sqla 的 Admin(自动挂 SQLAlchemyMiddleware → request.state.session)
+    tpl_dir = str(Path(__file__).resolve().parent / "admin_templates")
     admin = SqlaAdmin(
         engine,
         title="CreatorHub Console 后台",
         base_url="/admin",
+        templates_dir=tpl_dir,
+        index_view=DashboardView(),
         auth_provider=ConsoleAuthProvider(),
         middlewares=[Middleware(SessionMiddleware, secret_key=ADMIN_SECRET)],
     )
     admin.add_view(ClientAccountView(ClientAccount))
     admin.add_view(ClientAuditView(ClientAudit))
     admin.add_view(ClientCommandView(ClientCommand))
+    admin.add_view(ConsoleAuditView(ConsoleAudit))
     admin.add_view(ConsoleUserView(ConsoleUser))
+    admin.add_view(GuideView())
+    admin.add_view(PasswordView())
     return admin

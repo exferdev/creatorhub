@@ -1,0 +1,81 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header d-print-none mb-3">
+    <div class="d-flex justify-content-between align-items-center">
+      <h1>仪表盘</h1>
+    </div>
+  </div>
+  <div class="row row-deck row-cards">
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">客户端总数</div>
+        <div class="display-6 fw-bold">{{ stats.clients }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">在线</div>
+        <div class="display-6 fw-bold text-success">{{ stats.online }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">已停用</div>
+        <div class="display-6 fw-bold text-danger">{{ stats.disabled }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">待办指令</div>
+        <div class="display-6 fw-bold text-warning">{{ stats.pending_cmds }}</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="row mt-3">
+    <div class="col-lg-7">
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">控制台操作审计 · 最近 10 条</h3></div>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead><tr><th>时间</th><th>操作人</th><th>客户端</th><th>动作</th><th>结果</th></tr></thead>
+            <tbody>
+              {% for a in audits %}
+              <tr>
+                <td class="text-nowrap">{{ a.created_at.strftime("%m-%d %H:%M") if a.created_at else "" }}</td>
+                <td>{{ a.username or "—" }}</td>
+                <td>{{ a.client_name or "—" }}</td>
+                <td>{{ a.action }}</td>
+                <td>{% if a.ok %}<span class="text-success">成功</span>{% else %}<span class="text-danger">失败</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+              {% if not audits %}<tr><td colspan="5" class="text-muted">暂无记录</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">客户端推送审计 · 最近 8 条</h3></div>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead><tr><th>客户端</th><th>动作</th><th>结果</th></tr></thead>
+            <tbody>
+              {% for a in client_audits %}
+              <tr>
+                <td>{{ a.client_name }}</td>
+                <td class="text-truncate" style="max-width:220px">{{ a.action }}</td>
+                <td>{% if a.ok %}<span class="text-success">正常</span>{% else %}<span class="text-danger">失败</span>{% endif %}</td>
+              </tr>
+              {% endfor %}
+              {% if not client_audits %}<tr><td colspan="3" class="text-muted">暂无记录</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

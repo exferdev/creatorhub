@@ -124,11 +124,57 @@ class AdminUITests(unittest.TestCase):
         with self._client() as client:
             self._login_admin(client)
             for path in ("/admin/clientaudit/list", "/admin/clientcmd/list",
-                         "/admin/consoleuser/list"):
+                         "/admin/consoleuser/list", "/admin/consoleaudit/list"):
                 r = client.get(path)
                 self.assertEqual(r.status_code, 200, f"{path}: {r.status_code}")
             self.assertIn("boss", client.get(
                 "/admin/consoleuser/list").text)
+
+    def test_dashboard_guide_password_pages(self):
+        with self._client() as client:
+            self._login_admin(client)
+            # 仪表盘: 统计卡片 + 操作审计动态
+            r = client.get("/admin/")
+            self.assertEqual(r.status_code, 200, r.text[:200])
+            self.assertIn("客户端总数", r.text)
+            self.assertIn("待办指令", r.text)
+            # 接入指引
+            r = client.get("/admin/guide")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("config.yaml", r.text)
+            # 改密页修改的是"当前登录用户"; 先切到 op 再改(测完改回)
+            r = client.post("/admin/login",
+                            data={"username": "op", "password": "op-pass-123"},
+                            follow_redirects=False)
+            self.assertIn(r.status_code, (303, 302), r.text[:200])
+            r = client.post("/admin/password",
+                            data={"current_password": "wrong",
+                                  "new_password": "op-pass-2",
+                                  "confirm_password": "op-pass-2"})
+            self.assertIn("当前密码不正确", r.text)
+            r = client.post("/admin/password",
+                            data={"current_password": "op-pass-123",
+                                  "new_password": "op-pass-2",
+                                  "confirm_password": "op-pass-2"})
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("密码已修改", r.text)
+            # 新密码可登录
+            r = client.post("/api/console/auth/login",
+                            data={"username": "op",
+                                  "password": "op-pass-2"})
+            self.assertEqual(r.status_code, 200, r.text)
+            # 改回, 保持其它用例稳定
+            r = client.post("/admin/login",
+                            data={"username": "op", "password": "op-pass-2"},
+                            follow_redirects=False)
+            client.post("/admin/password",
+                        data={"current_password": "op-pass-2",
+                              "new_password": "op-pass-123",
+                              "confirm_password": "op-pass-123"})
+            r = client.post("/api/console/auth/login",
+                            data={"username": "op",
+                                  "password": "op-pass-123"})
+            self.assertEqual(r.status_code, 200, r.text)
 
     def test_row_actions_disable_enable_reset_risk(self):
         from console.models import ClientCommand, ConsoleAudit
