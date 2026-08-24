@@ -1,11 +1,12 @@
 """Console 后台管理界面(starlette-admin, Django Admin 式)。
 
 服务端渲染管理台: 客户端账号/审计/指令/用户 数据浏览·筛选·编辑由 ModelView
-自动生成; 启停/重置密码/下发指令等动作走现有 /api/admin/clients/*(原前端页保留
-为动作入口)。需要独立依赖栈(requirements-console.txt): fastapi(新版)+starlette-admin。
+自动生成; 启停/重置密码/下发指令做成行内动作按钮(原首页控制面板保留)。
+需要独立依赖栈(requirements-console.txt): fastapi(新版)+starlette-admin。
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from typing import Any, Optional
@@ -13,12 +14,14 @@ from typing import Any, Optional
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 from starlette_admin import BaseAdmin
+from starlette_admin.actions import row_action
 from starlette_admin.auth import AdminUser, AuthProvider
 from starlette_admin.contrib.sqla import ModelView
-from starlette_admin.exceptions import LoginFailed
+from starlette_admin.exceptions import ActionFailed, LoginFailed
 
 from .db import get_session
-from .models import ClientAccount, ClientAudit, ClientCommand, ConsoleUser
+from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
+                     ConsoleUser)
 
 ADMIN_SECRET = os.environ.get("CONSOLE_ADMIN_SECRET") or secrets.token_hex(16)
 
@@ -61,7 +64,7 @@ class ConsoleAuthProvider(AuthProvider):
 
 
 class ClientAccountView(ModelView):
-    """客户端账号: 列表/筛选/编辑; 敏感字段不展示不编辑。"""
+    """客户端账号: 列表/筛选/编辑; 敏感字段不展示不编辑; 行内启停/密码/指令。"""
     name = "客户端账号"
     label = "客户端账号"
     identity = "client"
@@ -75,6 +78,124 @@ class ClientAccountView(ModelView):
     searchable_fields = ["username", "note"]
     sortable_fields = ["id", "username", "disabled", "last_seen_at"]
     page_size = 25
+    row_actions = ["client_disable", "client_enable",
+                   "client_reset_password", "client_send_risk"]
+
+    def _get_acc(self, request: Request, pk: Any) -> ClientAccount:
+        try:
+            cid = int(pk)
+        except (TypeError, ValueError):
+            raise ActionFailed("无效的客户端 ID")
+        with get_session() as s:
+            acc = s.get(ClientAccount, cid)
+        if acc is None:
+            raise ActionFailed("客户端不存在")
+        return acc
+
+    def _audit(self, request: Request, acc: ClientAccount, action_name: str,
+               detail: str = "", ok: bool = True):
+        try:
+            with get_session() as s:
+                s.add(ConsoleAudit(
+                    username=request.session.get("console_user", "") or "",
+                    client_id=acc.id, client_name=acc.username,
+                    action=action_name, ok=ok, detail=detail[:500]))
+                s.commit()
+        except Exception:
+            pass
+
+    @row_action(name="client_disable", text="停用",
+                confirmation="确认停用该客户端？(下次轮询生效)",
+                action_btn_class="btn-outline-danger")
+    async def client_disable_action(self, request: Request, pk: Any) -> str:
+        acc = self._get_acc(request, pk)
+        with get_session() as s:
+            a2 = s.get(ClientAccount, acc.id)
+            if a2.disabled:
+                raise ActionFailed("客户端已是停用状态")
+            a2.disabled = True
+            s.add(a2)
+            s.commit()
+            username = a2.username
+        self._audit(request, acc, "client.disable", detail=f"停用 {username}")
+        return f"客户端 {username} 已停用"
+
+    @row_action(name="client_enable", text="启用",
+                action_btn_class="btn-outline-success")
+    async def client_enable_action(self, request: Request, pk: Any) -> str:
+        acc = self._get_acc(request, pk)
+        with get_session() as s:
+            a2 = s.get(ClientAccount, acc.id)
+            if not a2.disabled:
+                raise ActionFailed("客户端已在运行状态")
+            a2.disabled = False
+            s.add(a2)
+            s.commit()
+            username = a2.username
+        self._audit(request, acc, "client.enable", detail=f"启用 {username}")
+        return f"客户端 {username} 已启用"
+
+    @row_action(name="client_reset_password", text="重置密码",
+                action_btn_class="btn-outline-primary",
+                form="""
+                <form>
+                    <div class="mt-3">
+                        <label class="form-label">新密码(至少 6 位)</label>
+                        <input type="password" class="form-control"
+                               name="new_password" autocomplete="new-password">
+                    </div>
+                </form>
+                """)
+    async def client_reset_password_action(self, request: Request,
+                                           pk: Any) -> str:
+        from fastapi_users.password import PasswordHelper
+        data = await request.form()
+        new_pw = str(data.get("new_password") or "")
+        if len(new_pw) < 6:
+            raise ActionFailed("新密码至少 6 位")
+        acc = self._get_acc(request, pk)
+        with get_session() as s:
+            a2 = s.get(ClientAccount, acc.id)
+            a2.password_hash = PasswordHelper().hash(new_pw)
+            s.add(a2)
+            s.commit()
+            username = a2.username
+        self._audit(request, acc, "client.password_reset",
+                    detail=f"重置 {username} 密码")
+        return f"客户端 {username} 密码已重置(本机登录按新密码)"
+
+    @row_action(name="client_send_risk", text="下发风控指令",
+                action_btn_class="btn-outline-warning",
+                form="""
+                <form>
+                    <div class="mt-3">
+                        <label class="form-label">风控配置 JSON(risk.set)</label>
+                        <textarea class="form-control" rows="5" name="payload"
+                                  placeholder='{"risk_control":{"enabled":true},"schedule":{}}'></textarea>
+                    </div>
+                </form>
+                """)
+    async def client_send_risk_action(self, request: Request, pk: Any) -> str:
+        data = await request.form()
+        raw = str(data.get("payload") or "")
+        try:
+            params = json.loads(raw)
+        except Exception:
+            raise ActionFailed("JSON 解析失败, 请检查格式")
+        if not isinstance(params, dict):
+            raise ActionFailed("指令参数必须是 JSON 对象")
+        acc = self._get_acc(request, pk)
+        with get_session() as s:
+            cmd = ClientCommand(client_id=acc.id, client_name=acc.username,
+                                op="risk.set",
+                                params=json.dumps(params, ensure_ascii=False))
+            s.add(cmd)
+            s.commit()
+            cid = cmd.id
+            username = acc.username
+        self._audit(request, acc, "client.command",
+                    detail=f"下发 risk.set 至 {username}")
+        return f"指令 #{cid} 已下发至 {username}(下次轮询执行)"
 
 
 class ClientAuditView(ModelView):
