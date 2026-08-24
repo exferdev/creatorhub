@@ -21,8 +21,8 @@ from starlette_admin.exceptions import ActionFailed, LoginFailed
 from starlette_admin.views import CustomView
 
 from .db import get_session
-from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
-                     ConsoleUser)
+from .models import (AlgoKey, ClientAccount, ClientAudit, ClientCommand,
+                     ConsoleAudit, ConsoleUser)
 
 ADMIN_SECRET = os.environ.get("CONSOLE_ADMIN_SECRET") or secrets.token_hex(16)
 
@@ -350,6 +350,122 @@ class PasswordView(CustomView):
                                           context=ctx)
 
 
+class AlgoCenterView(CustomView):
+    """算法中心: 注册表/切换回滚 + 指标趋势 + 服务/客户端双健康 + 密钥管理。
+
+    GET 拉取远程数据; POST 处理 switch / key_create / key_delete(操作落审计)。
+    Admin-Key 来自 env CONSOLE_ALGO_ADMIN_KEY; 未配置时页面给出提示。
+    """
+    icon = "fa-solid fa-microchip"
+
+    def __init__(self):
+        super().__init__(label="算法中心", icon=self.icon,
+                         path="/algo", template_path="algo.html",
+                         methods=["GET", "POST"])
+
+    def _ctx_base(self, request: Request) -> dict:
+        return {
+            "title": self.title(request), "msg": None, "ok": False,
+            "algo_configured": bool(os.environ.get("CONSOLE_ALGO_ADMIN_KEY", "")),
+            "catalog": {}, "health_algorithms": [], "health_ok": 0,
+            "health_total": 0, "client_health": [], "keys": [],
+            "history_json": "[]", "new_key_value": "",
+        }
+
+    async def render(self, request: Request, templates) -> Response:
+        from .main import (_algo_client, _algo_metrics_sample)
+        ctx = self._ctx_base(request)
+        if request.method == "POST":
+            form = await request.form()
+            action = str(form.get("action") or "")
+            try:
+                if action == "switch":
+                    out = await _algo_client().switch(
+                        str(form.get("platform") or ""),
+                        str(form.get("algorithm") or ""),
+                        str(form.get("version") or ""))
+                    ctx.update(msg=f"已切换: {out.get('platform')}/{out.get('algorithm')} → {out.get('version')}",
+                               ok=True)
+                    self._ar(request, "algo.switch",
+                             f"{form.get('platform')}/{form.get('algorithm')} → {form.get('version')}")
+                elif action == "key_create":
+                    import secrets as _secrets
+                    from .models import AlgoKey as _AK
+                    key = _secrets.token_urlsafe(32)
+                    with get_session() as s:
+                        row = _AK(name=str(form.get("key_name") or "unnamed")[:40],
+                                  key_value=key)
+                        s.add(row)
+                        s.commit()
+                    ctx.update(msg="密钥已生成(见下方新密钥框)",
+                               new_key_value=key, ok=True)
+                    self._ar(request, "algo.key.create",
+                             f"生成算法密钥 #{row.id}")
+                elif action == "key_delete":
+                    kid = int(form.get("key_id") or 0)
+                    with get_session() as s:
+                        row = s.get(AlgoKey, kid)
+                        if row:
+                            s.delete(row)
+                            s.commit()
+                    ctx.update(msg="密钥登记已删除", ok=True)
+                    self._ar(request, "algo.key.delete", f"删除算法密钥 #{kid}")
+                else:
+                    ctx.update(msg=f"未知操作: {action}")
+            except Exception as e:
+                ctx.update(msg=f"操作失败: {e}")
+        # 拉取远程数据
+        try:
+            client = _algo_client()
+            cat = await client.catalog()
+            ctx["catalog"] = (cat.get("catalog") or {})
+            health = await client.health()
+            ctx["health_algorithms"] = health.get("algorithms") or []
+            ctx["health_ok"] = sum(1 for a in ctx["health_algorithms"] if a.get("ok"))
+            ctx["health_total"] = len(ctx["health_algorithms"])
+            snap = await client.metrics()
+            ctx["history_json"] = json.dumps(
+                await _algo_metrics_sample(snap), ensure_ascii=False)
+        except Exception as e:
+            ctx.update(msg=ctx["msg"] or f"算法服务不可达: {e}")
+        # 客户端命中健康 + 密钥列表(本地)
+        from .main import _algo_client as _unused  # noqa: F401
+        with get_session() as s:
+            from sqlmodel import select as _sel
+            from .models import ClientAccount as _CA, AlgoKey as _AK2
+            accs = s.exec(_sel(_CA)).all()
+            from datetime import datetime as _dt, timedelta as _td
+            from .main import POLL_INTERVAL as _PI
+            out = []
+            for a in accs:
+                st = json.loads(a.status_json or "{}")
+                sh = st.get("sign_health") or {}
+                online = a.last_seen_at is not None and \
+                    _dt.utcnow() - a.last_seen_at <= _td(seconds=_PI * 3)
+                out.append({"client": a.username, "online": online,
+                            "disabled": a.disabled, "sign_health": sh})
+            ctx["client_health"] = out
+            ctx["keys"] = [{
+                "id": r.id, "name": r.name, "enabled": r.enabled,
+                "key_prefix": (r.key_value or "")[:12] + "…",
+            } for r in s.exec(_sel(_AK2).order_by(_AK2.id)).all()]
+        return templates.TemplateResponse(request=request,
+                                          name=self.template_path,
+                                          context=ctx)
+
+    def _ar(self, request: Request, action_name: str, detail: str = ""):
+        """落控制台操作审计。"""
+        try:
+            from .models import ConsoleAudit as _CA
+            with get_session() as s:
+                s.add(_CA(
+                    username=request.session.get("console_user", "") or "",
+                    action=action_name, ok=True, detail=detail[:500]))
+                s.commit()
+        except Exception:
+            pass
+
+
 def build_admin(engine) -> BaseAdmin:
     from pathlib import Path
     from starlette.middleware import Middleware
@@ -371,6 +487,7 @@ def build_admin(engine) -> BaseAdmin:
     admin.add_view(ClientCommandView(ClientCommand))
     admin.add_view(ConsoleAuditView(ConsoleAudit))
     admin.add_view(ConsoleUserView(ConsoleUser))
+    admin.add_view(AlgoCenterView())
     admin.add_view(GuideView())
     admin.add_view(PasswordView())
     return admin

@@ -88,11 +88,19 @@ def _collect_status(cfg: Config) -> dict:
                 DouyinAccount)).one()
             monitors = s.exec(select(func.count()).select_from(
                 MonitorTarget)).one()
-        return {"version": _version_string(), "accounts": int(accounts),
-                "monitors": int(monitors), "time": datetime.now().isoformat()}
+        out = {"version": _version_string(), "accounts": int(accounts),
+               "monitors": int(monitors), "time": datetime.now().isoformat()}
     except Exception as e:
         log.warning("状态采集失败: %r", e)
-        return {"version": _version_string()}
+        out = {"version": _version_string(),
+               "time": datetime.now().isoformat()}
+    # 签名服务命中健康(M4: 算法中心"客户端命中健康"面板数据源; 失败静默)
+    try:
+        from .platforms.sign_stats import snapshot as _sign_snapshot
+        out["sign_health"] = _sign_snapshot()
+    except Exception:
+        pass
+    return out
 
 
 def _collect_audit_delta(cfg: Config, limit: int = 50) -> list[dict]:

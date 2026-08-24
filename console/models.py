@@ -76,6 +76,22 @@ class ClientAudit(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class AlgoKey(SQLModel, table=True):
+    """算法服务客户端密钥登记(签发后需同步写入 Worker secrets 才生效)。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""
+    key_value: str = ""                    # 明文存储于控制台库(本地单机); 如需多管理员共享可后续加密
+    enabled: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AlgoMetricSample(SQLModel, table=True):
+    """算法服务遥测历史样本(Console 侧累计, 供图表; 保留最近 7 天)。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=datetime.utcnow, index=True)
+    payload_json: str = ""                 # /metrics 快照 JSON
+
+
 class ConsoleAudit(SQLModel, table=True):
     """控制面自身操作审计: 哪位管理员对哪台客户端做了什么。"""
     id: Optional[int] = Field(default=None, primary_key=True)

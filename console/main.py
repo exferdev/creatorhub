@@ -25,8 +25,8 @@ from .console_auth import (auth_backend, auth_bypass_enabled, current_user,
                            ensure_bootstrap_console_admin, fastapi_users,
                            hash_password, require_roles)
 from .db import get_session
-from .models import (ClientAccount, ClientAudit, ClientCommand, ConsoleAudit,
-                     ConsoleUser)
+from .models import (AlgoKey, AlgoMetricSample, ClientAccount, ClientAudit,
+                     ClientCommand, ConsoleAudit, ConsoleUser)
 
 _DEFAULT_DB = str(Path(__file__).resolve().parent.parent / "console" / "data" / "console.db")
 
@@ -465,6 +465,151 @@ async def client_commands(username: str, limit: int = 100,
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "done_at": r.done_at.isoformat() if r.done_at else None,
         } for r in rows]
+
+
+# ═══════════════════ 算法中心(exferdev/js 管理代理, admin)═══════════════════
+
+def _algo_client():
+    """构造算法服务客户端(env 配置; 测试可 patch 该工厂)。"""
+    from .algo_client import AlgoClient
+    url = os.environ.get("CONSOLE_ALGO_URL", "https://js.faryi.com")
+    admin_key = os.environ.get("CONSOLE_ALGO_ADMIN_KEY", "") or ""
+    return AlgoClient(url, admin_key)
+
+
+@app.get("/api/algo/status")
+async def algo_status(_u: ConsoleUser = view_roles):
+    try:
+        return {"ok": True, "health": await _algo_client().health()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/algo/catalog")
+async def algo_catalog(_u: ConsoleUser = view_roles):
+    try:
+        return {"ok": True, **await _algo_client().catalog()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/algo/metrics")
+async def algo_metrics(_u: ConsoleUser = view_roles):
+    client = _algo_client()
+    try:
+        snap = await client.metrics()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    hist = await _algo_metrics_sample(snap)
+    return {"ok": True, "metrics": snap, "history": hist}
+
+
+class AlgoSwitchIn(BaseModel):
+    platform: str
+    algorithm: str
+    version: str
+
+
+@app.post("/api/algo/switch")
+async def algo_switch(request: Request, body: AlgoSwitchIn,
+                      _admin: ConsoleUser = manage_roles):
+    try:
+        out = await _algo_client().switch(body.platform, body.algorithm,
+                                          body.version)
+    except Exception as e:
+        raise HTTPException(502, str(e))
+    _audit(request, None, "algo.switch",
+           detail=f"{body.platform}/{body.algorithm} → {body.version}")
+    return {"ok": True, **out}
+
+
+class AlgoKeyIn(BaseModel):
+    name: str = ""
+
+
+@app.get("/api/algo/keys")
+async def algo_keys_list(_u: ConsoleUser = view_roles):
+    with get_session() as s:
+        rows = s.exec(select(AlgoKey).order_by(AlgoKey.id)).all()
+        return [{"id": r.id, "name": r.name, "enabled": r.enabled,
+                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                 "key_prefix": (r.key_value or "")[:12] + "…"} for r in rows]
+
+
+@app.post("/api/algo/keys", status_code=201)
+async def algo_keys_create(request: Request, body: AlgoKeyIn,
+                           _admin: ConsoleUser = manage_roles):
+    import secrets as _secrets
+    key = _secrets.token_urlsafe(32)
+    with get_session() as s:
+        row = AlgoKey(name=body.name.strip()[:40] or "unnamed", key_value=key)
+        s.add(row)
+        s.commit()
+        kid = row.id
+    _audit(request, None, "algo.key.create",
+           detail=f"生成算法密钥 #{kid} (需同步写入 Worker secrets)")
+    return {"id": kid, "key_value": key,
+            "note": "请立即保存; Worker 侧执行: wrangler secret put ALGO_KEYS <现有,新key>"}
+
+
+@app.delete("/api/algo/keys/{key_id}")
+async def algo_keys_delete(request: Request, key_id: int,
+                           _admin: ConsoleUser = manage_roles):
+    with get_session() as s:
+        row = s.get(AlgoKey, key_id)
+        if row is None:
+            raise HTTPException(404, "密钥不存在")
+        s.delete(row)
+        s.commit()
+    _audit(request, None, "algo.key.delete", detail=f"删除算法密钥 #{key_id}")
+    return {"ok": True}
+
+
+@app.get("/api/algo/client-health")
+async def algo_client_health(_u: ConsoleUser = view_roles):
+    """客户端签名命中健康: 聚合各客户端上报的 sign_health 摘要。"""
+    with get_session() as s:
+        accs = s.exec(select(ClientAccount).order_by(
+            ClientAccount.id)).all()
+        online = accs and accs[0].last_seen_at is not None
+        out = []
+        for a in accs:
+            st = json.loads(a.status_json or "{}")
+            sh = st.get("sign_health") or {}
+            is_online = a.last_seen_at is not None and \
+                datetime.utcnow() - a.last_seen_at <= timedelta(
+                    seconds=POLL_INTERVAL * 3)
+            out.append({
+                "client": a.username, "online": is_online,
+                "disabled": a.disabled, "sign_health": sh,
+            })
+        return {"online_any": bool(online), "clients": out}
+
+
+async def _algo_metrics_sample(snap: dict) -> list[dict]:
+    """把 /metrics 快照落历史样本(保留 7 天)。返回历史(图表用)。"""
+    import json as _json
+    from datetime import timedelta as _td
+    hist: list[dict] = []
+    try:
+        with get_session() as s:
+            from datetime import datetime as _dt
+            s.add(AlgoMetricSample(ts=_dt.utcnow(),
+                                   payload_json=_json.dumps(snap)))
+            old = s.exec(select(AlgoMetricSample).where(
+                AlgoMetricSample.ts < _dt.utcnow() - _td(days=7))).all()
+            for r in old:
+                s.delete(r)
+            rows = s.exec(select(AlgoMetricSample).order_by(
+                AlgoMetricSample.id.desc()).limit(120)).all()
+            hist = [{
+                "ts": r.ts.isoformat() if r.ts else None,
+                "payload": _json.loads(r.payload_json or "{}"),
+            } for r in rows]
+            s.commit()
+    except Exception as e:
+        print(f"[algo] metrics 采样落库失败: {e!r}")
+    return hist
 
 
 @app.get("/api/console/audit")

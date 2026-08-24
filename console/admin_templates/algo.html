@@ -1,0 +1,172 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header d-print-none mb-3"><h1>算法中心</h1></div>
+
+  {% if msg %}
+  <div class="alert {% if ok %}alert-success{% else %}alert-danger{% endif %}" role="alert">{{ msg }}</div>
+  {% endif %}
+  {% if not algo_configured %}
+  <div class="alert alert-warning" role="alert">
+    算法服务未配置: 请设置环境变量 <code>CONSOLE_ALGO_URL</code>(默认 https://js.faryi.com)
+    与 <code>CONSOLE_ALGO_ADMIN_KEY</code>(EXFER 算法服务管理密钥) 后重启控制台。
+  </div>
+  {% endif %}
+
+  <div class="row row-deck row-cards">
+    <div class="col-xl-7">
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">算法注册表 · 版本切换/回滚</h3></div>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead><tr><th>平台</th><th>算法</th><th>版本</th><th>当前</th><th>操作</th></tr></thead>
+            <tbody>
+              {% for p, algos in catalog.items() %}
+                {% for algo, info in algos.items() %}
+                <tr>
+                  <td>{{ p }}</td><td>{{ algo }}</td>
+                  <td>{{ info.versions | join(", ") }}</td>
+                  <td><span class="badge bg-green">{{ info.current }}</span></td>
+                  <td>
+                    {% if info.versions | length > 1 %}
+                    <form method="post" class="d-inline-flex gap-1" style="align-items:center">
+                      <input type="hidden" name="action" value="switch">
+                      <input type="hidden" name="platform" value="{{ p }}">
+                      <input type="hidden" name="algorithm" value="{{ algo }}">
+                      <select name="version" class="form-select form-select-sm" style="width:80px">
+                        {% for v in info.versions %}<option value="{{ v }}" {% if v == info.current %}selected{% endif %}>{{ v }}</option>{% endfor %}
+                      </select>
+                      <button type="submit" class="btn btn-sm btn-primary">切换</button>
+                    </form>
+                    {% else %}<span class="text-muted small">仅 v1(新版本在 js 仓库注册后出现)</span>{% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              {% endfor %}
+              {% if not catalog %}<tr><td colspan="5" class="text-muted">暂无注册表数据</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card mt-3">
+        <div class="card-header"><h3 class="card-title">指标趋势(近 120 个采样, 每分钟窗口)</h3></div>
+        <div class="card-body">
+          <canvas id="algo-chart" style="height:260px"></canvas>
+          <p class="text-muted small mb-0">服务端遥测为多边缘近似值(趋势用途); 采样由本页刷新时收集。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-5">
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">服务健康自检(已知向量断言)</h3></div>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead><tr><th>算法</th><th>结果</th><th>耗时</th></tr></thead>
+            <tbody>
+              {% for a in health_algorithms %}
+              <tr>
+                <td>{{ a.name }}</td>
+                <td>{% if a.ok %}<span class="badge bg-green">OK</span>{% else %}<span class="badge bg-red" title="{{ a.detail }}">FAIL</span>{% endif %}</td>
+                <td class="num">{{ a.ms }}ms</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="card-body text-muted small">全量自检: {{ health_ok }} / {{ health_total }}</div>
+      </div>
+
+      <div class="card mt-3">
+        <div class="card-header"><h3 class="card-title">客户端签名命中健康(轮询上报)</h3></div>
+        <div class="table-responsive">
+          <table class="table table-vcenter">
+            <thead><tr><th>客户端</th><th>在线</th><th>总调用</th><th>成功率</th><th>p95</th><th>最后错误</th></tr></thead>
+            <tbody>
+              {% for c in client_health %}
+              <tr>
+                <td>{{ c.client }}</td>
+                <td>{% if c.online %}<span class="text-success">●</span>{% else %}<span class="text-danger">●</span>{% endif %}</td>
+                <td class="num">{{ c.sign_health.total or 0 }}</td>
+                <td class="num">{{ "%.1f"|format((c.sign_health.ok_rate or 1) * 100) }}%</td>
+                <td class="num">{{ c.sign_health.p95_ms or "—" }}</td>
+                <td style="max-width:200px" class="text-truncate" title="{{ c.sign_health.last_error or "" }}">{{ c.sign_health.last_error or "—" }}</td>
+              </tr>
+              {% endfor %}
+              {% if not client_health %}<tr><td colspan="6" class="text-muted">无客户端接入</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+        <div class="card-body small text-muted">需要客户端 ≥ 本轮(M4)版本并接入控制面轮询; 字段: sign_health(成功率/总调用/p95/最后错误)。</div>
+      </div>
+
+      <div class="card mt-3">
+        <div class="card-header"><h3 class="card-title">客户端 API 密钥管理</h3></div>
+        <div class="card-body">
+          <form method="post" class="d-flex gap-2 mb-2">
+            <input type="hidden" name="action" value="key_create">
+            <input name="key_name" class="form-control" placeholder="用途备注(如: 客户端 srv-1)" style="max-width:240px">
+            <button type="submit" class="btn btn-primary">生成密钥</button>
+          </form>
+          {% if new_key_value %}
+          <div class="alert alert-info small" id="new-key-box">
+            <b>新密钥(仅显示一次):</b> <code>{{ new_key_value }}</code><br>
+            <span class="text-muted">请立即保存并同步到 Worker:
+            <code>npx wrangler secret put ALGO_KEYS</code> 填入 现有密钥 + "," + 新密钥, 重新 wrangler deploy 后生效。</span>
+          </div>
+          {% endif %}
+          <table class="table table-vcenter">
+            <thead><tr><th>ID</th><th>名称</th><th>密钥前缀</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              {% for k in keys %}
+              <tr>
+                <td class="num">{{ k.id }}</td><td>{{ k.name }}</td>
+                <td><code>{{ k.key_prefix }}</code></td>
+                <td>{% if k.enabled %}<span class="badge bg-green">启用</span>{% else %}<span class="badge bg-red">停用</span>{% endif %}</td>
+                <td><form method="post" onsubmit="return confirm('确认删除该密钥登记?')"><input type="hidden" name="action" value="key_delete"><input type="hidden" name="key_id" value="{{ k.id }}"><button class="btn btn-sm btn-outline-danger" type="submit">删除</button></form></td>
+              </tr>
+              {% endfor %}
+              {% if not keys %}<tr><td colspan="5" class="text-muted">暂无登记密钥</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script>
+(function () {
+  const history = {{ history_json | safe }};
+  const el = document.getElementById("algo-chart");
+  if (!el) return;
+  if (typeof echarts === "undefined") { el.innerHTML = '<span class="text-muted">ECharts 加载失败(离线环境), 仅显示当前窗口数字。</span>'; return; }
+  const times = history.map(h => (h.ts || "").slice(11, 16));
+  const series = {};
+  for (const h of history) {
+    const algos = (h.payload && h.payload.algorithms) || {};
+    for (const [key, v] of Object.entries(algos)) {
+      if (!series[key]) series[key] = { rate: [], err: [], p95: [] };
+      series[key].rate.push(v.rate_per_min || 0);
+      series[key].err.push(v.errors || 0);
+      series[key].p95.push(v.p95_ms || null);
+    }
+  }
+  const chart = echarts.init(el);
+  const legend = Object.keys(series);
+  chart.setOption({
+    tooltip: { trigger: "axis" },
+    legend: { data: legend.map(k => k + " QPS") , type: "scroll"},
+    grid: { left: 40, right: 20, top: 34, bottom: 24 },
+    xAxis: { type: "category", data: times, axisLabel: { fontSize: 10 } },
+    yAxis: [{ type: "value", name: "QPS" }, { type: "value", name: "p95(ms)" }],
+    series: legend.flatMap(k => [
+      { name: k + " QPS", type: "line", showSymbol: false, data: series[k].rate, yAxisIndex: 0 },
+      { name: k + " p95", type: "line", showSymbol: false, data: series[k].p95, yAxisIndex: 1, lineStyle: { type: "dashed" } },
+    ]),
+  });
+  window.addEventListener("resize", () => chart.resize());
+})();
+</script>
+{% endblock %}

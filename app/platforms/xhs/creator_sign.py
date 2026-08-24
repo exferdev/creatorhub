@@ -43,21 +43,29 @@ def _api_key() -> str:
 
 
 def _post(algorithm: str, payload: dict) -> dict:
-    """调远程签名服务；失败重试 _MAX_ATTEMPTS 次，仍失败抛 RuntimeError(含明细)。"""
+    """调远程签名服务；失败重试 _MAX_ATTEMPTS 次，仍失败抛 RuntimeError(含明细)。
+    调用统计计入 sign_stats(随控制面轮询上报)。"""
     import curl_cffi.requests as cr
     import time as _t
+    from ..sign_stats import record as _sig_record
     url = f"{_BASE_URL}/sign/xhs/{algorithm}"
     headers = {"X-Api-Key": _api_key()} if _api_key() else {}
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        t0 = _t.perf_counter()
         try:
             resp = cr.post(url, json=payload, timeout=_TIMEOUT, headers=headers)
             if resp.status_code == 401:
+                _sig_record("xhs", False, _t.perf_counter() - t0,
+                            "401: X-Api-Key 无效或未配置")
                 raise RuntimeError(
                     "sign service 401: X-Api-Key 无效或未配置(SIGN_API_KEY)")
             data = resp.json()
             if not isinstance(data, dict) or not data.get("ok"):
+                _sig_record("xhs", False, _t.perf_counter() - t0,
+                            f"{data.get('error', resp.status_code)}")
                 raise RuntimeError(
                     f"sign service error: {data.get('error', resp.status_code)}")
+            _sig_record("xhs", True, _t.perf_counter() - t0)
             return data
         except RuntimeError:
             if attempt < _MAX_ATTEMPTS:
@@ -65,14 +73,16 @@ def _post(algorithm: str, payload: dict) -> dict:
                 continue
             raise
         except Exception as e:
-            if attempt < _MAX_ATTEMPTS:
-                _t.sleep(attempt)
-                continue
             status = ""
             try:
                 status = f" HTTP {getattr(e.response, 'status_code', '')}"
             except Exception:
                 pass
+            _sig_record("xhs", False, _t.perf_counter() - t0,
+                        f"{type(e).__name__}{status} {str(e)[:120]}")
+            if attempt < _MAX_ATTEMPTS:
+                _t.sleep(attempt)
+                continue
             raise RuntimeError(
                 f"sign service unreachable: {type(e).__name__}{status} "
                 f"{str(e)[:120]} (url={url})") from e

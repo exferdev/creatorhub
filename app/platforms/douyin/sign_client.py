@@ -47,23 +47,29 @@ def last_error() -> str:
 
 def _post(algorithm: str, payload: dict) -> dict:
     """调用远程签名服务; 失败重试 _MAX_ATTEMPTS 次, 最终抛 SignServiceError。
-    每次失败都会更新 _LAST_ERROR 为可读明细。"""
+    每次失败都会更新 _LAST_ERROR 为可读明细。调用统计计入 sign_stats(上报用)。"""
     global _LAST_ERROR
+    import time as _t
+    from ..sign_stats import record as _sig_record
     import curl_cffi.requests as cr
     url = f"{_BASE_URL}/sign/douyin/{algorithm}"
     headers = {"X-Api-Key": _api_key()} if _api_key() else {}
     detail = ""
     for attempt in range(1, _MAX_ATTEMPTS + 1):
+        t0 = _t.perf_counter()
         try:
             resp = cr.post(url, json=payload, timeout=_TIMEOUT, headers=headers)
             if resp.status_code == 401:
                 detail = "签名服务返回 401: X-Api-Key 无效或未配置(SIGN_API_KEY)"
+                _sig_record("douyin", False, _t.perf_counter() - t0, detail)
                 raise SignServiceError(detail)
             data = resp.json()
             if not data.get("ok"):
                 detail = f"服务返回错误: {data.get('error', resp.status_code)}"
+                _sig_record("douyin", False, _t.perf_counter() - t0, detail)
                 raise SignServiceError(detail)
             _LAST_ERROR = ""
+            _sig_record("douyin", True, _t.perf_counter() - t0)
             return data
         except SignServiceError:
             if attempt < _MAX_ATTEMPTS:
@@ -79,6 +85,7 @@ def _post(algorithm: str, payload: dict) -> dict:
                 pass
             detail = (f"请求失败 {type(e).__name__}{status}: "
                       f"{str(e)[:120]} (url={url})")
+            _sig_record("douyin", False, _t.perf_counter() - t0, detail)
             if attempt < _MAX_ATTEMPTS:
                 time.sleep(attempt)
                 continue
