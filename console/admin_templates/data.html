@@ -1,0 +1,98 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid">
+  <div class="page-header d-print-none mb-3">
+    <div class="d-flex justify-content-between align-items-center">
+      <h1>数据中心</h1>
+      <a href="/admin/data?export=1" class="btn btn-outline-primary">
+        <i class="fa-solid fa-file-csv me-1"></i>导出 CSV</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3 class="card-title">平台总览(当前快照, 全部客户端合计)</h3></div>
+    <div class="table-responsive">
+      <table class="table table-vcenter">
+        <thead><tr><th>平台</th><th>客户端</th><th>账号</th><th>监控目标</th><th>作品</th><th>评论</th><th>弹幕</th><th>下载</th></tr></thead>
+        <tbody>
+          {% for p in matrix %}
+          <tr>
+            <td>{{ p.platform }}</td><td class="num">{{ p.clients }}</td>
+            <td class="num">{{ p.accounts }}</td><td class="num">{{ p.monitors }}</td>
+            <td class="num">{{ p.works }}</td><td class="num">{{ p.comments }}</td>
+            <td class="num">{{ p.danmaku }}</td><td class="num">{{ p.downloads }}</td>
+          </tr>
+          {% endfor %}
+          {% if not matrix %}<tr><td colspan="8" class="text-muted">暂无数据(等待客户端上报 platform_stats)</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-header">
+      <h3 class="card-title">趋势(近 7 天, 每客户端汇总)</h3>
+      <div class="ms-auto">
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-primary active" data-metric="works" onclick="switchMetric('works')">作品</button>
+          <button class="btn btn-outline-primary" data-metric="comments" onclick="switchMetric('comments')">评论</button>
+          <button class="btn btn-outline-primary" data-metric="accounts" onclick="switchMetric('accounts')">账号</button>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><canvas id="data-chart" style="height:280px"></canvas></div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-header"><h3 class="card-title">客户端明细(平台 × 客户端)</h3></div>
+    <div class="table-responsive">
+      <table class="table table-vcenter">
+        <thead><tr><th>客户端</th><th>平台</th><th>账号</th><th>监控目标</th><th>作品</th><th>评论</th><th>弹幕</th><th>下载</th><th>在线</th></tr></thead>
+        <tbody>
+          {% for d in detail %}
+          <tr>
+            <td>{{ d.client }}</td><td>{{ d.platform }}</td>
+            <td class="num">{{ d.accounts }}</td><td class="num">{{ d.monitors }}</td>
+            <td class="num">{{ d.works }}</td><td class="num">{{ d.comments }}</td>
+            <td class="num">{{ d.danmaku }}</td><td class="num">{{ d.downloads }}</td>
+            <td>{% if d.online %}<span class="text-success">●</span>{% else %}<span class="text-danger">●</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+          {% if not detail %}<tr><td colspan="9" class="text-muted">无明细数据</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script>
+const TREND = {{ trend_json | safe }};
+let metric = "works";
+function switchMetric(m) {
+  metric = m;
+  document.querySelectorAll("[data-metric]").forEach(b => b.classList.toggle("active", b.dataset.metric === m));
+  draw();
+}
+function draw() {
+  const el = document.getElementById("data-chart");
+  if (!el) return;
+  if (typeof echarts === "undefined") { el.innerHTML = '<span class="text-muted">ECharts 加载失败(离线环境)</span>'; return; }
+  const chart = echarts.init(el);
+  const dates = TREND.dates || [];
+  const series = (TREND.platforms || []).map(p => ({
+    name: p.platform, type: "line", showSymbol: false,
+    data: (p.series[metric] || []),
+  }));
+  chart.setOption({
+    tooltip: { trigger: "axis" },
+    legend: { data: (TREND.platforms || []).map(p => p.platform), type: "scroll" },
+    grid: { left: 44, right: 20, top: 34, bottom: 24 },
+    xAxis: { type: "category", data: dates, axisLabel: { fontSize: 10, rotate: 30 } },
+    yAxis: { type: "value", minInterval: 1 },
+    series,
+  });
+  window.addEventListener("resize", () => chart.resize());
+}
+window.addEventListener("DOMContentLoaded", draw);
+</script>
+{% endblock %}

@@ -26,7 +26,7 @@ from .console_auth import (auth_backend, auth_bypass_enabled, current_user,
                            hash_password, require_roles)
 from .db import get_session
 from .models import (AlgoKey, AlgoMetricSample, ClientAccount, ClientAudit,
-                     ClientCommand, ConsoleAudit, ConsoleUser)
+                     ClientCommand, ClientMetric, ConsoleAudit, ConsoleUser)
 
 _DEFAULT_DB = str(Path(__file__).resolve().parent.parent / "console" / "data" / "console.db")
 
@@ -250,6 +250,39 @@ class PollIn(BaseModel):
     receipts: list[dict] = PydanticField(default_factory=list)
 
 
+def _upsert_client_metrics(client_id: int, client_name: str,
+                           pstats: list[dict]):
+    """platform_stats → ClientMetric 5 分钟桶(upsert), 并清理 7 天前数据。"""
+    import time as _t
+    from datetime import timedelta as _td
+    from .models import ClientMetric as _CM
+    bucket = int(_t.time() // 300)
+    with get_session() as s:
+        for item in pstats:
+            if not isinstance(item, dict):
+                continue
+            platform = str(item.get("platform") or "unknown")[:20]
+            row = s.exec(select(_CM).where(
+                _CM.client_id == client_id, _CM.platform == platform,
+                _CM.bucket == bucket)).first()
+            if row is None:
+                row = _CM(client_id=client_id, client_name=client_name,
+                          platform=platform, bucket=bucket)
+                s.add(row)
+            for field in ("accounts", "monitors", "works", "comments",
+                          "danmaku", "downloads"):
+                try:
+                    setattr(row, field, int(item.get(field) or 0))
+                except Exception:
+                    pass
+            s.add(row)
+        cutoff = datetime.utcnow() - _td(days=7)
+        old = s.exec(select(_CM).where(_CM.ts < cutoff)).all()
+        for r in old:
+            s.delete(r)
+        s.commit()
+
+
 @app.post("/api/clients/poll")
 async def client_poll(request: Request, body: PollIn):
     """客户端心跳轮询: 上报状态/审计增量/指令回执, 取走待办指令。"""
@@ -268,6 +301,7 @@ async def client_poll(request: Request, body: PollIn):
             return {"ok": True, "disabled": True,
                     "commands": [], "poll_interval": POLL_INTERVAL}
         acc.last_seen_at = datetime.utcnow()
+        status_snapshot = body.status or {}
         if body.status:
             acc.status_json = json.dumps(body.status, ensure_ascii=False)[:4000]
             acc.version = str(body.status.get("version") or acc.version)[:40]
@@ -275,6 +309,13 @@ async def client_poll(request: Request, body: PollIn):
         s.add(acc)
         s.commit()
         cid, cname = acc.id, acc.username
+    # 平台统计落桶(M1 数据中心趋势; 5 分钟桶, 保留 7 天)
+    pstats = status_snapshot.get("platform_stats") or []
+    if isinstance(pstats, list) and pstats:
+        try:
+            _upsert_client_metrics(cid, cname, pstats)
+        except Exception as e:
+            print(f"[console] 指标落桶失败: {e!r}")
     # 审计增量入库(封顶防滥用)
     batch = (body.audit or [])[:AUDIT_BATCH_LIMIT]
     if batch:

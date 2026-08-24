@@ -286,13 +286,34 @@ class DashboardView(CustomView):
             ConsoleAudit.id.desc()).limit(10)).scalars().all()
         client_audits = session.execute(select(ClientAudit).order_by(
             ClientAudit.id.desc()).limit(8)).scalars().all()
+        # 跨平台合计(M1: 解析各客户端 status_json.platform_stats)
+        sums = {"accounts": 0, "works": 0, "comments": 0, "monitors": 0}
+        platforms: dict = {}
+        accs = session.execute(select(ClientAccount)).scalars().all()
+        for a in accs:
+            st = json.loads(a.status_json or "{}")
+            for item in st.get("platform_stats") or []:
+                if not isinstance(item, dict):
+                    continue
+                p = str(item.get("platform") or "unknown")
+                plats = platforms.setdefault(p, {
+                    "platform": p, "clients": 0, "accounts": 0,
+                    "works": 0, "comments": 0})
+                plats["clients"] += 1
+                for k in ("accounts", "works", "comments", "monitors"):
+                    v = int(item.get(k) or 0)
+                    sums[k] += v
+                    if k != "monitors":
+                        plats[k] += v
         return templates.TemplateResponse(request=request,
                                           name=self.template_path,
                                           context={
             "title": self.title(request),
             "stats": {"clients": int(total), "online": int(online),
                       "disabled": int(disabled),
-                      "pending_cmds": int(pending)},
+                      "pending_cmds": int(pending),
+                      **{k: int(v) for k, v in sums.items()},
+                      "platforms": list(platforms.values())},
             "audits": audits, "client_audits": client_audits,
         })
 
@@ -466,6 +487,116 @@ class AlgoCenterView(CustomView):
             pass
 
 
+class DataCenterView(CustomView):
+    """数据中心: 平台总览矩阵 + 客户端明细 + 7 天趋势 + CSV 导出。
+
+    数据: 当前快照来自各客户端 status_json.platform_stats;
+    趋势来自 ClientMetric(5 分钟桶, 按日聚合)。
+    """
+    icon = "fa-solid fa-database"
+
+    def __init__(self):
+        super().__init__(label="数据中心", icon=self.icon,
+                         path="/data", template_path="data.html",
+                         methods=["GET"])
+
+    def _snapshot(self):
+        """聚合 status_json.platform_stats → 矩阵 + 明细。"""
+        from datetime import datetime as _dt, timedelta as _td
+        from sqlmodel import select as _sel
+        from .main import POLL_INTERVAL as _PI
+        matrix: dict = {}
+        detail: list = []
+        with get_session() as s:
+            accs = s.exec(_sel(ClientAccount).order_by(
+                ClientAccount.id)).all()
+            for a in accs:
+                online = a.last_seen_at is not None and \
+                    _dt.utcnow() - a.last_seen_at <= _td(seconds=_PI * 3)
+                st = json.loads(a.status_json or "{}")
+                pstats = st.get("platform_stats") or []
+                for item in pstats:
+                    if not isinstance(item, dict):
+                        continue
+                    platform = str(item.get("platform") or "unknown")
+                    m = matrix.setdefault(platform, {
+                        "platform": platform, "clients": 0, "accounts": 0,
+                        "monitors": 0, "works": 0, "comments": 0,
+                        "danmaku": 0, "downloads": 0})
+                    m["clients"] += 1
+                    for k in ("accounts", "monitors", "works", "comments",
+                              "danmaku", "downloads"):
+                        m[k] += int(item.get(k) or 0)
+                    detail.append({
+                        "client": a.username, "platform": platform,
+                        "accounts": int(item.get("accounts") or 0),
+                        "monitors": int(item.get("monitors") or 0),
+                        "works": int(item.get("works") or 0),
+                        "comments": int(item.get("comments") or 0),
+                        "danmaku": int(item.get("danmaku") or 0),
+                        "downloads": int(item.get("downloads") or 0),
+                        "online": online,
+                    })
+        return list(matrix.values()), detail
+
+    def _trend(self):
+        """ClientMetric 按 (platform, 日期) 聚合近 7 天。"""
+        from sqlmodel import func, select as _sel
+        from .models import ClientMetric as _CM
+        out = {"dates": [], "platforms": []}
+        try:
+            with get_session() as s:
+                rows = s.exec(_sel(
+                    _CM.platform, func.date(_CM.ts),
+                    func.sum(_CM.accounts), func.sum(_CM.works),
+                    func.sum(_CM.comments),
+                ).group_by(_CM.platform, func.date(_CM.ts)).order_by(
+                    func.date(_CM.ts))).all()
+            day_map: dict = {}
+            plat_map: dict = {}
+            for platform, day, accounts, works, comments in rows:
+                if day not in day_map:
+                    day_map[day] = len(day_map)
+                    out["dates"].append(day)
+                plat_map.setdefault(platform, {})[day] = {
+                    "accounts": int(accounts or 0),
+                    "works": int(works or 0),
+                    "comments": int(comments or 0),
+                }
+            out["platforms"] = [
+                {"platform": p, "series": {
+                    metric: [v.get(metric, 0) for v in
+                             [vals.get(d, {}) for d in out["dates"]]]
+                    for metric in ("accounts", "works", "comments")}}
+                for p, vals in plat_map.items()]
+        except Exception as e:
+            print(f"[data] 趋势查询失败: {e!r}")
+        return out
+
+    async def render(self, request: Request, templates) -> Response:
+        matrix, detail = self._snapshot()
+        if request.query_params.get("export") == "1":
+            import io
+            buf = io.StringIO()
+            buf.write("platform,clients,accounts,monitors,works,comments,danmaku,downloads\n")
+            for row in matrix:
+                buf.write(",".join(str(row.get(k, 0)) for k in
+                                   ("platform", "clients", "accounts",
+                                    "monitors", "works", "comments",
+                                    "danmaku", "downloads")) + "\n")
+            return Response(
+                content=buf.getvalue().encode("utf-8-sig"),
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition":
+                         'attachment; filename="data-center.csv"'})
+        return templates.TemplateResponse(
+            request=request, name=self.template_path,
+            context={"title": self.title(request), "matrix": matrix,
+                     "detail": detail,
+                     "trend_json": json.dumps(self._trend(),
+                                              ensure_ascii=False)})
+
+
 def build_admin(engine) -> BaseAdmin:
     from pathlib import Path
     from starlette.middleware import Middleware
@@ -483,6 +614,7 @@ def build_admin(engine) -> BaseAdmin:
         middlewares=[Middleware(SessionMiddleware, secret_key=ADMIN_SECRET)],
     )
     admin.add_view(ClientAccountView(ClientAccount))
+    admin.add_view(DataCenterView())
     admin.add_view(ClientAuditView(ClientAudit))
     admin.add_view(ClientCommandView(ClientCommand))
     admin.add_view(ConsoleAuditView(ConsoleAudit))

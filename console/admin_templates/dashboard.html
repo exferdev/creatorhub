@@ -31,6 +31,47 @@
         <div class="display-6 fw-bold text-warning">{{ stats.pending_cmds }}</div>
       </div></div>
     </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">账号合计</div>
+        <div class="display-6 fw-bold">{{ stats.accounts }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">作品合计</div>
+        <div class="display-6 fw-bold">{{ stats.works }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">评论合计</div>
+        <div class="display-6 fw-bold">{{ stats.comments }}</div>
+      </div></div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+      <div class="card"><div class="card-body">
+        <div class="text-muted">监控目标</div>
+        <div class="display-6 fw-bold">{{ stats.monitors }}</div>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-header"><h3 class="card-title">平台摘要(全部客户端合计)</h3></div>
+    <div class="table-responsive">
+      <table class="table table-vcenter">
+        <thead><tr><th>平台</th><th>客户端</th><th>账号</th><th>作品</th><th>评论</th></tr></thead>
+        <tbody>
+          {% for p in stats.platforms %}
+          <tr><td>{{ p.platform }}</td><td class="num">{{ p.clients }}</td>
+            <td class="num">{{ p.accounts }}</td><td class="num">{{ p.works }}</td>
+            <td class="num">{{ p.comments }}</td></tr>
+          {% endfor %}
+          {% if not stats.platforms %}<tr><td colspan="5" class="text-muted">暂无平台数据</td></tr>{% endif %}
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <div class="row mt-3">

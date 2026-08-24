@@ -100,7 +100,36 @@ def _collect_status(cfg: Config) -> dict:
         out["sign_health"] = _sign_snapshot()
     except Exception:
         pass
+    # 平台维度统计(M1: 数据中心/中控台矩阵数据源)
+    try:
+        out["platform_stats"] = _collect_platform_stats()
+    except Exception:
+        pass
     return out
+
+
+def _collect_platform_stats(limit: int = 20000) -> list[dict]:
+    """按平台聚合: 账号/监控/作品/评论/弹幕/下载 六类计数。"""
+    from .db import get_session
+    from .models import (CommentRecord, ContentRecord, DanmakuRecord,
+                         DouyinAccount, MonitorTarget, ShareDownloadRecord)
+    from sqlmodel import select, func
+    counts: dict = {
+        "accounts": DouyinAccount, "monitors": MonitorTarget,
+        "works": ContentRecord, "comments": CommentRecord,
+        "danmaku": DanmakuRecord, "downloads": ShareDownloadRecord}
+    rows: dict = {}  # platform -> dict of counts
+    with get_session() as s:
+        for name, model in counts.items():
+            try:
+                q = s.exec(select(model.platform, func.count()).group_by(
+                    model.platform))
+                for platform, n in q:
+                    entry = rows.setdefault(platform or "unknown", {})
+                    entry[name] = int(n)
+            except Exception:
+                continue
+    return [{"platform": p, **c} for p, c in rows.items()]
 
 
 def _collect_audit_delta(cfg: Config, limit: int = 50) -> list[dict]:

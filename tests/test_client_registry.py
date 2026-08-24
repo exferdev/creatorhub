@@ -141,6 +141,24 @@ class ClientRegistryTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("未知指令", result)
 
+    def test_platform_stats_reported(self):
+        # 造少量数据再采集: 平台统计出现在状态里
+        import app.client_registry as cr
+        from app.models import DouyinAccount, MonitorTarget
+        with get_session() as s:
+            s.add(DouyinAccount(platform="douyin", nickname="a1"))
+            s.add(DouyinAccount(platform="xhs", nickname="a2"))
+            s.add(MonitorTarget(platform="douyin", sec_uid="t1"))
+            s.commit()
+        cfg = _cfg()
+        status = cr._collect_status(cfg)   # 同步采集
+        stats = {p["platform"]: p for p in status["platform_stats"]}
+        self.assertIn("douyin", stats)
+        self.assertGreaterEqual(stats["douyin"]["accounts"], 1)
+        self.assertGreaterEqual(stats["douyin"]["monitors"], 1)
+        self.assertIn("xhs", stats)
+        self.assertIn("sign_health", status)
+
 
 class _FakeClientFactory:
     def __init__(self, transport, real_cls):

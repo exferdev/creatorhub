@@ -229,6 +229,50 @@ class AlgoCenterTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, r.text[:200])
             self.assertIn("新密钥(仅显示一次)", r.text)
 
+    def test_client_poll_stores_metrics_and_data_page(self):
+        """M1: 轮询 platform_stats → ClientMetric 落桶; 数据中心/仪表盘渲染。"""
+        from console.models import ClientMetric
+        with TestClient(self.app) as client:
+            # 客户端注册 + 上报含 platform_stats
+            tok = self.cm_client_token(client)
+            r = client.post("/api/clients/poll", headers={
+                "X-Client-Token": tok}, json={
+                "status": {"version": "1.0", "platform_stats": [
+                    {"platform": "douyin", "accounts": 3, "monitors": 2,
+                     "works": 10, "comments": 40, "danmaku": 5,
+                     "downloads": 1}]},
+                "audit": [], "receipts": []})
+            self.assertEqual(r.status_code, 200, r.text)
+            with cdb.get_session() as s:
+                rows = s.exec(select(ClientMetric)).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].platform, "douyin")
+            self.assertEqual(rows[0].accounts, 3)
+            # 数据中心页: 矩阵 + 明细 + 趋势JSON
+            client.post("/admin/login",
+                        data={"username": "boss", "password": "boss-pass-1"})
+            r = client.get("/admin/data")
+            self.assertEqual(r.status_code, 200, r.text[:300])
+            self.assertIn("平台总览", r.text)
+            self.assertIn("douyin", r.text)
+            self.assertIn("TREND =", r.text)
+            # CSV 导出
+            r = client.get("/admin/data?export=1")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("csv", r.headers.get(
+                "content-type", ""), r.headers.get("content-type", ""))
+            # 仪表盘: 跨平台合计卡
+            r = client.get("/admin/")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("账号合计", r.text)
+            self.assertIn("平台摘要", r.text)
+
+    def cm_client_token(self, client):
+        r = client.post("/api/clients/register", json={
+            "username": "dc1", "password": "dc-pass-1", "version": "1.0"})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()["client_token"]
+
     def _client(self):
         return TestClient(self.app)
 

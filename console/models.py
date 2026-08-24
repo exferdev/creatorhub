@@ -76,6 +76,25 @@ class ClientAudit(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class ClientMetric(SQLModel, table=True):
+    """数据中心趋势样本: 客户端×平台 5 分钟桶快照(保留 7 天)。
+
+    由轮询 status.platform_stats upsert; 趋势图/矩阵来源。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    client_id: int = Field(index=True)
+    client_name: str = ""
+    platform: str = Field(index=True)
+    bucket: int = Field(index=True)        # epoch 秒 // 300
+    accounts: int = Field(default=0)
+    monitors: int = Field(default=0)
+    works: int = Field(default=0)
+    comments: int = Field(default=0)
+    danmaku: int = Field(default=0)
+    downloads: int = Field(default=0)
+    ts: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
 class AlgoKey(SQLModel, table=True):
     """算法服务客户端密钥登记(签发后需同步写入 Worker secrets 才生效)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
