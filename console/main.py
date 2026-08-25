@@ -59,11 +59,17 @@ async def lifespan(app: FastAPI):
         print(f"[console] 后台管理挂载跳过(需要 starlette-admin): {e!r}")
     # 算法服务指标后台采样(每 60s; 无管理密钥时静默跳过)
     import asyncio as _asyncio
-    sampler = _asyncio.create_task(_algo_sampler_loop())
+    from .apprise_alerts import run_alert_loop, run_retention_loop
+    tasks = [
+        _asyncio.create_task(_algo_sampler_loop()),
+        _asyncio.create_task(run_alert_loop()),
+        _asyncio.create_task(run_retention_loop()),
+    ]
     try:
         yield
     finally:
-        sampler.cancel()
+        for t in tasks:
+            t.cancel()
 
 
 app = FastAPI(title="CreatorHub Console", lifespan=lifespan)

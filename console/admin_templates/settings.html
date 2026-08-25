@@ -1,0 +1,104 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid px-3">
+  <div class="page-header d-print-none mb-4"><h1>设置</h1></div>
+
+  {% if msg %}
+  <div class="alert {% if ok %}alert-success{% else %}alert-danger{% endif %}" role="alert">{{ msg }}</div>
+  {% endif %}
+
+  <div class="row g-3">
+    <div class="col-12 col-xl-6">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">告警通道(Apprise: 邮件/Telegram/钉钉/Webhook…)</h3></div>
+        <div class="card-body py-3">
+          <form method="post" class="mb-3">
+            <input type="hidden" name="action" value="channel_add">
+            <div class="row g-2">
+              <div class="col-4"><input name="ch_name" class="form-control" placeholder="名称, 如: 运维钉钉群" required></div>
+              <div class="col-8"><input name="ch_urls" class="form-control" placeholder="Apprise URL(多条用换行)" required></div>
+              <div class="col-12 mt-2">
+                <button type="submit" class="btn btn-primary">添加通道</button>
+              </div>
+            </div>
+          </form>
+          <div class="table-responsive" style="max-height:300px">
+            <table class="table table-vcenter align-middle">
+              <thead><tr><th>ID</th><th>名称</th><th>URL 数</th><th>状态</th><th>测试</th><th>删除</th></tr></thead>
+              <tbody>
+                {% for ch in channels %}
+                <tr>
+                  <td class="num">{{ ch.id }}</td><td>{{ ch.name }}</td>
+                  <td class="num">{{ ch.url_count }}</td>
+                  <td>{% if ch.enabled %}<span class="badge bg-green">启用</span>{% else %}<span class="badge bg-red">停用</span>{% endif %}</td>
+                  <td>
+                    <form method="post">
+                      <input type="hidden" name="action" value="channel_test">
+                      <input type="hidden" name="ch_id" value="{{ ch.id }}">
+                      <button type="submit" class="btn btn-sm btn-outline-primary">发送测试</button>
+                    </form>
+                  </td>
+                  <td>
+                    <form method="post" onsubmit="return confirm('删除该通道?')">
+                      <input type="hidden" name="action" value="channel_del">
+                      <input type="hidden" name="ch_id" value="{{ ch.id }}">
+                      <button type="submit" class="btn btn-sm btn-outline-danger">删除</button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+                {% if not channels %}<tr><td colspan="6" class="text-muted">暂无通道(添加后才会发送告警)</td></tr>{% endif %}
+              </tbody>
+            </table>
+          </div>
+          <div class="form-hint mt-2">Apprise URL 示例: <code>mailto://user:pass@host:587?to=xxx@qq.com</code> /
+            <code>tgram://bot_token</code> / <code>dingtalk://token</code> / <code>json://webhook</code></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-xl-6">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">告警规则与保留策略</h3></div>
+        <div class="card-body py-3">
+          <form method="post">
+            <input type="hidden" name="action" value="settings_save">
+            <div class="mb-3 form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="offline_alert_enabled" value="1"
+                     id="sw-off" {% if settings.offline_alert_enabled == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="sw-off">客户端离线告警</label>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">离线判定阈值(秒)</label>
+              <input name="offline_after_seconds" type="number" min="30" step="10"
+                     class="form-control" value="{{ settings.offline_after_seconds }}" style="max-width:180px">
+            </div>
+            <div class="mb-3 form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="task_fail_alert_enabled" value="1"
+                     id="sw-tf" {% if settings.task_fail_alert_enabled == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="sw-tf">任务失败告警</label>
+            </div>
+            <div class="mb-3 form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="sign_health_alert_enabled" value="1"
+                     id="sw-sh" {% if settings.sign_health_alert_enabled == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="sw-sh">签名命中率告警</label>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">签名成功率阈值(0~1)</label>
+              <input name="sign_ok_rate_threshold" type="number" min="0" max="1" step="0.05"
+                     class="form-control" value="{{ settings.sign_ok_rate_threshold }}" style="max-width:180px">
+            </div>
+            <div class="mb-3">
+              <label class="form-label">审计/指令保留天数</label>
+              <input name="retention_days" type="number" min="7" max="3650" step="1"
+                     class="form-control" value="{{ settings.retention_days }}" style="max-width:180px">
+            </div>
+            <button type="submit" class="btn btn-primary">保存设置</button>
+            <span class="form-hint ms-2">保存后立即生效(告警检查每 60 秒一轮)</span>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

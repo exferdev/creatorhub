@@ -723,6 +723,116 @@ class TasksView(CustomView):
             pass
 
 
+class SettingsView(CustomView):
+    """设置: 告警通道(Apprise) + 告警规则 + 保留策略。"""
+    icon = "fa-solid fa-gear"
+
+    def __init__(self):
+        super().__init__(label="设置", icon=self.icon,
+                         path="/settings", template_path="settings.html",
+                         methods=["GET", "POST"])
+
+    async def render(self, request: Request, templates) -> Response:
+        from .apprise_alerts import (DEFAULTS, get_setting, send_alert,
+                                     set_setting)
+        from sqlmodel import select
+        ctx = {"title": self.title(request), "msg": None, "ok": False,
+               "settings": None, "channels": []}
+        if request.method == "POST":
+            form = await request.form()
+            action = str(form.get("action") or "")
+            try:
+                if action == "channel_add":
+                    name = str(form.get("ch_name") or "").strip()[:40]
+                    urls = str(form.get("ch_urls") or "").strip()
+                    if name and urls:
+                        with get_session() as s:
+                            from .models import AppriseChannel as _AC
+                            s.add(_AC(name=name, notify_urls=urls))
+                            s.commit()
+                        ctx.update(msg=f"通道 {name} 已添加", ok=True)
+                        self._ar(request, "channel.add", f"通道 {name}")
+                    else:
+                        ctx.update(msg="通道名称与 URL 必填")
+                elif action == "channel_test":
+                    cid = int(form.get("ch_id") or 0)
+                    with get_session() as s:
+                        from .models import AppriseChannel as _AC
+                        ch = s.get(_AC, cid)
+                        urls = ch.notify_urls if ch else ""
+                        name = ch.name if ch else "?"
+                    ok = await _notify_to(urls, "CreatorHub 测试通知",
+                                          "这是一条测试消息, 收到说明通道配置正常 ✓")
+                    ctx.update(msg=f"通道 {name} 测试" + ("成功" if ok else "失败"),
+                               ok=ok)
+                elif action == "channel_del":
+                    cid = int(form.get("ch_id") or 0)
+                    with get_session() as s:
+                        from .models import AppriseChannel as _AC
+                        row = s.get(_AC, cid)
+                        if row:
+                            s.delete(row)
+                            s.commit()
+                    ctx.update(msg="通道已删除", ok=True)
+                    self._ar(request, "channel.delete", f"通道 #{cid}")
+                elif action == "settings_save":
+                    for key in ("offline_after_seconds", "sign_ok_rate_threshold",
+                                "retention_days"):
+                        val = str(form.get(key) or "").strip()
+                        if val:
+                            set_setting(key, val)
+                    for key in ("offline_alert_enabled", "task_fail_alert_enabled",
+                                "sign_health_alert_enabled"):
+                        set_setting(key, "1" if form.get(key) == "1" else "0")
+                    ctx.update(msg="设置已保存", ok=True)
+                    self._ar(request, "settings.save", "告警/保留设置")
+                else:
+                    ctx.update(msg=f"未知操作: {action}")
+            except Exception as e:
+                ctx.update(msg=f"操作失败: {e}")
+        # 数据
+        from .apprise_alerts import DEFAULTS as _DF
+        settings = {}
+        for k, default in _DF.items():
+            settings[k] = get_setting(k, default)
+        ctx["settings"] = settings
+        with get_session() as s:
+            from .models import AppriseChannel as _AC
+            rows = s.exec(select(_AC).order_by(_AC.id)).all()
+            ctx["channels"] = [{
+                "id": r.id, "name": r.name, "enabled": r.enabled,
+                "url_count": len([u for u in (r.notify_urls or "").splitlines()
+                                  if u.strip()]),
+            } for r in rows]
+        return templates.TemplateResponse(request=request,
+                                          name=self.template_path,
+                                          context=ctx)
+
+    def _ar(self, request: Request, action_name: str, detail: str = ""):
+        try:
+            with get_session() as s:
+                s.add(ConsoleAudit(
+                    username=request.session.get("console_user", "") or "",
+                    action=action_name, ok=True, detail=detail[:500]))
+                s.commit()
+        except Exception:
+            pass
+
+
+async def _notify_to(urls: str, title: str, body: str) -> bool:
+    """向指定 Apprise URL 列表发通知(测试用)。"""
+    import asyncio as _a
+    import apprise as _apprise
+    ap = _apprise.Apprise()
+    added = 0
+    for u in [x.strip() for x in (urls or "").splitlines() if x.strip()]:
+        if ap.add(u):
+            added += 1
+    if not added:
+        return False
+    return await _a.to_thread(ap.notify, title=title, body=body)
+
+
 def build_admin(engine) -> BaseAdmin:
     from pathlib import Path
     from starlette.middleware import Middleware
@@ -760,6 +870,8 @@ def build_admin(engine) -> BaseAdmin:
     admin.add_view(ConsoleAuditView(ConsoleAudit))
     admin.add_view(ConsoleUserView(ConsoleUser))
     admin.add_view(AlgoCenterView())
+    admin.add_view(TasksView())
     admin.add_view(GuideView())
+    admin.add_view(SettingsView())
     admin.add_view(PasswordView())
     return admin

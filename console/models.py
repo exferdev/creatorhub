@@ -95,6 +95,22 @@ class ClientMetric(SQLModel, table=True):
     ts: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
+class Setting(SQLModel, table=True):
+    """控制台设置(KV)。值均为字符串(JSON/数字/布尔)。"""
+    key: str = Field(primary_key=True)
+    value: str = ""
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AppriseChannel(SQLModel, table=True):
+    """告警通知渠道(Apprise URL, 每行一条)。"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""
+    notify_urls: str = ""            # Apprise URL, 每行一条
+    enabled: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class AlgoKey(SQLModel, table=True):
     """算法服务客户端密钥登记(签发后需同步写入 Worker secrets 才生效)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
