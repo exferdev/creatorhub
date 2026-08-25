@@ -54,10 +54,17 @@
 
     <div class="col-12">
       <div class="card">
-        <div class="card-header py-2"><h3 class="card-title">指标趋势(近 120 个采样, 每分钟窗口)</h3></div>
+        <div class="card-header py-2 d-flex align-items-center justify-content-between">
+          <h3 class="card-title mb-0">指标趋势(最近 60 个采样, 每 60 秒后台采集)</h3>
+          <div class="btn-group btn-group-sm" role="group" aria-label="指标切换">
+            <button type="button" class="btn btn-outline-primary active" data-ametric="qps" onclick="switchAMetric('qps')">QPS</button>
+            <button type="button" class="btn btn-outline-primary" data-ametric="p95" onclick="switchAMetric('p95')">延迟 p95</button>
+            <button type="button" class="btn btn-outline-primary" data-ametric="err" onclick="switchAMetric('err')">错误</button>
+          </div>
+        </div>
         <div class="card-body py-3">
           <canvas id="algo-chart" style="height:320px;width:100%"></canvas>
-          <p class="text-muted small mb-0 mt-2">服务端遥测为多边缘近似值(趋势用途); 采样由本页刷新时收集。</p>
+          <p class="text-muted small mb-0 mt-2">服务端遥测为多边缘近似值(趋势用途); 控制台每 60 秒后台采样一次。</p>
         </div>
       </div>
     </div>
@@ -149,36 +156,59 @@
 </div>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script>
-(function () {
-  const history = {{ history_json | safe }};
+// 历史样本(正序, 早→晚); 每样本含各算法的 qps/p95/错误数
+const HISTORY = {{ history_json | safe }} || [];
+let ametric = "qps";
+function switchAMetric(m) {
+  ametric = m;
+  document.querySelectorAll("[data-ametric]").forEach(b =>
+    b.classList.toggle("active", b.dataset.ametric === m));
+  drawAlgo();
+}
+function drawAlgo() {
   const el = document.getElementById("algo-chart");
   if (!el) return;
-  if (typeof echarts === "undefined") { el.innerHTML = '<span class="text-muted">ECharts 加载失败(离线环境), 仅显示当前窗口数字。</span>'; return; }
-  const times = history.map(h => (h.ts || "").slice(11, 16));
-  const series = {};
-  for (const h of history) {
+  if (typeof echarts === "undefined") {
+    el.innerHTML = '<span class="text-muted">ECharts 加载失败(离线环境)</span>';
+    return;
+  }
+  // 仅取最近 60 个样本
+  const hist = HISTORY.slice(-60);
+  const dates = hist.map(h => (h.ts || "").slice(11, 16));
+  if (!dates.length) {
+    el.innerHTML = '<span class="text-muted">暂无采样数据(等待后台 60s 采样)</span>';
+    return;
+  }
+  // 按算法聚合系列
+  const byAlgo = {};
+  for (const h of hist) {
     const algos = (h.payload && h.payload.algorithms) || {};
     for (const [key, v] of Object.entries(algos)) {
-      if (!series[key]) series[key] = { rate: [], err: [], p95: [] };
-      series[key].rate.push(v.rate_per_min || 0);
-      series[key].err.push(v.errors || 0);
-      series[key].p95.push(v.p95_ms || null);
+      if (!byAlgo[key]) byAlgo[key] = { qps: [], p95: [], err: [] };
+      byAlgo[key].qps.push(v.rate_per_min || 0);
+      byAlgo[key].p95.push(v.p95_ms != null ? v.p95_ms : null);
+      byAlgo[key].err.push(v.errors || 0);
     }
   }
+  const legendKeys = Object.keys(byAlgo);
+  const series = legendKeys.map(k => ({
+    name: k, type: "line", showSymbol: false, connectNulls: true,
+    data: byAlgo[k][ametric],
+  }));
   const chart = echarts.init(el);
-  const legend = Object.keys(series);
   chart.setOption({
-    tooltip: { trigger: "axis" },
-    legend: { data: legend.map(k => k + " QPS") , type: "scroll"},
-    grid: { left: 44, right: 20, top: 34, bottom: 28 },
-    xAxis: { type: "category", data: times, axisLabel: { fontSize: 10 } },
-    yAxis: [{ type: "value", name: "QPS" }, { type: "value", name: "p95(ms)" }],
-    series: legend.flatMap(k => [
-      { name: k + " QPS", type: "line", showSymbol: false, data: series[k].rate, yAxisIndex: 0 },
-      { name: k + " p95", type: "line", showSymbol: false, data: series[k].p95, yAxisIndex: 1, lineStyle: { type: "dashed" } },
-    ]),
+    tooltip: { trigger: "axis", valueFormatter: v => (v == null ? "—" : v) },
+    legend: { data: legendKeys, type: "scroll", top: 0 },
+    grid: { left: 48, right: 24, top: 34, bottom: 28 },
+    xAxis: {
+      type: "category", data: dates,
+      axisLabel: { fontSize: 10, interval: Math.max(0, Math.floor(dates.length / 10) - 1) },
+    },
+    yAxis: { type: "value", minInterval: 1 },
+    series,
   });
   window.addEventListener("resize", () => chart.resize());
-})();
+}
+window.addEventListener("DOMContentLoaded", drawAlgo);
 </script>
 {% endblock %}

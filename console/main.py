@@ -57,7 +57,13 @@ async def lifespan(app: FastAPI):
             print("[console] 后台管理 /admin 已挂载(starlette-admin)")
     except Exception as e:
         print(f"[console] 后台管理挂载跳过(需要 starlette-admin): {e!r}")
-    yield
+    # 算法服务指标后台采样(每 60s; 无管理密钥时静默跳过)
+    import asyncio as _asyncio
+    sampler = _asyncio.create_task(_algo_sampler_loop())
+    try:
+        yield
+    finally:
+        sampler.cancel()
 
 
 app = FastAPI(title="CreatorHub Console", lifespan=lifespan)
@@ -628,7 +634,7 @@ async def algo_client_health(_u: ConsoleUser = view_roles):
 
 
 async def _algo_metrics_sample(snap: dict) -> list[dict]:
-    """把 /metrics 快照落历史样本(保留 7 天)。返回历史(图表用)。"""
+    """把 /metrics 快照落历史样本(保留 7 天)。返回历史(正序, 图表用)。"""
     import json as _json
     from datetime import timedelta as _td
     hist: list[dict] = []
@@ -650,7 +656,22 @@ async def _algo_metrics_sample(snap: dict) -> list[dict]:
             s.commit()
     except Exception as e:
         print(f"[algo] metrics 采样落库失败: {e!r}")
+    hist.reverse()   # 正序(早→晚), 图表时间轴不再倒退
     return hist
+
+
+async def _algo_sampler_loop():
+    """后台采样: 每 60s 拉一次算法服务 /metrics 落历史样本(页面驱动改为定时)。"""
+    import asyncio as _a
+    while True:
+        try:
+            client = _algo_client()
+            snap = await client.metrics()
+            if isinstance(snap, dict) and snap.get("ok"):
+                await _algo_metrics_sample(snap)
+        except Exception as e:
+            print(f"[algo] 后台采样失败: {e!r}")
+        await _a.sleep(60)
 
 
 @app.get("/api/console/audit")
