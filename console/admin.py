@@ -601,7 +601,17 @@ def build_admin(engine) -> BaseAdmin:
     from pathlib import Path
     from starlette.middleware import Middleware
     from starlette.middleware.sessions import SessionMiddleware
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette_admin.contrib.sqla import Admin as SqlaAdmin
+
+    class NoCacheMiddleware(BaseHTTPMiddleware):
+        """后台页面一律 no-store, 防浏览器启发式缓存旧排版。"""
+        async def dispatch(self, request, call_next):
+            resp = await call_next(request)
+            resp.headers["Cache-Control"] = "no-store"
+            resp.headers["Pragma"] = "no-cache"
+            return resp
+
     # 注意: 必须用 sqla 的 Admin(自动挂 SQLAlchemyMiddleware → request.state.session)
     tpl_dir = str(Path(__file__).resolve().parent / "admin_templates")
     admin = SqlaAdmin(
@@ -611,7 +621,10 @@ def build_admin(engine) -> BaseAdmin:
         templates_dir=tpl_dir,
         index_view=DashboardView(),
         auth_provider=ConsoleAuthProvider(),
-        middlewares=[Middleware(SessionMiddleware, secret_key=ADMIN_SECRET)],
+        middlewares=[
+            Middleware(SessionMiddleware, secret_key=ADMIN_SECRET),
+            Middleware(NoCacheMiddleware),
+        ],
     )
     admin.add_view(ClientAccountView(ClientAccount))
     admin.add_view(DataCenterView())
