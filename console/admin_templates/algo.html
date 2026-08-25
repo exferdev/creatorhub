@@ -1,6 +1,6 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="container-fluid">
+<div class="container-fluid px-2 px-xl-4">
   <div class="page-header d-print-none mb-3"><h1>算法中心</h1></div>
 
   {% if msg %}
@@ -13,13 +13,13 @@
   </div>
   {% endif %}
 
-  <div class="row row-deck row-cards">
-    <div class="col-xl-7">
-      <div class="card">
+  <div class="row row-deck g-3">
+    <div class="col-12 col-xl-7">
+      <div class="card h-100">
         <div class="card-header"><h3 class="card-title">算法注册表 · 版本切换/回滚</h3></div>
-        <div class="table-responsive">
-          <table class="table table-vcenter">
-            <thead><tr><th>平台</th><th>算法</th><th>版本</th><th>当前</th><th>操作</th></tr></thead>
+        <div class="table-responsive" style="max-height:320px">
+          <table class="table table-vcenter table-nowrap">
+            <thead class="thead-light"><tr><th>平台</th><th>算法</th><th>版本</th><th>当前</th><th>操作</th></tr></thead>
             <tbody>
               {% for p, algos in catalog.items() %}
                 {% for algo, info in algos.items() %}
@@ -52,18 +52,18 @@
       <div class="card mt-3">
         <div class="card-header"><h3 class="card-title">指标趋势(近 120 个采样, 每分钟窗口)</h3></div>
         <div class="card-body">
-          <canvas id="algo-chart" style="height:260px"></canvas>
+          <canvas id="algo-chart" style="height:300px;width:100%"></canvas>
           <p class="text-muted small mb-0">服务端遥测为多边缘近似值(趋势用途); 采样由本页刷新时收集。</p>
         </div>
       </div>
     </div>
 
-    <div class="col-xl-5">
-      <div class="card">
+    <div class="col-12 col-xl-5">
+      <div class="card h-100">
         <div class="card-header"><h3 class="card-title">服务健康自检(已知向量断言)</h3></div>
-        <div class="table-responsive">
-          <table class="table table-vcenter">
-            <thead><tr><th>算法</th><th>结果</th><th>耗时</th></tr></thead>
+        <div class="table-responsive" style="max-height:320px">
+          <table class="table table-vcenter table-nowrap">
+            <thead class="thead-light"><tr><th>算法</th><th>结果</th><th>耗时</th></tr></thead>
             <tbody>
               {% for a in health_algorithms %}
               <tr>
@@ -80,9 +80,9 @@
 
       <div class="card mt-3">
         <div class="card-header"><h3 class="card-title">客户端签名命中健康(轮询上报)</h3></div>
-        <div class="table-responsive">
-          <table class="table table-vcenter">
-            <thead><tr><th>客户端</th><th>在线</th><th>总调用</th><th>成功率</th><th>p95</th><th>最后错误</th></tr></thead>
+        <div class="table-responsive" style="max-height:320px">
+          <table class="table table-vcenter table-nowrap">
+            <thead class="thead-light"><tr><th>客户端</th><th>在线</th><th>总调用</th><th>成功率</th><th>p95</th><th>最后错误</th></tr></thead>
             <tbody>
               {% for c in client_health %}
               <tr>
@@ -104,20 +104,21 @@
       <div class="card mt-3">
         <div class="card-header"><h3 class="card-title">客户端 API 密钥管理</h3></div>
         <div class="card-body">
-          <form method="post" class="d-flex gap-2 mb-2">
+          <form method="post" class="d-flex gap-2 mb-2 flex-wrap">
             <input type="hidden" name="action" value="key_create">
             <input name="key_name" class="form-control" placeholder="用途备注(如: 客户端 srv-1)" style="max-width:240px">
             <button type="submit" class="btn btn-primary">生成密钥</button>
           </form>
           {% if new_key_value %}
           <div class="alert alert-info small" id="new-key-box">
-            <b>新密钥(仅显示一次):</b> <code>{{ new_key_value }}</code><br>
+            <b>新密钥(仅显示一次):</b> <code style="word-break:break-all">{{ new_key_value }}</code><br>
             <span class="text-muted">请立即保存并同步到 Worker:
             <code>npx wrangler secret put ALGO_KEYS</code> 填入 现有密钥 + "," + 新密钥, 重新 wrangler deploy 后生效。</span>
           </div>
           {% endif %}
-          <table class="table table-vcenter">
-            <thead><tr><th>ID</th><th>名称</th><th>密钥前缀</th><th>状态</th><th>操作</th></tr></thead>
+          <div class="table-responsive" style="max-height:260px">
+          <table class="table table-vcenter table-nowrap">
+            <thead class="thead-light"><tr><th>ID</th><th>名称</th><th>密钥前缀</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {% for k in keys %}
               <tr>
@@ -130,6 +131,7 @@
               {% if not keys %}<tr><td colspan="5" class="text-muted">暂无登记密钥</td></tr>{% endif %}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </div>

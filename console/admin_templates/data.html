@@ -1,6 +1,6 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="container-fluid">
+<div class="container-fluid px-2 px-xl-4">
   <div class="page-header d-print-none mb-3">
     <div class="d-flex justify-content-between align-items-center">
       <h1>数据中心</h1>
@@ -9,27 +9,39 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card mb-3">
     <div class="card-header"><h3 class="card-title">平台总览(当前快照, 全部客户端合计)</h3></div>
-    <div class="table-responsive">
-      <table class="table table-vcenter">
-        <thead><tr><th>平台</th><th>客户端</th><th>账号</th><th>监控目标</th><th>作品</th><th>评论</th><th>弹幕</th><th>下载</th></tr></thead>
-        <tbody>
-          {% for p in matrix %}
-          <tr>
-            <td>{{ p.platform }}</td><td class="num">{{ p.clients }}</td>
-            <td class="num">{{ p.accounts }}</td><td class="num">{{ p.monitors }}</td>
-            <td class="num">{{ p.works }}</td><td class="num">{{ p.comments }}</td>
-            <td class="num">{{ p.danmaku }}</td><td class="num">{{ p.downloads }}</td>
-          </tr>
-          {% endfor %}
-          {% if not matrix %}<tr><td colspan="8" class="text-muted">暂无数据(等待客户端上报 platform_stats)</td></tr>{% endif %}
-        </tbody>
-      </table>
+    <div class="card-body py-3">
+      {% if matrix %}
+      <div class="row g-3">
+        {% for p in matrix %}
+        <div class="col-sm-6 col-lg-4 col-xxl-3">
+          <div class="card card-sm h-100">
+            <div class="card-body">
+              <div class="d-flex align-items-center gap-2 mb-2">
+                <span class="badge bg-blue-lt">{{ p.platform }}</span>
+                <span class="text-muted small">客户端 {{ p.clients }}</span>
+              </div>
+              <div class="row g-2 text-center">
+                <div class="col-4"><div class="fw-bold">{{ p.accounts }}</div><div class="text-muted small">账号</div></div>
+                <div class="col-4"><div class="fw-bold">{{ p.works }}</div><div class="text-muted small">作品</div></div>
+                <div class="col-4"><div class="fw-bold">{{ p.comments }}</div><div class="text-muted small">评论</div></div>
+                <div class="col-4"><div class="fw-bold">{{ p.monitors }}</div><div class="text-muted small">监控</div></div>
+                <div class="col-4"><div class="fw-bold">{{ p.danmaku }}</div><div class="text-muted small">弹幕</div></div>
+                <div class="col-4"><div class="fw-bold">{{ p.downloads }}</div><div class="text-muted small">下载</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="text-muted">暂无数据(等待客户端上报 platform_stats)</div>
+      {% endif %}
     </div>
   </div>
 
-  <div class="card mt-3">
+  <div class="card mb-3">
     <div class="card-header">
       <h3 class="card-title">趋势(近 7 天, 每客户端汇总)</h3>
       <div class="ms-auto">
@@ -40,14 +52,14 @@
         </div>
       </div>
     </div>
-    <div class="card-body"><canvas id="data-chart" style="height:280px"></canvas></div>
+    <div class="card-body"><canvas id="data-chart" style="height:300px;width:100%"></canvas></div>
   </div>
 
-  <div class="card mt-3">
+  <div class="card mb-1">
     <div class="card-header"><h3 class="card-title">客户端明细(平台 × 客户端)</h3></div>
-    <div class="table-responsive">
-      <table class="table table-vcenter">
-        <thead><tr><th>客户端</th><th>平台</th><th>账号</th><th>监控目标</th><th>作品</th><th>评论</th><th>弹幕</th><th>下载</th><th>在线</th></tr></thead>
+    <div class="table-responsive" style="max-height:420px">
+      <table class="table table-vcenter table-nowrap">
+        <thead class="thead-light"><tr><th>客户端</th><th>平台</th><th>账号</th><th>监控目标</th><th>作品</th><th>评论</th><th>弹幕</th><th>下载</th><th>在线</th></tr></thead>
         <tbody>
           {% for d in detail %}
           <tr>
