@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="container-fluid px-2 px-xl-4">
-  <div class="page-header d-print-none mb-3"><h1>算法中心</h1></div>
+<div class="container-fluid px-3">
+  <div class="page-header d-print-none mb-4"><h1>算法中心</h1></div>
 
   {% if msg %}
   <div class="alert {% if ok %}alert-success{% else %}alert-danger{% endif %}" role="alert">{{ msg }}</div>
@@ -13,13 +13,15 @@
   </div>
   {% endif %}
 
-  <div class="row row-deck g-3">
+  <!-- 每张表独占一行: row g-3 统一卡片间距 -->
+  <div class="row g-3">
+
     <div class="col-12">
-      <div class="card h-100">
-        <div class="card-header"><h3 class="card-title">算法注册表 · 版本切换/回滚</h3></div>
-        <div class="table-responsive" style="max-height:320px">
-          <table class="table table-vcenter table-nowrap">
-            <thead class="thead-light"><tr><th>平台</th><th>算法</th><th>版本</th><th>当前</th><th>操作</th></tr></thead>
+      <div class="card card-table">
+        <div class="card-header py-2"><h3 class="card-title">算法注册表 · 版本切换/回滚</h3></div>
+        <div class="table-responsive" style="max-height:340px">
+          <table class="table table-vcenter align-middle">
+            <thead><tr><th>平台</th><th>算法</th><th>版本</th><th>当前</th><th>操作</th></tr></thead>
             <tbody>
               {% for p, algos in catalog.items() %}
                 {% for algo, info in algos.items() %}
@@ -33,7 +35,7 @@
                       <input type="hidden" name="action" value="switch">
                       <input type="hidden" name="platform" value="{{ p }}">
                       <input type="hidden" name="algorithm" value="{{ algo }}">
-                      <select name="version" class="form-select form-select-sm" style="width:80px">
+                      <select name="version" class="form-select form-select-sm" style="width:90px">
                         {% for v in info.versions %}<option value="{{ v }}" {% if v == info.current %}selected{% endif %}>{{ v }}</option>{% endfor %}
                       </select>
                       <button type="submit" class="btn btn-sm btn-primary">切换</button>
@@ -48,22 +50,24 @@
           </table>
         </div>
       </div>
+    </div>
 
-      <div class="card mt-3">
-        <div class="card-header"><h3 class="card-title">指标趋势(近 120 个采样, 每分钟窗口)</h3></div>
-        <div class="card-body">
-          <canvas id="algo-chart" style="height:300px;width:100%"></canvas>
-          <p class="text-muted small mb-0">服务端遥测为多边缘近似值(趋势用途); 采样由本页刷新时收集。</p>
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">指标趋势(近 120 个采样, 每分钟窗口)</h3></div>
+        <div class="card-body py-3">
+          <canvas id="algo-chart" style="height:320px;width:100%"></canvas>
+          <p class="text-muted small mb-0 mt-2">服务端遥测为多边缘近似值(趋势用途); 采样由本页刷新时收集。</p>
         </div>
       </div>
     </div>
 
     <div class="col-12">
-      <div class="card h-100">
-        <div class="card-header"><h3 class="card-title">服务健康自检(已知向量断言)</h3></div>
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">服务健康自检(已知向量断言)</h3></div>
         <div class="table-responsive" style="max-height:320px">
-          <table class="table table-vcenter table-nowrap">
-            <thead class="thead-light"><tr><th>算法</th><th>结果</th><th>耗时</th></tr></thead>
+          <table class="table table-vcenter align-middle">
+            <thead><tr><th>算法</th><th>结果</th><th>耗时</th></tr></thead>
             <tbody>
               {% for a in health_algorithms %}
               <tr>
@@ -72,17 +76,20 @@
                 <td class="num">{{ a.ms }}ms</td>
               </tr>
               {% endfor %}
+              {% if not health_algorithms %}<tr><td colspan="3" class="text-muted">自检无数据</td></tr>{% endif %}
             </tbody>
           </table>
         </div>
-        <div class="card-body text-muted small">全量自检: {{ health_ok }} / {{ health_total }}</div>
+        <div class="card-body py-2 text-muted small">全量自检: {{ health_ok }} / {{ health_total }}</div>
       </div>
+    </div>
 
-      <div class="card mt-3">
-        <div class="card-header"><h3 class="card-title">客户端签名命中健康(轮询上报)</h3></div>
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">客户端签名命中健康(轮询上报)</h3></div>
         <div class="table-responsive" style="max-height:320px">
-          <table class="table table-vcenter table-nowrap">
-            <thead class="thead-light"><tr><th>客户端</th><th>在线</th><th>总调用</th><th>成功率</th><th>p95</th><th>最后错误</th></tr></thead>
+          <table class="table table-vcenter align-middle">
+            <thead><tr><th>客户端</th><th>在线</th><th>总调用</th><th>成功率</th><th>p95</th><th>最后错误</th></tr></thead>
             <tbody>
               {% for c in client_health %}
               <tr>
@@ -91,34 +98,36 @@
                 <td class="num">{{ c.sign_health.total or 0 }}</td>
                 <td class="num">{{ "%.1f"|format((c.sign_health.ok_rate or 1) * 100) }}%</td>
                 <td class="num">{{ c.sign_health.p95_ms or "—" }}</td>
-                <td style="max-width:200px" class="text-truncate" title="{{ c.sign_health.last_error or "" }}">{{ c.sign_health.last_error or "—" }}</td>
+                <td style="max-width:250px" class="text-truncate" title="{{ c.sign_health.last_error or "" }}">{{ c.sign_health.last_error or "—" }}</td>
               </tr>
               {% endfor %}
               {% if not client_health %}<tr><td colspan="6" class="text-muted">无客户端接入</td></tr>{% endif %}
             </tbody>
           </table>
         </div>
-        <div class="card-body small text-muted">需要客户端 ≥ 本轮(M4)版本并接入控制面轮询; 字段: sign_health(成功率/总调用/p95/最后错误)。</div>
+        <div class="card-body py-2 small text-muted">需要客户端 ≥ M4 版本并接入控制面轮询; 字段: sign_health(成功率/总调用/p95/最后错误)。</div>
       </div>
+    </div>
 
-      <div class="card mt-3">
-        <div class="card-header"><h3 class="card-title">客户端 API 密钥管理</h3></div>
-        <div class="card-body">
-          <form method="post" class="d-flex gap-2 mb-2 flex-wrap">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">客户端 API 密钥管理</h3></div>
+        <div class="card-body py-3">
+          <form method="post" class="d-flex gap-2 mb-3 flex-wrap">
             <input type="hidden" name="action" value="key_create">
             <input name="key_name" class="form-control" placeholder="用途备注(如: 客户端 srv-1)" style="max-width:240px">
             <button type="submit" class="btn btn-primary">生成密钥</button>
           </form>
           {% if new_key_value %}
-          <div class="alert alert-info small" id="new-key-box">
+          <div class="alert alert-info small mb-3" id="new-key-box">
             <b>新密钥(仅显示一次):</b> <code style="word-break:break-all">{{ new_key_value }}</code><br>
             <span class="text-muted">请立即保存并同步到 Worker:
             <code>npx wrangler secret put ALGO_KEYS</code> 填入 现有密钥 + "," + 新密钥, 重新 wrangler deploy 后生效。</span>
           </div>
           {% endif %}
           <div class="table-responsive" style="max-height:260px">
-          <table class="table table-vcenter table-nowrap">
-            <thead class="thead-light"><tr><th>ID</th><th>名称</th><th>密钥前缀</th><th>状态</th><th>操作</th></tr></thead>
+          <table class="table table-vcenter align-middle">
+            <thead><tr><th>ID</th><th>名称</th><th>密钥前缀</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {% for k in keys %}
               <tr>
@@ -135,6 +144,7 @@
         </div>
       </div>
     </div>
+
   </div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -160,7 +170,7 @@
   chart.setOption({
     tooltip: { trigger: "axis" },
     legend: { data: legend.map(k => k + " QPS") , type: "scroll"},
-    grid: { left: 40, right: 20, top: 34, bottom: 24 },
+    grid: { left: 44, right: 20, top: 34, bottom: 28 },
     xAxis: { type: "category", data: times, axisLabel: { fontSize: 10 } },
     yAxis: [{ type: "value", name: "QPS" }, { type: "value", name: "p95(ms)" }],
     series: legend.flatMap(k => [
