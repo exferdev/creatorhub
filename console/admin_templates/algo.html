@@ -63,7 +63,7 @@
           </div>
         </div>
         <div class="card-body py-3">
-          <canvas id="algo-chart" style="height:320px;width:100%"></canvas>
+          <div id="algo-chart" style="width:100%;height:320px"></div>
           <p class="text-muted small mb-0 mt-2">服务端遥测为多边缘近似值(趋势用途); 控制台每 60 秒后台采样一次。</p>
         </div>
       </div>
@@ -154,11 +154,12 @@
 
   </div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="/static/vendor/echarts.min.js"></script>
 <script>
 // 历史样本(正序, 早→晚); 每样本含各算法的 qps/p95/错误数
 const HISTORY = {{ history_json | safe }} || [];
 let ametric = "qps";
+let algoChart = null;
 function switchAMetric(m) {
   ametric = m;
   document.querySelectorAll("[data-ametric]").forEach(b =>
@@ -169,17 +170,15 @@ function drawAlgo() {
   const el = document.getElementById("algo-chart");
   if (!el) return;
   if (typeof echarts === "undefined") {
-    el.innerHTML = '<span class="text-muted">ECharts 加载失败(离线环境)</span>';
+    el.innerHTML = '<div class="text-muted p-3">图表库加载失败(echarts.min.js 未随包部署)</div>';
     return;
   }
-  // 仅取最近 60 个样本
   const hist = HISTORY.slice(-60);
   const dates = hist.map(h => (h.ts || "").slice(11, 16));
   if (!dates.length) {
-    el.innerHTML = '<span class="text-muted">暂无采样数据(等待后台 60s 采样)</span>';
+    el.innerHTML = '<div class="text-muted p-3">暂无采样数据(等待每 60 秒后台采样)</div>';
     return;
   }
-  // 按算法聚合系列
   const byAlgo = {};
   for (const h of hist) {
     const algos = (h.payload && h.payload.algorithms) || {};
@@ -191,11 +190,13 @@ function drawAlgo() {
     }
   }
   const legendKeys = Object.keys(byAlgo);
-  const series = legendKeys.map(k => ({
-    name: k, type: "line", showSymbol: false, connectNulls: true,
-    data: byAlgo[k][ametric],
-  }));
-  const chart = echarts.init(el);
+  const chart = algoChart || echarts.init(el, null, {
+    renderer: "canvas",
+    devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+  });
+  algoChart = chart;
+  chart.clear();
+  chart.resize();
   chart.setOption({
     tooltip: { trigger: "axis", valueFormatter: v => (v == null ? "—" : v) },
     legend: { data: legendKeys, type: "scroll", top: 0 },
@@ -205,10 +206,13 @@ function drawAlgo() {
       axisLabel: { fontSize: 10, interval: Math.max(0, Math.floor(dates.length / 10) - 1) },
     },
     yAxis: { type: "value", minInterval: 1 },
-    series,
+    series: legendKeys.map(k => ({
+      name: k, type: "line", showSymbol: false, connectNulls: true,
+      data: byAlgo[k][ametric],
+    })),
   });
-  window.addEventListener("resize", () => chart.resize());
 }
+window.addEventListener("resize", () => { if (algoChart) algoChart.resize(); });
 window.addEventListener("DOMContentLoaded", drawAlgo);
 </script>
 {% endblock %}
