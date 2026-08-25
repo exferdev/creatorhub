@@ -597,6 +597,132 @@ class DataCenterView(CustomView):
                                               ensure_ascii=False)})
 
 
+class TasksView(CustomView):
+    """远程任务: 下发执行器任务 + 历史/筛选/重试。"""
+    icon = "fa-solid fa-play"
+
+    def __init__(self):
+        super().__init__(label="远程任务", icon=self.icon,
+                         path="/tasks", template_path="tasks.html",
+                         methods=["GET", "POST"])
+
+    # 任务类型元信息(与客户端 TASK_REGISTRY 对齐)
+    OPS = {
+        "monitor.run_now": {"label": "监控立即抓取",
+                            "params_desc": "target_id: 监控目标ID",
+                            "default": '{"target_id": 1}'},
+        "collection.run": {"label": "关键词采集重跑",
+                           "params_desc": "job_id: 采集任务ID",
+                           "default": '{"job_id": 1}'},
+        "publish.run": {"label": "发布任务执行",
+                        "params_desc": "task_id: 发布任务ID",
+                        "default": '{"task_id": 1}'},
+        "comment.collect": {"label": "评论监控立即扫描",
+                            "params_desc": "watch_id: 评论监控ID",
+                            "default": '{"watch_id": 1}'},
+        "danmaku.collect": {"label": "弹幕监控立即扫描",
+                            "params_desc": "watch_id: 弹幕监控ID",
+                            "default": '{"watch_id": 1}'},
+        "profile.check": {"label": "Profile 健康自检(轻量)",
+                          "params_desc": "profile_id 可选(缺省=全量摘要)",
+                          "default": '{}'},
+        "risk.set": {"label": "下发风控配置",
+                     "params_desc": "风控配置 JSON(与 /api/risk-control/config 同结构)",
+                     "default": '{"risk_control": {"enabled": true}}'},
+    }
+
+    async def render(self, request: Request, templates) -> Response:
+        from datetime import datetime as _dt, timedelta as _td
+        from sqlmodel import select
+        from .main import POLL_INTERVAL as _PI, ALLOWED_OPS
+        ctx = {"title": self.title(request), "msg": None, "ok": False,
+               "poll_interval": _PI, "ops": self.OPS,
+               "ops_json": json.dumps(self.OPS, ensure_ascii=False)}
+        if request.method == "POST":
+            form = await request.form()
+            action = str(form.get("action") or "")
+            client_name = str(form.get("client") or "").strip()
+            op = str(form.get("op") or "")
+            raw_params = str(form.get("params") or "").strip()
+            try:
+                params = json.loads(raw_params) if raw_params else {}
+                if not isinstance(params, dict):
+                    params = {"_raw": raw_params[:200]}
+            except Exception:
+                params = {"_raw": raw_params[:200]}
+            if action == "dispatch" and client_name and op in ALLOWED_OPS:
+                with get_session() as s:
+                    acc = s.exec(select(ClientAccount).where(
+                        ClientAccount.username == client_name)).first()
+                    if acc is None:
+                        ctx.update(msg=f"客户端不存在: {client_name}")
+                    else:
+                        cmd = ClientCommand(
+                            client_id=acc.id, client_name=acc.username,
+                            op=op, params=json.dumps(params,
+                                                     ensure_ascii=False)[:4000])
+                        s.add(cmd)
+                        s.commit()
+                        cid = cmd.id
+                        ctx.update(msg=f"任务 #{cid} 已下发至 {acc.username}"
+                                   f"(等待轮询执行)", ok=True)
+                        self._ar(request, "task.dispatch",
+                                 f"{acc.username} {op} → #{cid}")
+            elif action == "redispatch" and client_name and op in ALLOWED_OPS:
+                with get_session() as s:
+                    acc = s.exec(select(ClientAccount).where(
+                        ClientAccount.username == client_name)).first()
+                    if acc is None:
+                        ctx.update(msg=f"客户端不存在: {client_name}")
+                    else:
+                        cmd = ClientCommand(
+                            client_id=acc.id, client_name=acc.username,
+                            op=op, params=json.dumps(params,
+                                                     ensure_ascii=False)[:4000])
+                        s.add(cmd)
+                        s.commit()
+                        cid = cmd.id
+                        ctx.update(msg=f"重试任务 #{cid} 已排队", ok=True)
+                        self._ar(request, "task.redispatch", f"#{cid} {op}")
+            else:
+                ctx.update(msg="下发失败: 客户端/任务类型/参数必填"
+                           f" (op={op}, client={client_name})")
+        # 数据
+        now = _dt.utcnow()
+        with get_session() as s:
+            accs = s.exec(select(ClientAccount).order_by(
+                ClientAccount.id)).all()
+            ctx["clients"] = [{
+                "username": a.username, "disabled": a.disabled,
+                "online": a.last_seen_at is not None and
+                now - a.last_seen_at <= _td(seconds=_PI * 3),
+            } for a in accs]
+            status = request.query_params.get("status") or "全部"
+            q = select(ClientCommand)
+            if status in ("pending", "done", "failed"):
+                q = q.where(ClientCommand.status == status)
+            rows = s.exec(q.order_by(ClientCommand.id.desc()).limit(50)).all()
+            ctx["commands"] = [{
+                "id": r.id, "client_name": r.client_name, "op": r.op,
+                "params": r.params, "status": r.status, "result": r.result,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            } for r in rows]
+            ctx["active_status"] = status
+        return templates.TemplateResponse(request=request,
+                                          name=self.template_path,
+                                          context=ctx)
+
+    def _ar(self, request: Request, action_name: str, detail: str = ""):
+        try:
+            with get_session() as s:
+                s.add(ConsoleAudit(
+                    username=request.session.get("console_user", "") or "",
+                    action=action_name, ok=True, detail=detail[:500]))
+                s.commit()
+        except Exception:
+            pass
+
+
 def build_admin(engine) -> BaseAdmin:
     from pathlib import Path
     from starlette.middleware import Middleware
@@ -628,6 +754,7 @@ def build_admin(engine) -> BaseAdmin:
     )
     admin.add_view(ClientAccountView(ClientAccount))
     admin.add_view(DataCenterView())
+    admin.add_view(TasksView())
     admin.add_view(ClientAuditView(ClientAudit))
     admin.add_view(ClientCommandView(ClientCommand))
     admin.add_view(ConsoleAuditView(ConsoleAudit))

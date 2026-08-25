@@ -68,6 +68,7 @@ class AlgoCenterTests(unittest.TestCase):
         os.environ["CONSOLE_ALGO_ADMIN_KEY"] = "admin-secret"
         os.environ["CONSOLE_ALGO_URL"] = "http://fake-algo"
         cdb.init_db(os.environ["CONSOLE_DB_PATH"])
+
         with cdb.get_session() as s:
             s.add(ConsoleUser(username="boss", email="boss@c", role="admin",
                               is_superuser=True,
@@ -75,9 +76,11 @@ class AlgoCenterTests(unittest.TestCase):
             s.add(ConsoleUser(username="vw", email="vw@c", role="viewer",
                               hashed_password=hash_password("vw-pass-123")))
             s.commit()
+        # 每类 reload 获得全新 app(避免跨类共享已挂载的 admin 路由到遗留库)
+        import importlib
         import console.main as cm
-        cls.cm = cm
-        cls.app = cm.app
+        cls.cm = importlib.reload(cm)
+        cls.app = cls.cm.app
 
     @classmethod
     def tearDownClass(cls):

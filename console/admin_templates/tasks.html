@@ -1,0 +1,106 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container-fluid px-3">
+  <div class="page-header d-print-none mb-4"><h1>远程任务</h1></div>
+
+  {% if msg %}
+  <div class="alert {% if ok %}alert-success{% else %}alert-danger{% endif %}" role="alert">{{ msg }}</div>
+  {% endif %}
+
+  <div class="row g-3">
+    <div class="col-12 col-xl-4">
+      <div class="card">
+        <div class="card-header py-2"><h3 class="card-title">下发任务</h3></div>
+        <div class="card-body py-3">
+          <form method="post">
+            <input type="hidden" name="action" value="dispatch">
+            <div class="mb-3">
+              <label class="form-label">目标客户端</label>
+              <select name="client" class="form-select" required>
+                {% if not clients %}<option value="">暂无已注册客户端</option>{% endif %}
+                {% for c in clients %}
+                <option value="{{ c.username }}">{{ c.username }}{% if not c.online %} (离线){% endif %}{% if c.disabled %} (已停用){% endif %}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">任务类型</label>
+              <select name="op" class="form-select" id="task-op" onchange="fillTaskParams()" required>
+                {% for op, spec in ops.items() %}
+                <option value="{{ op }}" data-default="{{ spec.default | e }}">{{ spec.label }} ({{ op }})</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">参数(JSON)</label>
+              <textarea name="params" id="task-params" class="form-control font-monospace" rows="6"
+                        placeholder='{"target_id": 1}' required></textarea>
+              <div class="form-hint" id="task-hint"></div>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">下发执行</button>
+            <div class="form-hint mt-2">客户端在下次轮询(<code>{{ poll_interval }}s</code>)内取走执行并回执。</div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-xl-8">
+      <div class="card">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center">
+          <h3 class="card-title mb-0">任务历史(最近 50 条)</h3>
+          <div class="btn-group btn-group-sm">
+            {% for st in ["全部", "pending", "done", "failed"] %}
+            <a href="{{ request.url.path }}?status={{ st }}" class="btn btn-outline-primary
+               {% if request.query_params.get('status', '全部') == st %}active{% endif %}">{{ st }}</a>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="table-responsive" style="max-height:520px">
+          <table class="table table-vcenter align-middle">
+            <thead><tr><th>ID</th><th>客户端</th><th>任务</th><th>参数</th><th>状态</th><th>结果</th><th>时间</th><th>重试</th></tr></thead>
+            <tbody>
+              {% for c in commands %}
+              <tr>
+                <td class="num">{{ c.id }}</td>
+                <td>{{ c.client_name }}</td>
+                <td><code>{{ c.op }}</code></td>
+                <td class="text-truncate" style="max-width:180px" title="{{ c.params | escape }}">{{ c.params | escape }}</td>
+                <td>
+                  {% if c.status == "done" %}<span class="badge bg-green">成功</span>
+                  {% elif c.status == "failed" %}<span class="badge bg-red">失败</span>
+                  {% else %}<span class="badge bg-yellow">待执行</span>{% endif %}
+                </td>
+                <td class="text-truncate" style="max-width:220px" title="{{ c.result | escape }}">{{ c.result | escape or "—" }}</td>
+                <td class="num text-nowrap">{{ c.created_at[:16] if c.created_at else "" }}</td>
+                <td>
+                  <form method="post" onsubmit="return confirm('重新下发同参数任务?')">
+                    <input type="hidden" name="action" value="redispatch">
+                    <input type="hidden" name="client" value="{{ c.client_name }}">
+                    <input type="hidden" name="op" value="{{ c.op }}">
+                    <input type="hidden" name="params" value="{{ c.params | escape }}">
+                    <button type="submit" class="btn btn-sm btn-outline-primary">重试</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+              {% if not commands %}<tr><td colspan="8" class="text-muted">暂无任务记录</td></tr>{% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const OPS = {{ ops_json | safe }};
+function fillTaskParams() {
+  const sel = document.getElementById("task-op");
+  const params = document.getElementById("task-params");
+  const hint = document.getElementById("task-hint");
+  const spec = OPS[sel.value] || {};
+  if (spec.default) params.value = spec.default;
+  if (spec.params_desc) hint.textContent = spec.params_desc;
+}
+window.addEventListener("DOMContentLoaded", fillTaskParams);
+</script>
+{% endblock %}

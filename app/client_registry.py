@@ -168,21 +168,119 @@ def _collect_audit_delta(cfg: Config, limit: int = 50) -> list[dict]:
 
 
 async def _execute_command(cmd: dict) -> tuple[bool, str]:
-    """执行控制面指令。返回 (ok, result)。"""
+    """执行控制面指令(远程任务)。返回 (ok, result)。"""
     op = cmd.get("op") or ""
     params = cmd.get("params") or {}
     try:
-        if op == "risk.set":
-            from .risk_admin import apply_risk_settings, save_risk_settings
-            from .config import load_config
-            local_cfg = load_config()
-            apply_risk_settings(local_cfg, params or {})
-            save_risk_settings(local_cfg)
-            return True, "risk 配置已应用"
-        return False, f"未知指令: {op}"
+        handler = TASK_REGISTRY.get(op)
+        if handler is None:
+            return False, f"未知指令: {op}"
+        return await handler(params)
     except Exception as e:
         log.exception("指令执行失败: %s", op)
         return False, f"{type(e).__name__}: {str(e)[:200]}"
+
+
+# ── M2 远程任务执行器(M2: 封装现有 engine 动作, 不新写执行逻辑) ──
+
+async def _task_engine_run(fn_name: str, params: dict, id_field: str,
+                           id_label: str) -> tuple[bool, str]:
+    """通用执行器: 从 app.main.engine 取 fn 并调用(延迟 import 防循环)。"""
+    try:
+        rid = int(params.get(id_field) or 0)
+    except (TypeError, ValueError):
+        return False, f"参数 {id_field} 必须是整数"
+    if rid <= 0:
+        return False, f"参数 {id_field} 缺失"
+    from app import main as _m
+    if getattr(_m, "engine", None) is None:
+        return False, "引擎未就绪"
+    fn = getattr(_m.engine, fn_name, None)
+    if fn is None:
+        return False, f"执行器 {fn_name} 不存在"
+    result = await fn(rid)
+    if isinstance(result, dict):
+        ok = bool(result.get("ok", True))
+        return ok, str(result)[:400]
+    return True, str(result)[:200]
+
+
+async def _task_monitor_run_now(params: dict) -> tuple[bool, str]:
+    """监控立即抓取 engine.scan_target(target_id)。"""
+    return await _task_engine_run("scan_target", params, "target_id", "监控目标")
+
+
+async def _task_collection_run(params: dict) -> tuple[bool, str]:
+    """关键词采集重跑 engine.run_collection_job(job_id)。"""
+    return await _task_engine_run("run_collection_job", params, "job_id", "采集任务")
+
+
+async def _task_publish_run(params: dict) -> tuple[bool, str]:
+    """发布任务执行 engine.publish_task(task_id)。"""
+    return await _task_engine_run("publish_task", params, "task_id", "发布任务")
+
+
+async def _task_comment_collect(params: dict) -> tuple[bool, str]:
+    """评论监控立即扫描 engine.scan_comment_watch(watch_id)。"""
+    return await _task_engine_run("scan_comment_watch", params, "watch_id", "评论监控")
+
+
+async def _task_danmaku_collect(params: dict) -> tuple[bool, str]:
+    """弹幕监控立即扫描 engine.scan_danmaku_watch(watch_id)。"""
+    return await _task_engine_run("scan_danmaku_watch", params, "watch_id", "弹幕监控")
+
+
+async def _task_profile_check(params: dict) -> tuple[bool, str]:
+    """Profile 健康自检(轻量, 无浏览器): 存在性/归属/引擎在线。"""
+    from app import main as _m
+    detail = []
+    engine_ok = getattr(_m, "engine", None) is not None
+    detail.append(f"engine={'在线' if engine_ok else '离线'}")
+    try:
+        from .db import get_session
+        from .models import BrowserProfile
+        from sqlmodel import select
+        profile_id = None
+        try:
+            profile_id = int(params.get("profile_id") or 0)
+        except (TypeError, ValueError):
+            profile_id = 0
+        with get_session() as s:
+            if profile_id > 0:
+                p = s.get(BrowserProfile, profile_id)
+                row = [p] if p else []
+            else:
+                row = s.exec(select(BrowserProfile).limit(50)).all()
+            detail.append(f"profiles={len(row)}")
+            detail.append("样例: " + ", ".join(
+                f"#{p.id}:{p.name[:12] or 'unnamed'}"
+                f"({'固定指纹' if p.fingerprint_name else '种子指纹'},"
+                f"{'代理' if p.proxy else '直连'},{'持久化' if p.profile_dir else '临时目录'})"
+                for p in row[:5]))
+    except Exception as e:
+        detail.append(f"profile查询失败: {e!r}")
+    return True, "; ".join(detail)
+
+
+async def _task_risk_set(params: dict) -> tuple[bool, str]:
+    """下发风控配置(客户端本地持久化)。"""
+    from .risk_admin import apply_risk_settings, save_risk_settings
+    from .config import load_config
+    local_cfg = load_config()
+    apply_risk_settings(local_cfg, params or {})
+    save_risk_settings(local_cfg)
+    return True, "risk 配置已应用"
+
+
+TASK_REGISTRY = {
+    "risk.set": _task_risk_set,
+    "monitor.run_now": _task_monitor_run_now,
+    "collection.run": _task_collection_run,
+    "publish.run": _task_publish_run,
+    "comment.collect": _task_comment_collect,
+    "danmaku.collect": _task_danmaku_collect,
+    "profile.check": _task_profile_check,
+}
 
 
 async def _poll_once(cfg: Config, token: str) -> bool:

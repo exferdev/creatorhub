@@ -141,6 +141,34 @@ class ClientRegistryTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("未知指令", result)
 
+    def test_m2_task_executors(self):
+        """远程任务执行器: monitor.run_now 走 engine, 参数缺失给明确错误。"""
+        import app.client_registry as cr
+        # 参数缺失 → 明确错误(不调 engine)
+        ok, result = asyncio.run(_execute_command(
+            {"op": "monitor.run_now", "params": {}}))
+        self.assertFalse(ok)
+        self.assertIn("target_id", result)
+        # 引擎未就绪路径(测试环境 engine=None)
+        ok, result = asyncio.run(cr._task_monitor_run_now(
+            {"target_id": 1}))
+        self.assertFalse(ok)
+        self.assertIn("引擎未就绪", result)
+        # 引擎就绪路径: patch app.main.engine.scan_target
+        import app.main as m
+        class FakeEngine:
+            async def scan_target(self, tid):
+                return {"ok": True, "fetched": 3, "tid": tid}
+        with patch.object(m, "engine", FakeEngine()):
+            ok, result = asyncio.run(cr._task_monitor_run_now(
+                {"target_id": 7}))
+        self.assertTrue(ok)
+        self.assertIn("fetched", result)
+        # profile.check 返回结构
+        ok, result = asyncio.run(cr._task_profile_check({}))
+        self.assertTrue(ok)
+        self.assertIn("engine=", result)
+
     def test_platform_stats_reported(self):
         # 造少量数据再采集: 平台统计出现在状态里
         import app.client_registry as cr

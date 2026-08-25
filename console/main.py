@@ -462,11 +462,18 @@ class CommandIn(BaseModel):
     params: dict = PydanticField(default_factory=dict)
 
 
+# M2 远程任务 op 白名单(与客户端 TASK_REGISTRY 对齐)
+ALLOWED_OPS = ("risk.set", "monitor.run_now", "collection.run",
+               "publish.run", "comment.collect", "danmaku.collect",
+               "profile.check")
+
+
 @app.post("/api/admin/clients/{username}/command")
 async def send_client_command(request: Request, username: str, body: CommandIn,
                               _admin: ConsoleUser = manage_roles):
-    if body.op not in ("risk.set",):
-        raise HTTPException(400, f"暂不支持指令: {body.op}")
+    if body.op not in ALLOWED_OPS:
+        raise HTTPException(400, f"暂不支持指令: {body.op}; 支持: "
+                                 f"{', '.join(ALLOWED_OPS)}")
     with get_session() as s:
         acc = _client_by_username(s, username)
         cmd = ClientCommand(

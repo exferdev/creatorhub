@@ -32,6 +32,7 @@ class AdminUITests(unittest.TestCase):
         cls.db_path = str(Path(cls.tmp) / "console.db")
         os.environ["CONSOLE_DB_PATH"] = cls.db_path
         cdb.init_db(cls.db_path)
+
         with cdb.get_session() as s:
             s.add(ConsoleUser(username="boss", email="boss@c", role="admin",
                               is_superuser=True,
@@ -47,8 +48,11 @@ class AdminUITests(unittest.TestCase):
                                 password_hash=hash_password("cp-2"),
                                 client_token="tok-2", disabled=True))
             s.commit()
+        # 每类 reload console.main 获得全新 app(避免跨类共享已挂载的 admin,
+        # mount 同路径是追加, 旧 admin_app 会优先路由到遗留库)
+        import importlib
         import console.main as cm
-        cls.app = cm.app
+        cls.app = importlib.reload(cm).app
 
     @classmethod
     def tearDownClass(cls):
